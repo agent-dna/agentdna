@@ -41,7 +41,14 @@ This demo represents the use of `agentdna` package for a simple Agent to Github 
     cp .env.sample .env
     ```
 
-    Set the environment variables accordingly
+    Set the environment variables accordingly. Following are the environment variables:
+    ```
+        AGENTDNA_API_KEY=AgentDNA API Key. Get it from here: https://agentdna.io/beta
+        GEMINI_API_KEY=Gemini API Key
+        GITHUB_TOKEN=Github Personal Access Token
+        HOST_AGENT_NAME=Name for the Github Agent
+        MCP_TOOL_NAME=Name for the Github MCP Tool
+    ```
 
 - Run the following to start the demo:
     ```
