@@ -28,14 +28,15 @@ class AgentDNA:
         self,
         alias: str,
         api_key: str,
-        role: str = "remote",        # "host" or "remote"
+        role: str = "remote",
+        chain_url: Optional[str] = None,
         token_filename: str = "agent_info.json",
     ) -> None:
         if role not in ("host", "remote"):
             raise ValueError("AgentDNA.role must be 'host' or 'remote'")
 
         self.role = role
-        self.trust = RubixTrustService(alias=alias,api_key=api_key)
+        self.trust = RubixTrustService(alias=alias,api_key=api_key, chain_url=chain_url)
 
         self.handler = RubixMessageHandler(
             alias=alias,
