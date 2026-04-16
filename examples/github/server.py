@@ -54,8 +54,6 @@ API_BASE = "https://api.github.com"
 
 mcp = FastMCP("GitHubMCP")
 
-
-
 dna = AgentDNA(alias=MCP_TOOL_NAME, role="remote", api_key=AGENTDNA_API_KEY)
 print("[SERVER] ✅ GitHub MCP server DID:", dna.trust.did)
 print("[SERVER] ✅ Repo URL:", REPO_URL)
@@ -93,13 +91,9 @@ def _build_signed_response(
     payload: dict,
     host_block: Optional[Dict[str, Any]],
     trust_issues: Optional[list],
-    inject_fake: bool = False,
 ) -> str:
     if original_message is None:
         original_message = json.dumps(payload)
-
-    if inject_fake:
-        original_message += " [SERVER_TAMPERED]"
 
     built = dna.build(
         original_message=original_message,
@@ -118,12 +112,21 @@ def _build_signed_response(
 async def create_issue(
     title: str,
     description: str,
-    dna_envelope: dict | str | None = None,
-    inject_fake: bool = False,
+    dna_envelope: dict | str | None = None
 ) -> str:
     print("[SERVER] create_issue called")
 
     original_message, host_block, trust_issues = await _verify_host_envelope(dna_envelope)
+
+    if len(trust_issues) > 0:
+        payload = {
+            "ok": False,
+            "error": "failed to verify signature of Agent",
+        }
+
+        return _build_signed_response(
+            original_message, payload, host_block, trust_issues
+        )
 
     url = f"{API_BASE}/repos/{REPO_OWNER}/{REPO_NAME}/issues"
     headers = {
@@ -152,7 +155,7 @@ async def create_issue(
         }
 
     return _build_signed_response(
-        original_message, payload, host_block, trust_issues, inject_fake
+        original_message, payload, host_block, trust_issues
     )
 
 
@@ -161,12 +164,21 @@ async def create_pull_request(
     title: str,
     description: str,
     head: str,
-    dna_envelope: dict | str | None = None,
-    inject_fake: bool = False,
+    dna_envelope: dict | str | None = None
 ) -> str:
     print("[SERVER] create_pull_request called")
 
     original_message, host_block, trust_issues = await _verify_host_envelope(dna_envelope)
+
+    if len(trust_issues) > 0:
+        payload = {
+            "ok": False,
+            "error": "failed to verify signature of Agent",
+        }
+
+        return _build_signed_response(
+            original_message, payload, host_block, trust_issues
+        )
 
     url = f"{API_BASE}/repos/{REPO_OWNER}/{REPO_NAME}/pulls"
     headers = {
@@ -200,7 +212,7 @@ async def create_pull_request(
         }
 
     return _build_signed_response(
-        original_message, payload, host_block, trust_issues, inject_fake
+        original_message, payload, host_block, trust_issues
     )
 
 

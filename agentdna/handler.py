@@ -210,8 +210,8 @@ class RubixMessageHandler:
             if env_path:
                 self.token_path = Path(env_path)
             else:
-                project_root = Path.cwd()   # e.g. /.../host_agent_adk
-                token_dir = project_root / ".agentdna"
+                home_dir = Path.home()
+                token_dir = home_dir / ".agentdna"
                 token_dir.mkdir(parents=True, exist_ok=True)
                 self.token_path = token_dir / token_filename
 

@@ -132,14 +132,6 @@ async def run_agent_turn(user_input: str):
                 **tool_args,
                 "dna_envelope": envelope["host_json"],
             }
-
-            from_streamlit = getattr(__import__("streamlit"), "session_state", None)
-            inject_fake_flag = False
-            if from_streamlit is not None:
-                inject_fake_flag = bool(from_streamlit.get("inject_fake", False))
-
-            if inject_fake_flag:
-                tool_args_with_dna["inject_fake"] = True
             
             # Call the respective MCP tool
             tool_result = await session.call_tool(tool_name, arguments=tool_args_with_dna)
@@ -202,25 +194,11 @@ def run_agent_sync(user_input: str):
 
 st.set_page_config("GitHub MCP Demo")
 
-st.sidebar.subheader("Controls")
-
-if "inject_fake" not in st.session_state:
-    st.session_state.inject_fake = False
-
-st.sidebar.checkbox(
-    "Simulate tampering",
-    key="inject_fake",
-)
-
 handler = getattr(dna, "handler", None)
-if handler is not None:
-    handler.inject_fake = bool(st.session_state.inject_fake)
 
 nft_id = get_nft_token_from_host()
 if not nft_id:
     st.sidebar.write("No NFT token available (dna.handler.nft_token not set)")
-
-latest_only = False
 
 
 st.title("GitHub MCP Agent")

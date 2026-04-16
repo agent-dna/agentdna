@@ -3,7 +3,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from dotenv import load_dotenv
 load_dotenv()
@@ -23,11 +23,19 @@ from rubix.querier import Querier
 ROOT = Path(__file__).parent
 SERVER_PATH = str((ROOT / "server.py").resolve())
 
+SIMULATE_TAMPER = False
+
 AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
 if not AGENTDNA_API_KEY:
     raise RuntimeError("Missing AGENTDNA_API_KEY")
 
-dna = AgentDNA(alias="gsheets_host", role="host", api_key=AGENTDNA_API_KEY)
+
+CHAIN_URL = os.environ.get("CHAIN_URL")
+if not CHAIN_URL:
+    raise RuntimeError("Missing CHAIN_URL")
+
+# Host AgentDNA (assumes your AgentDNA handler is now using Path.home()/.agentdna)
+dna = AgentDNA(alias="gSheets_Host", role="host", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
 node = NodeClient(alias="gsheets_host")
 DEFAULT_BASE_URL = node.get_base_url()
 
@@ -37,7 +45,8 @@ REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "gsheets_server")
 def _server_params() -> StdioServerParameters:
     env_vars = dict(os.environ)
 
-    env_vars["AGENTDNA_HOME"] = str((ROOT / ".agentdna_server").resolve())
+    # ✅ single canonical location in HOME dir (same as host)
+    env_vars["AGENTDNA_HOME"] = str((Path.home() / ".agentdna").resolve())
 
     if "GOOGLE_APPLICATION_CREDENTIALS" in env_vars:
         p = env_vars["GOOGLE_APPLICATION_CREDENTIALS"]
@@ -125,13 +134,19 @@ async def mcp_list_tools() -> List[str]:
 
 def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     """
-    - Builds host envelope via AgentDNA
-    - Calls MCP tool with dna_envelope (+ inject_fake if enabled)
-    - Verifies signed response via dna.handle()
-    - Returns verified payload (parsed JSON) plus debug
+    Updated tamper simulation design:
+
+    - Host signs a canonical message (host_msg) that includes user_query_raw.
+    - Host ALSO sends a transport field 'user_query' to the server.
+    - If inject_fake is enabled, ONLY the transport field is tampered.
+    - Server should compare transport user_query vs signed user_query_raw and REFUSE to execute tool on mismatch.
+    - Host verifies the signed server response via dna.handle() and records it on-chain (execute_nft=True).
     """
+    user_query_raw = user_query or tool_name
+
+    # ✅ Signed canonical message (truth source)
     host_msg = {
-        "user_query": user_query or tool_name,
+        "user_query_raw": user_query_raw,   # <- raw / canonical user request
         "tool_name": tool_name,
         "tool_args": tool_args,
     }
@@ -140,12 +155,20 @@ def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str 
         original_message=json.dumps(host_msg),
         state={"channel": "mcp_gsheets"},
     )
-    dna_envelope = built["host_json"]  
+    dna_envelope = built["host_json"]
 
-    args_with_dna = {**tool_args, "dna_envelope": dna_envelope}
+    # ✅ Transport args to MCP server
+    args_with_dna = {
+        **tool_args,
+        "dna_envelope": dna_envelope,
 
-    if st.session_state.get("inject_fake", False):
-        args_with_dna["inject_fake"] = True
+        # IMPORTANT: This is what the server will compare against signed user_query_raw
+        "user_query": user_query_raw,
+    }
+
+    # ✅ Simulate in-transit tampering: change ONLY the transport field (NOT the signed envelope)
+    if SIMULATE_TAMPER:
+        args_with_dna["user_query"] = user_query_raw + " [TAMPERED_IN_TRANSIT]"
 
     tool_output_text = run(mcp_call_raw(tool_name, args_with_dna))
     signed_text = _extract_signed_text(tool_output_text)
@@ -174,6 +197,7 @@ def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str 
         "trust_issues": trust_issues or [],
         "verified_payload": verified,
     }
+
 
 def decide_action(user_text: str):
     t = user_text.strip()
@@ -206,7 +230,7 @@ def decide_action(user_text: str):
     if "done tasks" in tl or "completed tasks" in tl:
         return {"action": "tool", "tool": "get_tasks", "args": {"status": "done"}}
 
-    # Mark done by UUID 
+    # Mark done by UUID
     m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", tl)
     if m and ("done" in tl or "complete" in tl):
         return {
@@ -215,7 +239,7 @@ def decide_action(user_text: str):
             "args": {"task_id": m.group(1), "status": "done"},
         }
 
-    # Mark done by title phrase 
+    # Mark done by title phrase
     m2 = re.search(r"^(update|mark)\s+(.+?)\s+(to\s+)?(done|complete|completed)$", tl)
     if m2:
         phrase = m2.group(2).strip()
@@ -268,20 +292,10 @@ if "open_tasks" not in st.session_state:
 if "tasks" not in st.session_state:
     st.session_state.tasks = []
 if "view" not in st.session_state:
-    st.session_state.view = "open" 
-if "inject_fake" not in st.session_state:
-    st.session_state.inject_fake = False
+    st.session_state.view = "open"
 
 with st.sidebar:
     st.subheader("Controls")
-    st.checkbox("Simulate tampering", key="inject_fake")
-
-    handler = getattr(dna, "handler", None)
-    if handler is not None:
-        try:
-            handler.inject_fake = bool(st.session_state.inject_fake)
-        except Exception:
-            pass
 
     st.session_state.view = st.radio(
         "View",
@@ -419,6 +433,14 @@ if user_text:
             with st.spinner(f"Calling {tool}…"):
                 out = trusted_mcp_call(tool, args, user_query=user_text)
                 vp = out.get("verified_payload")
+
+            # If server refused due to tamper, vp typically contains tamper report
+            # (depends on your server.py implementation)
+            if isinstance(vp, dict) and vp.get("tampered"):
+                st.error("🚨 Tampering detected. No action executed.")
+                st.json(vp)
+                st.session_state.messages.append({"role": "assistant", "content": "Tampering detected; request refused."})
+                st.rerun()
 
             if tool == "append_task" and isinstance(vp, dict):
                 task = vp.get("task", {})
