@@ -33,8 +33,8 @@ wheels = [
 
 [[package]]
 name = "agent-dna"
-version = "0.42.0"
-source = { editable = "../../rubix-agent-dna" }
+version = "0.3.1"
+source = { editable = "../../../" }
 dependencies = [
     { name = "py-multiformats-cid" },
     { name = "python-dotenv" },
@@ -47,7 +47,7 @@ requires-dist = [
     { name = "py-multiformats-cid", specifier = ">=0.4.4" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.0.0" },
-    { name = "rubix-py" },
+    { name = "rubix-py", specifier = ">=0.7.0" },
 ]
 
 [[package]]
@@ -2253,7 +2253,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "a2a-sdk", specifier = ">=0.2.5" },
-    { name = "agent-dna", editable = "../../rubix-agent-dna" },
+    { name = "agent-dna", editable = "../../../" },
     { name = "crewai", extras = ["tools"], specifier = ">=0.126.0" },
     { name = "fastapi", specifier = ">=0.115.12" },
     { name = "google-generativeai" },
@@ -3629,7 +3629,7 @@ wheels = [
 
 [[package]]
 name = "rubix-py"
-version = "0.6.0"
+version = "0.7.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bip32utils" },
@@ -3641,9 +3641,9 @@ dependencies = [
     { name = "py-cid" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/7b/db/a3cff16861910c2d667c26fc9b7223475fd7570b34f3752239aaea7770dc/rubix_py-0.6.0.tar.gz", hash = "sha256:aee2d52298122993731886e296225cca857aad45bf66050deaeab42f8cdea4ef", size = 20039, upload-time = "2025-11-26T19:07:06.719Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/bd/c1d61bd0e9b8d35dfb19e6ce6a4608ceae488ac4ffcad538e79dccebedfc/rubix_py-0.7.0.tar.gz", hash = "sha256:e660c5476839ae9c77718b4887534ba176fd599be42cf04d6ddfdcca5439a1f3", size = 20126, upload-time = "2025-12-01T14:38:46.073Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/96/c044bd3aee4c4f69be7c2ca02f440ae93a084edca2b8ad0edf776be0fe7b/rubix_py-0.6.0-py3-none-any.whl", hash = "sha256:81e95847ed9f5ed72dd7369fd7dfeeef9e7f728ff2fd43514d1bd579c93c1cea", size = 19508, upload-time = "2025-11-26T19:07:05.221Z" },
+    { url = "https://files.pythonhosted.org/packages/df/6c/910e63e56cfd7f0132c2e91c38984faf9e9c26357c4b4fa6032e46fdb7a7/rubix_py-0.7.0-py3-none-any.whl", hash = "sha256:952ea8191a56d761df4897f985625f7dd8bdf448c460f83344f90ccfa336d576", size = 19630, upload-time = "2025-12-01T14:38:45.067Z" },
 ]
 
 [[package]]

@@ -22,6 +22,8 @@ from a2a.types import (
     UnsupportedOperationError,
 )
 
+import os
+
 from agentdna import AgentDNA
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +42,7 @@ class KarleyAgentExecutor(AgentExecutor):
         logger.debug("KarleyAgentExecutor.__init__ START")
         self.runner = runner
 
-        self.dna = AgentDNA(alias="karley", role="remote")
+        self.dna = AgentDNA(alias="karley", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
 
         logger.info("✅ Karley AgentDNA DID: %s", self.dna.trust.did)
         logger.info("✅ Karley Rubix base URL: %s", self.dna.trust.base_url)
