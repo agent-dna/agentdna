@@ -18,4 +18,8 @@ htmlcov/
 .tox/
 .env
 
+credentials/
+*.json.key
+
 .agentdna/
+.claude/
