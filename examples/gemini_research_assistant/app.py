@@ -1,3 +1,4 @@
+import json
 import os
 import streamlit as st
 from pathlib import Path
@@ -8,7 +9,7 @@ from pipeline import ResearchPipeline
 HERE = Path(__file__).parent
 load_dotenv(HERE / ".env")
 
-# ── singleton setup ──────────────────────────────────────────────────────────
+# ── singleton setup ───────────────────────────────────────────────────────────
 
 def _init_pipeline() -> ResearchPipeline:
     client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
@@ -20,20 +21,50 @@ if "pipeline" not in st.session_state:
 
 pipeline: ResearchPipeline = st.session_state.pipeline
 
-# ── page config ──────────────────────────────────────────────────────────────
+# ── chain history helper ──────────────────────────────────────────────────────
+
+def _fetch_chain_history(nft_token: str) -> list:
+    try:
+        from agentdna import NodeClient
+        from rubix.client import RubixClient
+        from rubix.querier import Querier
+        node = NodeClient()
+        client = RubixClient(node_url=node.get_base_url(), timeout=300)
+        q = Querier(client)
+        states = q.get_nft_states(nft_address=nft_token, only_latest_state=False)
+        if isinstance(states, list):
+            return states
+        if isinstance(states, dict):
+            return [states]
+        return []
+    except Exception as exc:
+        return [{"error": str(exc)}]
+
+
+def _decode_nft_state(state: dict) -> dict:
+    state = dict(state)
+    nft_data = state.get("NFTData")
+    if isinstance(nft_data, str):
+        try:
+            state["NFTData"] = json.loads(nft_data)
+        except Exception:
+            pass
+    return state
+
+# ── page config ───────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Research Assistant", layout="wide")
 st.title("Research Assistant")
-st.caption(
-    "Coordinator → 3 Verified Specialist Researchers → Verified Synthesizer · Powered by Google Gemini + AgentDNA + Rubix"
-)
+st.caption("Coordinator → 3 Specialist Researchers → Synthesizer  ·  Powered by Google Gemini + AgentDNA")
 
-# ── session state ────────────────────────────────────────────────────────────
+# ── session state ─────────────────────────────────────────────────────────────
 
 if "history" not in st.session_state:
     st.session_state.history = []
+if "chain_history" not in st.session_state:
+    st.session_state.chain_history = []
 
-# ── sidebar ──────────────────────────────────────────────────────────────────
+# ── sidebar ───────────────────────────────────────────────────────────────────
 
 EXAMPLE_QUESTIONS = [
     "Why are bee populations declining and what are the consequences?",
@@ -49,18 +80,34 @@ for q in EXAMPLE_QUESTIONS:
         st.rerun()
 
 st.sidebar.divider()
-st.sidebar.subheader("Agent Trace")
 
+# ── Langfuse trace link ───────────────────────────────────────────────────────
+st.sidebar.subheader("Agent Trace")
 if pipeline.last_trace_url:
     st.sidebar.success(f"[View trace in Langfuse]({pipeline.last_trace_url})")
-    st.sidebar.caption("See coordinator, researchers, and synthesizer as separate nodes.")
+    st.sidebar.caption("coordinator → researchers → synthesizer → host.verify")
 else:
-    st.sidebar.caption("Run a research query to see the trace link here.")
+    st.sidebar.caption("Run a query to see the Langfuse trace here.")
 
 st.sidebar.divider()
-if st.sidebar.button("Clear History"):
+
+
+if st.sidebar.button("Clear History", use_container_width=True):
     st.session_state.history = []
+    st.session_state.chain_history = []
     st.rerun()
+
+# ── chain history panel ───────────────────────────────────────────────────────
+
+if st.session_state.chain_history:
+    with st.expander(
+        f"Chain History — NFT `{nft_token}` — {len(st.session_state.chain_history)} record(s)",
+        expanded=True,
+    ):
+        st.code(
+            json.dumps(st.session_state.chain_history, indent=2, ensure_ascii=False),
+            language="json",
+        )
 
 # ── input ─────────────────────────────────────────────────────────────────────
 
@@ -75,7 +122,9 @@ research = st.button("Research", type="primary", disabled=not question.strip())
 # ── render helper ─────────────────────────────────────────────────────────────
 
 def _render_result(r: dict, trace_url: str | None = None):
-    tab_labels = ["Final Report"] + [f"Researcher {i+1}" for i in range(len(r["subtopics"]))]
+    tab_labels = ["Final Report"] + [
+        f"Researcher {i + 1}" for i in range(len(r["subtopics"]))
+    ]
     tabs = st.tabs(tab_labels)
 
     with tabs[0]:
@@ -108,7 +157,10 @@ if research and question.strip():
         st.markdown(question)
 
     with st.chat_message("assistant"):
-        with st.spinner("Coordinator planning subtopics → Researchers investigating → Synthesizing..."):
+        with st.spinner(
+            "Coordinator signing tasks → Researchers verifying & working → "
+            "Synthesizer → Coordinator verifying all + writing to chain…"
+        ):
             try:
                 result = pipeline.research(question.strip())
             except Exception as e:

@@ -6,7 +6,7 @@
     "password": "mypassword",
     "timeout": 100.0,
     "data": "new responses",
-    "value": 5,
+    "value": 1,
     "quorum_type": 2
   }
 }
