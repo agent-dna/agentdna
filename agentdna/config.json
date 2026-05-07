@@ -1,12 +1,12 @@
 {
-  "chain_url": "https://chain-connector-1-dev.rubix.net/",
+  "chain_url": "https://chain-connector-1.rubix.net/",
   "nft": {
     "artifact_file":"",
     "metadata_file":"",
     "password": "mypassword",
     "timeout": 100.0,
     "data": "new responses",
-    "value": 5,
+    "value": 1,
     "quorum_type": 2
   }
 }

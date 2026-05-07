@@ -1,0 +1,16 @@
+[project]
+name = "gemini-research-assistant"
+version = "0.1.0"
+description = "Multi-agent research assistant using Google Gemini and Langfuse tracing"
+requires-python = ">=3.11"
+dependencies = [
+    "google-genai>=1.0.0",
+    "langfuse>=4.0.0",
+    "streamlit>=1.36",
+    "python-dotenv",
+    "agent-dna",
+    "nest-asyncio>=1.6.0",
+]
+
+[tool.uv.sources]
+agent-dna = { path = "../../" }

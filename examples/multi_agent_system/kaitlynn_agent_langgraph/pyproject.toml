@@ -22,7 +22,7 @@ dependencies = [
 packages = ["app"]
 
 [tool.uv.sources]
-agent-dna = { path = "../../rubix-agent-dna", editable = true }
+agent-dna = { path = "../../../", editable = true }
 
 [build-system]
 requires = ["hatchling"]

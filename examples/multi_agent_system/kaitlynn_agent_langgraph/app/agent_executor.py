@@ -16,6 +16,8 @@ from a2a.types import (
 )
 from a2a.utils.errors import ServerError
 
+import os
+
 from app.agent import KaitlynAgent
 
 from agentdna import AgentDNA
@@ -24,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 load_dotenv()
 
-dna = AgentDNA(alias="kaitlynn", role="remote")
+dna = AgentDNA(alias="kaitlynn", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
 print("✅ Kaitlyn Using DID:", dna.trust.did)
 print("✅ Kaitlyn Using base URL:", dna.trust.base_url)
 

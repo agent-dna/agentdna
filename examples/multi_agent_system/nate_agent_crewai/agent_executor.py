@@ -3,6 +3,8 @@ import logging
 from pathlib import Path
 import sys
 
+import os
+
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 from a2a.utils.errors import ServerError
@@ -32,7 +34,7 @@ class SchedulingAgentExecutor(AgentExecutor):
         """Initializes the SchedulingAgentExecutor."""
         self.agent = SchedulingAgent()
 
-        self.dna = AgentDNA(alias="nate", role="remote")
+        self.dna = AgentDNA(alias="nate", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
         logger.info("✅ Nate AgentDNA DID: %s", self.dna.trust.did)
         logger.info("✅ Nate Rubix base URL: %s", self.dna.trust.base_url)
 

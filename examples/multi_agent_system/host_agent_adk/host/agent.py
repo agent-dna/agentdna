@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 import httpx
 import nest_asyncio
 
+import os
+
 from agentdna import AgentDNA
 from a2a.client import A2ACardResolver
 from a2a.types import (
@@ -49,7 +51,7 @@ class HostAgent:
         self.agents: str = ""
 
         # AgentDNA (includes Rubix handler + NFT)
-        self.dna = AgentDNA(alias="host", role="host")
+        self.dna = AgentDNA(alias="host", role="host", api_key=os.environ.get("AGENTDNA_API_KEY"))
 
         self._agent = self.create_agent()
         self._user_id = "host_agent"

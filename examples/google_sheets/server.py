@@ -36,7 +36,7 @@ if not AGENTDNA_API_KEY:
 
 CHAIN_URL = os.environ.get("CHAIN_URL", "").strip()
 
-dna = AgentDNA(alias="gSheets_Server", role="remote", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
+dna = AgentDNA(alias="GoogleSheetsMCP", role="remote", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
 print("[SERVER] Sheets MCP server DID:", dna.trust.did)
 print("[SERVER] Sheets MCP server base URL:", dna.trust.base_url)
 
@@ -531,6 +531,56 @@ async def update_task_status(
         "updated_cell": cell,
         "action_executed": True,
     }
+    return _build_signed_response(original_message, payload, host_block, trust_issues)
+
+
+@mcp.tool()
+async def update_task(
+    task_id: str,
+    owner: str = "",
+    title: str = "",
+    notes: str = "",
+    dna_envelope: dict | str | None = None,
+    user_query: str = "",
+) -> str:
+    print("\n[SERVER] === update_task CALLED ===")
+    original_message, host_block, trust_issues = await _verify_host_envelope(dna_envelope)
+
+    refusal = _check_user_query_tamper(
+        original_message=original_message,
+        host_block=host_block,
+        trust_issues=trust_issues,
+        received_user_query=user_query,
+    )
+    if refusal is not None:
+        return refusal
+
+    if original_message is None:
+        original_message = json.dumps(
+            {"tool": "update_task", "task_id": task_id, "owner": owner, "title": title, "notes": notes}
+        )
+
+    _ensure_header()
+
+    row_num = _find_task_row_by_id(task_id)
+    if row_num is None:
+        payload = {"ok": False, "error": f"task_id not found: {task_id}", "action_executed": False}
+        return _build_signed_response(original_message, payload, host_block, trust_issues)
+
+    # HEADER: id(A), title(B), status(C), owner(D), notes(E), created_at(F)
+    col_map = {"title": "B", "owner": "D", "notes": "E"}
+    updated = {}
+    for field, col in col_map.items():
+        val = locals()[field]
+        if val:
+            _update(f"{SHEET_NAME}!{col}{row_num}", [[val]])
+            updated[field] = val
+
+    if not updated:
+        payload = {"ok": False, "error": "No fields to update provided", "action_executed": False}
+        return _build_signed_response(original_message, payload, host_block, trust_issues)
+
+    payload = {"ok": True, "task_id": task_id, "updated": updated, "action_executed": True}
     return _build_signed_response(original_message, payload, host_block, trust_issues)
 
 

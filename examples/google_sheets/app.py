@@ -35,11 +35,11 @@ if not CHAIN_URL:
     raise RuntimeError("Missing CHAIN_URL")
 
 # Host AgentDNA (assumes your AgentDNA handler is now using Path.home()/.agentdna)
-dna = AgentDNA(alias="gSheets_Host", role="host", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
-node = NodeClient(alias="gsheets_host")
+dna = AgentDNA(alias="GoogleSheetsAgent", role="host", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
+node = NodeClient(alias="gsheets_GoogleSheetsAgenthost")
 DEFAULT_BASE_URL = node.get_base_url()
 
-REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "gsheets_server")
+REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "GoogleSheetsMCP")
 
 
 def _server_params() -> StdioServerParameters:
@@ -216,7 +216,14 @@ def decide_action(user_text: str):
         title = t.split(":", 1)[1].strip() if ":" in t else re.sub(r"^(add|append|task)\s*", "", t, flags=re.I).strip()
         if not title:
             return {"action": "chat", "message": "What should the task title be?"}
-        return {"action": "tool", "tool": "append_task", "args": {"title": title, "owner": "", "notes": ""}}
+
+        owner = ""
+        owner_m = re.search(r"\s+(?:owner|by|assigned\s+to)[:\s]+([^\s,]+)", title, flags=re.I)
+        if owner_m:
+            owner = owner_m.group(1).strip()
+            title = title[:owner_m.start()].strip()
+
+        return {"action": "tool", "tool": "append_task", "args": {"title": title, "owner": owner, "notes": ""}}
 
     # Show open tasks
     if "open tasks" in tl or "show open tasks" in tl or tl.strip() in {"open", "open task", "open tasks"}:
@@ -230,6 +237,17 @@ def decide_action(user_text: str):
     if "done tasks" in tl or "completed tasks" in tl:
         return {"action": "tool", "tool": "get_tasks", "args": {"status": "done"}}
 
+    # Update owner of a task: "set owner of <title/id> to <name>"
+    m_owner = re.search(
+        r"(?:set|update|assign)\s+owner\s+(?:of\s+)?(.+?)\s+to\s+(\S+)", tl
+    )
+    if m_owner:
+        phrase, new_owner = m_owner.group(1).strip(), m_owner.group(2).strip()
+        uuid_m = re.fullmatch(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", phrase)
+        if uuid_m:
+            return {"action": "tool", "tool": "update_task", "args": {"task_id": phrase, "owner": new_owner}}
+        return {"action": "tool", "tool": "find_and_update_task", "args": {"query": phrase, "owner": new_owner}}
+
     # Mark done by UUID
     m = re.search(r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})", tl)
     if m and ("done" in tl or "complete" in tl):
@@ -239,13 +257,22 @@ def decide_action(user_text: str):
             "args": {"task_id": m.group(1), "status": "done"},
         }
 
-    # Mark done by title phrase
-    m2 = re.search(r"^(update|mark)\s+(.+?)\s+(to\s+)?(done|complete|completed)$", tl)
+    # Mark done by title phrase — catches:
+    #   "mark <title> done", "update <title> to done", "<title> done", "complete <title>"
+    m2 = re.search(
+        r"^(?:(?:mark|update|complete|finish|close)\s+)?(.+?)\s+(?:to\s+)?(?:done|complete|completed|finished)$",
+        tl,
+    ) or re.search(
+        r"^(?:complete|finish|close)\s+(.+)$",
+        tl,
+    )
     if m2:
-        phrase = m2.group(2).strip()
-        return {"action": "tool", "tool": "find_tasks", "args": {"query": phrase, "status": "open"}}
+        phrase = m2.group(1).strip()
+        # avoid false-positives from pure "done tasks" / "show" queries already handled above
+        if phrase not in {"tasks", "all tasks", "open tasks"}:
+            return {"action": "tool", "tool": "find_tasks", "args": {"query": phrase, "status": "open"}}
 
-    return {"action": "chat", "message": "Try: 'Add: finish report', 'Show open tasks', 'Show all tasks', or 'Mark <task_id> done'."}
+    return {"action": "chat", "message": "Try: 'Add: finish report', 'Show open tasks', 'Mark <title> done', or 'Set owner of <title> to <name>'."}
 
 
 def fetch_open_tasks():
@@ -462,6 +489,46 @@ if user_text:
                 else:
                     st.error(vp)
                 fetch_open_tasks()
+
+            elif tool == "update_task":
+                if isinstance(vp, dict) and vp.get("ok"):
+                    updated = vp.get("updated", {})
+                    st.success(f"Task updated: {updated}")
+                else:
+                    st.error(vp)
+                fetch_open_tasks()
+
+            elif tool == "find_and_update_task":
+                # Find by title then update owner
+                query = args.get("query", "")
+                new_owner = args.get("owner", "")
+                with st.spinner("Searching for task…"):
+                    find_out = trusted_mcp_call("find_tasks", {"query": query}, user_query=user_text)
+                    find_vp = find_out.get("verified_payload") or {}
+                    matches = find_vp.get("tasks", []) if isinstance(find_vp, dict) else (find_vp if isinstance(find_vp, list) else [])
+
+                if not matches:
+                    st.info("No matching tasks found.")
+                elif len(matches) == 1:
+                    tid = matches[0].get("id")
+                    title = matches[0].get("title", "(no title)")
+                    with st.spinner("Updating owner…"):
+                        upd_out = trusted_mcp_call(
+                            "update_task",
+                            {"task_id": tid, "owner": new_owner},
+                            user_query=user_text,
+                        )
+                        upd_vp = upd_out.get("verified_payload") or {}
+                    if isinstance(upd_vp, dict) and upd_vp.get("ok"):
+                        st.success(f"Owner of '{title}' set to '{new_owner}'.")
+                    else:
+                        st.error(upd_vp)
+                    fetch_open_tasks()
+                else:
+                    st.write("Multiple matches — which one?")
+                    mdf = pd.DataFrame(matches)
+                    mcols = [c for c in ["id", "title", "owner", "status"] if c in mdf.columns]
+                    st.dataframe(mdf[mcols] if mcols else mdf, width="stretch")
 
             elif tool == "find_tasks":
                 matches = []
