@@ -91,6 +91,25 @@ else:
 
 st.sidebar.divider()
 
+# ── NFT chain history controls ────────────────────────────────────────────────
+st.sidebar.subheader("Chain History")
+
+nft_token = pipeline.last_nft_token or ""
+st.sidebar.caption(f"NFT: `{nft_token}`" if nft_token else "NFT: (none yet — run a query)")
+
+if st.sidebar.button("History Records", use_container_width=True, disabled=not nft_token):
+    with st.spinner("Fetching NFT data…"):
+        states = _fetch_chain_history(nft_token)
+    if isinstance(states, list):
+        st.session_state.chain_history = [_decode_nft_state(s) for s in states]
+    elif isinstance(states, dict):
+        st.session_state.chain_history = [_decode_nft_state(states)]
+    else:
+        st.session_state.chain_history = []
+    st.rerun()
+
+st.sidebar.divider()
+
 
 if st.sidebar.button("Clear History", use_container_width=True):
     st.session_state.history = []

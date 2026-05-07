@@ -1,12 +1,51 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Optional, Any
 
-# Rubix verify-signature uses a GET request with the payload in the URL.
-# Keep signed response text under this limit to avoid 414 errors.
-_MAX_SIGN_RESPONSE_LEN = 1200
+# Two distinct Rubix limits we have to fit under:
+#   1. ``/rubix/v1/signature/verify`` is a GET — long signed payloads cause 414.
+#   2. ``/rubix/v1/tx`` (NFT execute) is a POST, but the chain rejects oversized
+#      NFT ``data`` fields with a 500.
+# Because the synthesizer envelope now nests 3 researcher summaries inside its
+# ``extra``, we truncate the synthesis response below the level that fits the
+# 414 budget alone — this keeps the NFT ``data`` field small enough for /tx too.
+_MAX_SIGN_RESPONSE_LEN = 600
+
+
+def _compact_research_envelope(combined_json: str) -> dict:
+    """
+    Compact a researcher's signed envelope for nesting inside the synthesizer's
+    signed payload. The synthesizer's envelope is later sent to Rubix's
+    verify-signature endpoint as a GET query parameter — embedding 3 full
+    researcher envelopes (each with a 1200-char response + host_block) blows the
+    URL past the 414 limit.
+
+    We keep the signature, DID, and a sha256 digest of the full response so the
+    chain block still cryptographically commits to each researcher's exact
+    output. The full response text is shown to the user in the Streamlit UI and
+    captured in the Langfuse trace.
+    """
+    try:
+        obj = json.loads(combined_json)
+    except Exception:
+        return {"error": "unparseable envelope"}
+    agent_block = obj.get("agent", {}) or {}
+    envelope = agent_block.get("envelope", {}) or {}
+    response = envelope.get("response", "") or ""
+    try:
+        original = json.loads(envelope.get("original_message", "") or "")
+    except Exception:
+        original = {}
+    return {
+        "agent_did": agent_block.get("agent"),
+        "researcher": original.get("researcher"),
+        "subtopic": original.get("subtopic"),
+        "response_sha256": hashlib.sha256(response.encode("utf-8")).hexdigest(),
+        "signature": agent_block.get("signature"),
+    }
 
 from google import genai
 from google.genai import types
@@ -171,13 +210,23 @@ class ResearchPipeline:
         }
 
     @observe(name="agentdna.remote.build")
-    def _remote_build(self, dna, original_message: str, response: str, host_block: dict) -> dict:
+    def _remote_build(
+        self,
+        dna,
+        original_message: str,
+        response: str,
+        host_block: dict,
+        extra: dict | None = None,
+    ) -> dict:
         """Remote agent signs its response. Logged output: metadata only.
 
         The Rubix verify-signature endpoint is a GET request — long responses cause
         a 414 URI Too Large error.  We cap the signed response text at
         _MAX_SIGN_RESPONSE_LEN characters; the full response is always returned to
         the caller and shown in the UI.
+
+        ``extra`` lets the synthesizer embed the researchers' signed envelopes
+        (nested payloads) so a single chain write captures the whole trust chain.
         """
         response_for_signing = (
             response[:_MAX_SIGN_RESPONSE_LEN] + " ...[truncated for signing]"
@@ -188,7 +237,7 @@ class ResearchPipeline:
             original_message=original_message,
             response=response_for_signing,
             host_block=host_block,
-            extra={},
+            extra=extra or {},
         )
         combined = built.get("combined_json", "")
         if not combined:
@@ -202,9 +251,10 @@ class ResearchPipeline:
     @observe(name="agentdna.host.verify")
     def _host_verify_all(self, question: str) -> dict:
         """
-        Coordinator verifies every agent response.
-        execute_nft=True ONCE — only on the final (synthesizer) combined_json.
-        Nobody else writes to chain.
+        Coordinator verifies every agent response. The synthesizer's signed
+        envelope already embeds the 3 researchers' signed envelopes via ``extra``
+        (see ``_synthesize``), so a SINGLE chain write at the synthesizer step
+        captures the whole trust chain as nested payloads inside one NFT block.
         """
         if not self._combined_jsons:
             return {"verified_count": 0, "nft_executed": False}
@@ -217,10 +267,8 @@ class ResearchPipeline:
             + ["synthesizer"]
         )
 
-        # Verify researcher responses — NO chain write
+        # Verify researcher responses in-memory only — NO chain write.
         for i, combined_json in enumerate(self._combined_jsons[:-1]):
-            # Pass the exact task_json that was signed for this agent so that the
-            # handler's original_message comparison passes without a mismatch warning.
             original_task = (
                 self._host_built[i].get("_task_json", question)
                 if i < len(self._host_built) else question
@@ -235,7 +283,8 @@ class ResearchPipeline:
             )
             all_trust_issues.extend(result.get("trust_issues") or [])
 
-        # Verify synthesizer response + write to chain ONCE
+        # Verify the synthesizer envelope (which already nests the researcher
+        # envelopes inside its ``extra``) and write ONE NFT block to chain.
         synth_idx = len(self._combined_jsons) - 1
         synth_original_task = (
             self._host_built[synth_idx].get("_task_json", question)
@@ -369,8 +418,19 @@ class ResearchPipeline:
         )
 
         if self._dna_active and host_block is not None:
+            # Nest compact summaries of the 3 researcher signed envelopes inside
+            # the synthesizer's signed payload, so the single chain block carries
+            # cryptographic proof of the whole chain (DID + signature + response
+            # digest per researcher) without overflowing the Rubix verify URL.
+            researcher_summaries = [
+                _compact_research_envelope(c) for c in self._combined_jsons[:3]
+            ]
             self._remote_build(  # agentdna.remote.build span
-                self._synthesizer_dna, original_message, synthesis, host_block
+                self._synthesizer_dna,
+                original_message,
+                synthesis,
+                host_block,
+                extra={"researcher_envelopes": researcher_summaries},
             )
 
         return synthesis
@@ -400,6 +460,9 @@ class ResearchPipeline:
         # 4. Coordinator: verify ALL responses + write to chain ONCE (execute_nft=True)
         if self._dna_active:
             self._host_verify_all(question)  # agentdna.host.verify span
+            self.last_nft_token = getattr(
+                getattr(self._coordinator_dna, "handler", None), "nft_token", None
+            )
 
         trace_id = get_client().get_current_trace_id()
         self.last_trace_url = get_client().get_trace_url(trace_id=trace_id)

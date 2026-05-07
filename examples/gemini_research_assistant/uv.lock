@@ -26,7 +26,7 @@ requires-dist = [
     { name = "py-multiformats-cid", specifier = ">=0.4.4" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.0.0" },
-    { name = "rubix-py", specifier = ">=0.7.0" },
+    { name = "rubix-py", specifier = ">=1.0.0" },
 ]
 
 [[package]]
