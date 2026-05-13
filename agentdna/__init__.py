@@ -1,16 +1,18 @@
 """
-rubix.agent.dna
-Public interface for Rubix agent DNA utilities.
+agentdna
+Public interface for AgentDNA utilities.
 """
 
+from .core import AgentDNA, SignedEnvelope, VerifyResult, RequestContext
 from .trust import RubixTrustService
-from .handler import RubixMessageHandler
-from .node_client import NodeClient
-from .core import AgentDNA
+from .node_client import NodeClient, resolve_chain_url
 
 __all__ = [
+    "AgentDNA",
+    "SignedEnvelope",
+    "VerifyResult",
+    "RequestContext",
     "RubixTrustService",
-    "RubixMessageHandler",
     "NodeClient",
-    "AgentDNA"
+    "resolve_chain_url",
 ]

@@ -118,7 +118,7 @@ class KaitlynAgent:
     )
 
     def __init__(self):
-        self.model = ChatGoogleGenerativeAI(model="gemini-2.0-flash")
+        self.model = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
         self.tools = [get_availability]
 
         self.graph = create_react_agent(

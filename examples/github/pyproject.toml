@@ -1,15 +1,15 @@
 [project]
-name = "gemini-research-assistant"
+name = "github-mcp-agent"
 version = "0.1.0"
-description = "Multi-agent research assistant using Google Gemini and Langfuse tracing"
+description = "Streamlit + MCP GitHub agent, signed via AgentDNA"
 requires-python = ">=3.11"
 dependencies = [
-    "google-genai>=1.0.0",
-    "langfuse>=4.0.0",
     "streamlit>=1.36",
     "python-dotenv",
+    "requests",
+    "mcp>=1.0",
+    "google-genai>=1.0.0",
     "agent-dna",
-    "nest-asyncio>=1.6.0",
 ]
 
 [tool.uv.sources]

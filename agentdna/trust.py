@@ -7,7 +7,7 @@ from rubix.client import RubixClient
 from rubix.signer import Signer
 from rubix.did import online_signature_verify, signatureResponseError
 
-from .node_client import NodeClient
+from .node_client import resolve_chain_url
 
 
 class RubixTrustService:
@@ -24,12 +24,10 @@ class RubixTrustService:
             raise ValueError("API Key needs to be provided. Visit https://agentdna.io/ and join the" \
             "Beta programme to get an API Key.")
 
-        node = NodeClient(
-            alias=alias,
+        self.base_url = resolve_chain_url(
             chain_url=chain_url,
             config_path=node_config_path,
         )
-        self.base_url = node.get_base_url().rstrip("/")
         self.timeout = timeout
 
         if config_path == "":

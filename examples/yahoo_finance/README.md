@@ -1,49 +1,61 @@
-# Yahoo Finance MCP Demo
+# Yahoo Finance MCP Agent (signed by AgentDNA)
 
-This demo represents the use of `agentdna` package for a simple Agent to Yahoo MCP Architecture.
+A Streamlit agent that pulls live quotes and price history from Yahoo Finance via a local **MCP server** (`server.py`). Every host → MCP round-trip is signed and verified by AgentDNA; each verified turn is written to an audit-log NFT on Rubix.
 
-## Install Dependencies
+> ⚠️ Yahoo Finance has no official public API. The server uses `yfinance` (web-scraped). Data is best-effort.
 
-- Setup a Python virtual environment
+## Prerequisites
 
-    - Inside the Github MCP example directory, run the following to boostrap virtual environment files under the directory `venv`:
-        ```
-        # Use `python3`, if `python` is configured as Python2
-        python -m venv venv
-        ```
-    
-    - Activate the virtual environment.
-        
-        Windows (Powershell):
-        ```
-        .\venv\Scripts\Activate.ps1
-        ```
+- Python **3.11+** and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A **Google AI Studio API key** ([get one](https://aistudio.google.com/app/apikey))
+- An [AgentDNA API key](https://agentdna.io/beta) (sign up for the Beta)
 
-        Unix (Ubuntu/Mac OS):
-        ```
-        # Provide permission to the activate script
-        chmod +x ./venv/bin/activate 
-        ./venv/bin/activate
-        ```
+## 1. Configure `.env`
 
-- Run the following to install dependencies:
+```bash
+cp .env.sample .env
+```
 
-    ```
-    pip install -r requirements.txt
-    ```
+Then edit `.env` and fill in the values:
 
-    Some systems have both `pip` and `pip3` representing Python2 and Python3 respectively. To verify, run `pip --version` and check the Python's version. Since this project relies in Python3, if `pip --version` shows Python2, consider using `pip3` to install dependencies. In such instances, consider using `python3` CLI in any of the further instructions where `python` CLI is mentioned
+```env
+AGENTDNA_API_KEY=...
+GEMINI_API_KEY=...            # works with GOOGLE_API_KEY too
+HOST_AGENT_NAME=YahooHost
+MCP_TOOL_NAME=YahooFinanceMCP
+```
 
-## Start the Demo
+## 2. Run
 
-- Create the `.env` file:
-    ```
-    cp .env.sample .env
-    ```
+```bash
+uv run streamlit run app.py
+```
 
-    Set the environment variables accordingly
+That installs deps into `.venv/` on first run and opens the UI at <http://localhost:8501>. `server.py` is spawned automatically over stdio.
 
-- Run the following to start the demo:
-    ```
-    python -m streamlit run app.py
-    ```
+## What you can ask
+
+- `What is the current price of AAPL?`
+- `Show me the last 5 days of price history for TSLA.`
+- `Get the latest stock price for MSFT.`
+
+The host LLM (Gemini 2.5 Flash) decides whether to call `get_quote(symbol)` or `get_history(symbol, period)` and fills in the args.
+
+## Trust layer at a glance
+
+- **Host** (`app.py`) signs the tool call with `dna.envelope(host_msg)` and verifies the reply with `dna.verify_reply(...)`. Each verified turn writes one record to the host's audit-log NFT.
+- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.verify_request(...)`, runs the `yfinance` call, then signs the reply with `dna.sign_response(payload, ctx=ctx)`.
+- The sidebar's **History Records** button fetches chain history via `dna.history()` and renders it as a foldable JSON tree.
+
+## Troubleshooting
+
+**`API Key not found / API_KEY_INVALID`** — your Gemini key is dead/wrong project. Regenerate at <https://aistudio.google.com/app/apikey>. The app accepts either `GEMINI_API_KEY` or `GOOGLE_API_KEY`.
+
+**`ModuleNotFoundError: No module named 'yfinance'`** — you're running with the wrong Python (likely system / anaconda). Always launch via `uv run streamlit run app.py` from this directory so the spawned `server.py` inherits the venv's interpreter.
+
+**`Decoded key is not an uncompressed secp256k1 key`** — older `rubix-py 0.7.x` keystore. Move it aside:
+```bash
+mv ~/.agentdna/account/$HOST_AGENT_NAME ~/.agentdna/account/$HOST_AGENT_NAME.compressed-bak
+mv ~/.agentdna/account/$MCP_TOOL_NAME   ~/.agentdna/account/$MCP_TOOL_NAME.compressed-bak
+```
+Next launch regenerates the keys in the new format.

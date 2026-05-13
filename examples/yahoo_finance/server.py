@@ -1,12 +1,11 @@
 # server.py
 import os
 import sys
-import json
 import builtins
 import asyncio
 import concurrent.futures
-from dotenv import load_dotenv
 
+from dotenv import load_dotenv, find_dotenv
 import yfinance as yf
 from mcp.server.fastmcp import FastMCP
 from agentdna import AgentDNA
@@ -16,15 +15,19 @@ from agentdna import AgentDNA
 # ─────────────────────────────
 
 _original_print = builtins.print
+
+
 def _stderr_print(*args, **kwargs):
     _original_print(*args, file=sys.stderr)
+
+
 builtins.print = _stderr_print
 
 # ─────────────────────────────
 # Environment
 # ─────────────────────────────
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
 MCP_TOOL_NAME = os.environ.get("MCP_TOOL_NAME")
@@ -34,31 +37,13 @@ if not AGENTDNA_API_KEY:
 if not MCP_TOOL_NAME:
     raise RuntimeError("Missing MCP_TOOL_NAME")
 
-dna = AgentDNA(alias=MCP_TOOL_NAME, role="remote", api_key=AGENTDNA_API_KEY)
+# Pure-remote agent — never writes to chain; enable_nft=False skips deploy.
+dna = AgentDNA(alias=MCP_TOOL_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
 
 mcp = FastMCP("YahooFinanceMCP")
 
 _executor = concurrent.futures.ThreadPoolExecutor(max_workers=4)
 
-# ─────────────────────────────
-# AgentDNA helpers
-# ─────────────────────────────
-
-async def _verify_host_envelope(dna_envelope):
-    if not dna_envelope:
-        return None, None, None
-    text = json.dumps(dna_envelope) if isinstance(dna_envelope, dict) else dna_envelope
-    info = await dna.handle(raw_text=text, verify_mode="light")
-    return info.get("original_message"), info.get("host_block"), info.get("trust_issues")
-
-def _build_response(original_message, payload, host_block, trust_issues):
-    built = dna.build(
-        original_message=original_message or json.dumps(payload),
-        response=json.dumps(payload),
-        host_block=host_block,
-        extra={"host_trust_issues": trust_issues},
-    )
-    return built["combined_json"]
 
 # ─────────────────────────────
 # Blocking Yahoo ops (isolated)
@@ -67,11 +52,9 @@ def _build_response(original_message, payload, host_block, trust_issues):
 def _quote_blocking(symbol: str):
     t = yf.Ticker(symbol)
 
-    # First attempt: fast_info
     info = t.fast_info or {}
     price = info.get("last_price")
 
-    # Fallback: recent close from history
     if price is None:
         hist = t.history(period="1d")
         if not hist.empty:
@@ -84,6 +67,7 @@ def _quote_blocking(symbol: str):
         "currency": info.get("currency"),
         "exchange": info.get("exchange"),
     }
+
 
 def _history_blocking(symbol: str, period: str):
     t = yf.Ticker(symbol)
@@ -100,13 +84,19 @@ def _history_blocking(symbol: str, period: str):
         })
     return {"ok": True, "symbol": symbol, "rows": rows}
 
+
 # ─────────────────────────────
-# MCP tools (ASYNC + TIMEOUT)
+# MCP tools
 # ─────────────────────────────
+# Each tool follows the 3-step pattern:
+#   1. ctx = await dna.verify_request(dna_envelope)
+#   2. business logic
+#   3. return dna.sign_response(payload, ctx=ctx)
+
 
 @mcp.tool()
 async def get_quote(symbol: str, dna_envelope=None):
-    orig, host_block, issues = await _verify_host_envelope(dna_envelope)
+    ctx = await dna.verify_request(dna_envelope)
     loop = asyncio.get_running_loop()
     try:
         payload = await asyncio.wait_for(
@@ -115,11 +105,12 @@ async def get_quote(symbol: str, dna_envelope=None):
         )
     except Exception as e:
         payload = {"ok": False, "error": str(e)}
-    return _build_response(orig, payload, host_block, issues)
+    return dna.sign_response(payload, ctx=ctx)
+
 
 @mcp.tool()
 async def get_history(symbol: str, period: str = "1mo", dna_envelope=None):
-    orig, host_block, issues = await _verify_host_envelope(dna_envelope)
+    ctx = await dna.verify_request(dna_envelope)
     loop = asyncio.get_running_loop()
     try:
         payload = await asyncio.wait_for(
@@ -128,7 +119,8 @@ async def get_history(symbol: str, period: str = "1mo", dna_envelope=None):
         )
     except Exception as e:
         payload = {"ok": False, "error": str(e)}
-    return _build_response(orig, payload, host_block, issues)
+    return dna.sign_response(payload, ctx=ctx)
+
 
 if __name__ == "__main__":
     mcp.run(transport="stdio")

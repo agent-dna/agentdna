@@ -1,4 +1,3 @@
-import json
 import os
 import streamlit as st
 from pathlib import Path
@@ -20,36 +19,6 @@ if "pipeline" not in st.session_state:
     st.session_state.pipeline = _init_pipeline()
 
 pipeline: ResearchPipeline = st.session_state.pipeline
-
-# ── chain history helper ──────────────────────────────────────────────────────
-
-def _fetch_chain_history(nft_token: str) -> list:
-    try:
-        from agentdna import NodeClient
-        from rubix.client import RubixClient
-        from rubix.querier import Querier
-        node = NodeClient()
-        client = RubixClient(node_url=node.get_base_url(), timeout=300)
-        q = Querier(client)
-        states = q.get_nft_states(nft_address=nft_token, only_latest_state=False)
-        if isinstance(states, list):
-            return states
-        if isinstance(states, dict):
-            return [states]
-        return []
-    except Exception as exc:
-        return [{"error": str(exc)}]
-
-
-def _decode_nft_state(state: dict) -> dict:
-    state = dict(state)
-    nft_data = state.get("NFTData")
-    if isinstance(nft_data, str):
-        try:
-            state["NFTData"] = json.loads(nft_data)
-        except Exception:
-            pass
-    return state
 
 # ── page config ───────────────────────────────────────────────────────────────
 
@@ -99,13 +68,7 @@ st.sidebar.caption(f"NFT: `{nft_token}`" if nft_token else "NFT: (none yet — r
 
 if st.sidebar.button("History Records", use_container_width=True, disabled=not nft_token):
     with st.spinner("Fetching NFT data…"):
-        states = _fetch_chain_history(nft_token)
-    if isinstance(states, list):
-        st.session_state.chain_history = [_decode_nft_state(s) for s in states]
-    elif isinstance(states, dict):
-        st.session_state.chain_history = [_decode_nft_state(states)]
-    else:
-        st.session_state.chain_history = []
+        st.session_state.chain_history = pipeline.history()
     st.rerun()
 
 st.sidebar.divider()
@@ -123,10 +86,10 @@ if st.session_state.chain_history:
         f"Chain History — NFT `{nft_token}` — {len(st.session_state.chain_history)} record(s)",
         expanded=True,
     ):
-        st.code(
-            json.dumps(st.session_state.chain_history, indent=2, ensure_ascii=False),
-            language="json",
-        )
+        # st.json renders a foldable tree that wraps long values (DIDs, sigs,
+        # response_sha256, the 600-char signed response) instead of forcing
+        # horizontal scroll like st.code(language="json") did.
+        st.json(st.session_state.chain_history, expanded=2)
 
 # ── input ─────────────────────────────────────────────────────────────────────
 

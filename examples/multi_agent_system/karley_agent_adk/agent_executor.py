@@ -42,7 +42,12 @@ class KarleyAgentExecutor(AgentExecutor):
         logger.debug("KarleyAgentExecutor.__init__ START")
         self.runner = runner
 
-        self.dna = AgentDNA(alias="karley", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
+        # Pure-remote agent — never writes to chain; enable_nft=False skips deploy.
+        self.dna = AgentDNA(
+            alias="karley",
+            api_key=os.environ.get("AGENTDNA_API_KEY"),
+            enable_nft=False,
+        )
 
         logger.info("✅ Karley AgentDNA DID: %s", self.dna.trust.did)
         logger.info("✅ Karley Rubix base URL: %s", self.dna.trust.base_url)
@@ -81,29 +86,14 @@ class KarleyAgentExecutor(AgentExecutor):
 
         logger.debug("📨 Incoming from Host – raw user input: %r", raw)
 
-        verify_info = await self.dna.handle(
-            raw_text=raw,
-            verify_mode="light",  
-        )
-
-        verified = verify_info["verified"]
-        trust_issues     = verify_info["trust_issues"]
-        if verified is False:
-            logger.warning("Verification failed, check trust issues: %s", trust_issues)
-
-        original_message = verify_info["original_message"]
-        host_block       = verify_info["host_block"]
-        host_ok          = verify_info["host_ok"]
-        
-        logger.info("Rubix host verification result: %s", host_ok)
-        if host_ok is False:
-            logger.warning("Host signature invalid: %s", trust_issues)
-
-        logger.debug("Derived original_message for ADK: %r", original_message)
+        ctx = await self.dna.verify_request(raw)
+        if not ctx.verified:
+            logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
+        logger.debug("Derived original_message for ADK: %r", ctx.original_message)
 
         user_content = types.Content(
             role="user",
-            parts=[types.Part.from_text(text=original_message)],
+            parts=[types.Part.from_text(text=ctx.original_message)],
         )
 
         session_id = context.context_id
@@ -164,18 +154,11 @@ class KarleyAgentExecutor(AgentExecutor):
 
         logger.debug("execute() ADK final reply text: %r", agent_reply_text)
 
-        built_resp = self.dna.build(
-            original_message=original_message,
-            response=agent_reply_text,
-            host_block=host_block,
-            extra={"host_trust_issues": trust_issues},
-        )
-
-        combined_json = built_resp["combined_json"]
+        combined_json = self.dna.sign_response(agent_reply_text, ctx=ctx)
 
         parts = [
-            Part(root=TextPart(text=agent_reply_text or "")),   
-            Part(root=TextPart(text=combined_json)),            
+            Part(root=TextPart(text=agent_reply_text or "")),
+            Part(root=TextPart(text=combined_json)),
         ]
 
         await updater.add_artifact(parts)

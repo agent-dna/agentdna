@@ -1,123 +1,796 @@
 from __future__ import annotations
-from typing import Any, Dict, Optional
+
+import asyncio
+import copy
+import hashlib
+import json
+import os
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+
+from multiformats_cid.cid import CIDv0
 
 from .trust import RubixTrustService
-from .handler import RubixMessageHandler
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# NFT config loader (file + env, with sensible defaults)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _default_nft_config_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "config.json"
+
+
+def _deep_json_decode(obj: Any) -> Any:
+    """
+    Recursively replace JSON-string values with their parsed equivalents.
+
+    Used by ``AgentDNA.history()`` so chain records render as a foldable tree
+    end-to-end. Strings that aren't valid JSON (or don't open with ``{`` /
+    ``[``) are returned untouched, so plain free-text fields stay strings.
+    """
+    if isinstance(obj, dict):
+        return {k: _deep_json_decode(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_deep_json_decode(item) for item in obj]
+    if isinstance(obj, str):
+        stripped = obj.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return _deep_json_decode(json.loads(obj))
+            except (TypeError, json.JSONDecodeError):
+                pass
+    return obj
+
+
+def _load_nft_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str, Any]:
+    if not config_path:
+        config_path = _default_nft_config_path()
+
+    cfg_nft: Dict[str, Any] = {}
+    try:
+        with Path(config_path).open("r", encoding="utf-8") as f:
+            cfg_nft = (json.load(f).get("nft") or {})
+    except Exception:
+        cfg_nft = {}
+
+    return {
+        "value":       float(os.getenv("NFT_VALUE", cfg_nft.get("value", 0.001))),
+        "data":        os.getenv("NFT_INIT_DATA", cfg_nft.get("data", "init data")),
+        "password":    cfg_nft.get("password"),
+        "timeout":     float(cfg_nft.get("timeout", 100.0)),
+        "quorum_type": int(cfg_nft.get("quorum_type", 2)),
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Public types: SignedEnvelope (wire-ready string + metadata) and VerifyResult
+# (typed verify outcome).  Both are additive — they don't replace the dicts
+# returned by the legacy build()/handle() entry points.
+# ──────────────────────────────────────────────────────────────────────────────
+
+class SignedEnvelope(str):
+    """
+    Wire-ready signed host envelope.
+
+    Behaves as a string (the JSON you put on transport) and carries the
+    underlying signed block as attributes::
+
+        env = dna.envelope({"tool": "append_task", "args": {...}})
+        send_over_wire(env)             # env IS the wire string
+        env.host_block                  # the signed dict
+        env.message_id, env.context_id  # ids
+        env.original_message            # the JSON we signed
+    """
+
+    _ATTRS = ("host_block", "message_id", "context_id", "original_message")
+
+    def __new__(cls, wire: str, **attrs):
+        obj = super().__new__(cls, wire or "")
+        for name in cls._ATTRS:
+            object.__setattr__(obj, name, attrs.get(name))
+        return obj
+
+
+@dataclass
+class VerifyResult:
+    """
+    Typed outcome of verifying a signed reply (host side).
+
+    Read this instead of walking the dict returned by the legacy handle() path.
+    """
+
+    payload: Optional[Any] = None                  # parsed reply body (JSON or str)
+    verified: bool = False                          # all signature checks passed
+    trust_issues: List[str] = field(default_factory=list)
+    signed_text: Optional[str] = None               # the inner combined_json we verified
+    host_block: Optional[Dict[str, Any]] = None
+    agent_block: Optional[Dict[str, Any]] = None
+    nft_result: Optional[Dict[str, Any]] = None
+    verification_status: str = "unknown"            # "ok" | "failed" | "unknown"
+
+
+@dataclass
+class RequestContext:
+    """
+    Verified inbound request (server side).
+
+    A server tool calls ``dna.verify_request(envelope)`` to get one of these,
+    then passes it to ``dna.sign_response(payload, ctx=ctx)`` so the reply is
+    cryptographically stitched to the exact request it answers.
+    """
+
+    original_message: str = ""                      # the JSON string the host signed
+    host_block: Optional[Dict[str, Any]] = None     # signed host block (passed back when replying)
+    trust_issues: List[str] = field(default_factory=list)
+    verified: bool = False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AgentDNA — single entry point. Owns envelope construction, response
+# verification, and the NFT audit log. Sign/verify primitives live in
+# RubixTrustService (the rubix-py SDK adapter).
+# ──────────────────────────────────────────────────────────────────────────────
 
 class AgentDNA:
     """
     Single entry point for agent developers.
 
-    They only call:
-        dna.build(...)          # outbound message (request or response)
-        await dna.handle(...)   # inbound message (request or response)
+    Two ergonomic helpers (recommended):
 
-    Behavior is decided purely by `role`:
+        env    = dna.envelope(payload)              # sign outbound
+        result = await dna.verify_reply(            # verify inbound + NFT
+            raw_text, original=payload,
+        )
 
-      role="host":
-        - build  -> host_request      (host → remote)
-        - handle -> host              (remote → host, verify + NFT)
+    Plus low-level primitives if you need them:
 
-      role="remote":
-        - build  -> agent_response    (remote → host)
-        - handle -> remote            (host → remote, verify host)
+        dna.build(original_message=...)             # returns dict
+        await dna.handle(raw_text=...)              # returns dict
+        await dna.handle(resp_parts=..., original_task=..., remote_name=...)
+
+    And one-line conveniences:
+
+        AgentDNA.from_env(alias="...")              # build from env vars
+        dna.history()                               # decoded chain history
     """
+
+    # ─── Construction ────────────────────────────────────────────────────────
 
     def __init__(
         self,
         alias: str,
         api_key: str,
-        role: str = "remote",
         chain_url: Optional[str] = None,
         token_filename: str = "agent_info.json",
+        enable_nft: bool = True,
+        **_legacy,
     ) -> None:
-        if role not in ("host", "remote"):
-            raise ValueError("AgentDNA.role must be 'host' or 'remote'")
+        # Back-compat: silently accept role= from older callers
+        _legacy.pop("role", None)
 
-        self.role = role
-        self.trust = RubixTrustService(alias=alias,api_key=api_key, chain_url=chain_url)
+        # Trust layer — sign/verify primitives via rubix-py
+        self.trust = RubixTrustService(alias=alias, api_key=api_key, chain_url=chain_url)
+        self.did = self.trust.did
+        self.signer = self.trust.signer
 
-        self.handler = RubixMessageHandler(
-            alias=alias,
+        self.alias = alias
+        self.token_filename = token_filename
+
+        # NFT config + per-call audit state
+        self.enable_nft = enable_nft
+        self.nft_cfg = _load_nft_config()
+        self.last_parts: List[Dict[str, Any]] = []
+        self.last_trust_issues: List[str] = []
+        self.last_verification_status: str = "unknown"  # "ok" | "failed" | "unknown"
+
+        # NFT registration — populated eagerly below.
+        self.token_path: Optional[Path] = None
+        self.nft_token: Optional[str] = None
+
+        # An agent's audit-log NFT is bound to its DID. Deploy it eagerly so the
+        # chain identity exists the moment the agent is constructed (cached in
+        # agent_info.json on first deploy; subsequent constructions reuse it).
+        # Pass enable_nft=False at construction to skip — useful for pure-remote
+        # agents that never write to chain.
+        if self.enable_nft:
+            self._ensure_nft_token()
+
+    @classmethod
+    def from_env(cls, alias: Optional[str] = None, **overrides) -> "AgentDNA":
+        """
+        Construct AgentDNA from conventional env vars:
+
+            AGENTDNA_API_KEY  (required)
+            AGENTDNA_ALIAS    (used if `alias=` not provided)
+            CHAIN_URL         (optional)
+
+        Any kwarg passed to from_env() overrides the env-var of the same name.
+        """
+        api_key = overrides.pop("api_key", None) or os.environ.get("AGENTDNA_API_KEY")
+        if not api_key:
+            raise RuntimeError("AGENTDNA_API_KEY not set (and api_key= not passed)")
+
+        final_alias = alias or overrides.pop("alias", None) or os.environ.get("AGENTDNA_ALIAS")
+        if not final_alias:
+            raise RuntimeError("alias not provided (pass alias= or set AGENTDNA_ALIAS)")
+
+        return cls(
+            alias=final_alias,
             api_key=api_key,
-            token_filename=token_filename,
-            trust_service=self.trust,
-            enable_nft=(role == "host"),
+            chain_url=overrides.pop("chain_url", None) or os.environ.get("CHAIN_URL"),
+            **overrides,
         )
 
-    # ------------------------------------------------------------------
-    # BUILD: outbound messages
-    # ------------------------------------------------------------------
+    # Back-compat: examples that reach into `dna.handler.xxx` keep working.
+    @property
+    def handler(self) -> "AgentDNA":
+        return self
+
+    # ─── New ergonomic API: envelope() / verify_reply() / history() ──────────
+
+    def envelope(
+        self,
+        payload: Union[str, dict, list],
+        *,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> SignedEnvelope:
+        """
+        Sign a payload and return a wire-ready ``SignedEnvelope``.
+
+        ``payload`` may be a dict (auto-JSON'd, sorted keys), a list, or an
+        already-stringified JSON. The returned object is a ``str`` subclass —
+        pass it directly as the transport value::
+
+            env = dna.envelope({"tool": "X", "args": {...}})
+            tool_args["dna_envelope"] = env
+
+        Pass ``state={"task_id": ..., "context_id": ...}`` to thread stable
+        A2A-style task / context identifiers across multiple calls in the same
+        conversation.
+
+        And carries the underlying signed metadata as attributes
+        (``.host_block``, ``.message_id``, ``.context_id``, ``.original_message``).
+        """
+        if isinstance(payload, str):
+            original_message = payload
+        else:
+            original_message = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+
+        built = self._build_host_request(
+            original_message=original_message,
+            state=state or {},
+        )
+        return SignedEnvelope(
+            built["host_json"],
+            host_block=built["host_block"],
+            message_id=built["message_id"],
+            context_id=built["context_id"],
+            original_message=original_message,
+        )
+
+    async def verify_reply(
+        self,
+        raw_text: Union[str, dict, list],
+        *,
+        original: Union[str, dict, list, SignedEnvelope],
+        remote_name: Optional[str] = None,
+        execute_nft: bool = True,
+    ) -> VerifyResult:
+        """
+        Verify a signed reply against the original payload we sent. Writes the
+        audit-log NFT by default (``execute_nft=True``).
+
+        ``raw_text`` is the response from your transport. If it's wrapped (e.g.
+        ``{"combined_json": "..."}`` or a dict containing a signed envelope as
+        a field), the signed body is auto-extracted.
+
+        ``original`` is the payload you originally signed — pass either the
+        dict/string you handed to ``envelope()``, or the ``SignedEnvelope``
+        itself (its ``.original_message`` is used).
+        """
+        # Resolve `original` back to the exact string the host signed
+        if isinstance(original, SignedEnvelope):
+            original_str = original.original_message or str(original)
+        elif isinstance(original, str):
+            original_str = original
+        else:
+            original_str = json.dumps(original, sort_keys=True, ensure_ascii=False)
+
+        signed_text = self._unwrap_signed_text(raw_text)
+        if not signed_text:
+            return VerifyResult(
+                payload=None,
+                verified=False,
+                trust_issues=["empty or unparseable reply"],
+                signed_text=None,
+                verification_status="failed",
+            )
+
+        if remote_name is None:
+            remote_name = self._infer_remote_name(signed_text) or "remote"
+
+        raw_result = await self._handle_host_response(
+            resp_parts=[{"text": signed_text}],
+            original_task=original_str,
+            remote_name=remote_name,
+            execute_nft=execute_nft,
+        )
+
+        messages = raw_result.get("messages") or []
+        first = messages[0] if messages else {}
+        agent_block = first.get("agent") or {}
+        host_block = first.get("host")
+        envelope = agent_block.get("envelope") or {}
+
+        # Extract the reply body. The server-signed envelope's "response" field
+        # is what application code actually wants.
+        body = envelope.get("response")
+        parsed_payload: Any = body
+        if isinstance(body, str):
+            try:
+                parsed_payload = json.loads(body)
+            except (TypeError, json.JSONDecodeError):
+                parsed_payload = body  # leave as plain string
+
+        return VerifyResult(
+            payload=parsed_payload,
+            verified=(self.last_verification_status == "ok"),
+            trust_issues=list(raw_result.get("trust_issues") or []),
+            signed_text=signed_text,
+            host_block=host_block,
+            agent_block=agent_block,
+            nft_result=raw_result.get("nft_result"),
+            verification_status=self.last_verification_status,
+        )
+
+    # ─── Server side: verify_request() / sign_response() ─────────────────────
+
+    async def verify_request(
+        self,
+        envelope: Union[str, dict, None],
+        *,
+        verify_mode: str = "light",
+    ) -> RequestContext:
+        """
+        Verify an inbound host envelope received by a server tool.
+
+        ``envelope`` is whatever your transport delivered — a JSON string or an
+        already-parsed dict. Returns a ``RequestContext``; pass it to
+        ``dna.sign_response(payload, ctx=ctx)`` to produce the matching signed
+        reply.
+        """
+        if envelope is None:
+            return RequestContext(trust_issues=["No envelope provided"], verified=False)
+
+        raw_text = envelope if isinstance(envelope, str) else json.dumps(envelope)
+        info = self.trust.verify_message_payload(raw_text=raw_text, mode=verify_mode)
+
+        return RequestContext(
+            original_message=info.get("original_message") or "",
+            host_block=info.get("host_block"),
+            trust_issues=list(info.get("trust_issues") or []),
+            verified=bool(info.get("verified")),
+        )
+
+    def sign_response(
+        self,
+        payload: Union[str, dict, list],
+        *,
+        ctx: RequestContext,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        """
+        Sign a reply under a verified request context. Returns the wire string
+        (``combined_json``) — drop it directly into your transport response.
+
+        ``payload`` may be any JSON-able value; it's stringified internally.
+        Trust issues from the inbound verification are auto-attached under
+        ``host_trust_issues`` in the signed envelope.
+        """
+        if isinstance(payload, str):
+            response_str = payload
+        else:
+            response_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+        merged_extra = {"host_trust_issues": ctx.trust_issues, **(extra or {})}
+
+        built = self._build_agent_response(
+            original_message=ctx.original_message or response_str,
+            response=response_str,
+            host_block=ctx.host_block,
+            extra=merged_extra,
+        )
+        return built["combined_json"]
+
+    def history(self, latest: bool = False) -> List[Dict[str, Any]]:
+        """
+        Fetch decoded NFT chain history for this agent.
+
+        Returns ``[]`` if the audit-log NFT hasn't been deployed yet (i.e. this
+        agent has never verified a reply).
+
+        Any field whose value is a JSON-encoded string (``NFTData``, ``data``,
+        and nested ones like ``original_message``) is recursively parsed so
+        renderers like ``st.json()`` get a foldable tree all the way down
+        instead of one long escaped blob.
+        """
+        if not self.nft_token:
+            return []
+
+        # Local imports keep the chain-query dependency optional at import time.
+        from rubix.client import RubixClient
+        from rubix.querier import Querier
+
+        client = RubixClient(node_url=self.trust.base_url, timeout=300)
+        states = Querier(client).get_nft_states(
+            nft_address=self.nft_token,
+            only_latest_state=latest,
+        )
+
+        if isinstance(states, dict):
+            states = [states]
+        elif not isinstance(states, list):
+            return []
+
+        return [_deep_json_decode(s) for s in states]
+
+    # ─── BUILD: outbound messages (legacy primitives, still supported) ───────
+
     def build(self, **kwargs) -> Dict[str, Any]:
-        """
-        Host:
-            dna.build(
-                original_message=task,
-                state=tool_context.state or {},
-            )
+        if "original_message" not in kwargs:
+            raise ValueError("build() requires original_message")
+        if "response" in kwargs:
+            return self._build_agent_response(**kwargs)
+        return self._build_host_request(**kwargs)
 
-        Remote:
-            dna.build(
-                original_message=original_message,
-                response=agent_reply_text,
-                host_block=host_block,
-                extra={...},
-            )
-        """
-        if self.role == "host":
-            if "original_message" not in kwargs:
-                raise ValueError("Host.build() requires original_message")
-            return self.handler.build(
-                kind="host_request",
-                **kwargs,
-            )
+    def _build_host_request(
+        self,
+        *,
+        original_message: str,
+        state: Optional[Dict[str, Any]] = None,
+        **_extra,
+    ) -> Dict[str, Any]:
+        state = state or {}
+        task_id = state.get("task_id") or str(uuid.uuid4())
+        context_id = state.get("context_id") or str(uuid.uuid4())
+        message_id = str(uuid.uuid4())
 
-        # remote
-        if "original_message" not in kwargs or "response" not in kwargs:
-            raise ValueError("Remote.build() requires original_message and response")
-        return self.handler.build(
-            kind="agent_response",
-            **kwargs,
-        )
+        host_envelope = {
+            "original_message": original_message,
+            "task_id":          task_id,
+            "context_id":       context_id,
+            "message_id":       message_id,
+            "timestamp":        datetime.utcnow().isoformat() + "Z",
+        }
+        host_block = self.trust.sign_envelope(host_envelope)
+        host_json = json.dumps({"host": host_block}, separators=(",", ":"), sort_keys=True)
 
-    # ------------------------------------------------------------------
-    # HANDLE: inbound messages
-    # ------------------------------------------------------------------
+        return {
+            "kind":       "host_request",
+            "host_block": host_block,
+            "host_json":  host_json,
+            "task_id":    task_id,
+            "context_id": context_id,
+            "message_id": message_id,
+        }
+
+    def _build_agent_response(
+        self,
+        *,
+        original_message: str,
+        response: str,
+        host_block: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        **_extra,
+    ) -> Dict[str, Any]:
+        envelope: Dict[str, Any] = {"original_message": original_message, "response": response}
+        if extra:
+            envelope.update(extra)
+        agent_block = self.trust.sign_envelope(envelope)
+
+        combined: Dict[str, Any] = {"agent": agent_block}
+        if host_block is not None:
+            combined["host"] = host_block
+        combined_json = json.dumps(combined, separators=(",", ":"), sort_keys=True)
+
+        return {
+            "kind":          "agent_response",
+            "host_block":    host_block,
+            "agent_block":   agent_block,
+            "envelope":      envelope,
+            "combined_json": combined_json,
+        }
+
+    # ─── HANDLE: inbound messages (legacy primitives, still supported) ───────
+
     async def handle(self, **kwargs) -> Dict[str, Any]:
-        """
-        Host:
-            result = await dna.handle(
-                resp_parts=resp_parts,
-                original_task=task,
-                remote_name=agent_name,
-                execute_nft=True,
-            )
-
-        Remote:
-            verify_info = await dna.handle(
-                raw_text=raw,
-                verify_mode="light",
-            )
-        """
-        if self.role == "remote":
-            # Remote handling inbound from host
-            raw_text = kwargs.get("raw_text")
-            if raw_text is None:
-                raise ValueError("Remote.handle() requires raw_text")
-
-            mode = kwargs.get("verify_mode", "light")
-            # trust.verify_message_payload is sync, but it's fine to call
+        if "raw_text" in kwargs:
             return self.trust.verify_message_payload(
-                raw_text=raw_text,
-                mode=mode,
+                raw_text=kwargs["raw_text"],
+                mode=kwargs.get("verify_mode", "light"),
             )
 
-        # Host handling inbound from remotes
         for required in ("resp_parts", "original_task", "remote_name"):
             if required not in kwargs:
-                raise ValueError(f"Host.handle() requires {required}")
-        return await self.handler.handle(
-            kind="host",
-            **kwargs,
+                raise ValueError(f"handle() requires {required}")
+        return await self._handle_host_response(**kwargs)
+
+    async def _handle_host_response(
+        self,
+        *,
+        resp_parts: List[Dict[str, Any]],
+        original_task: str,
+        remote_name: str,
+        execute_nft: bool = True,
+        **_extra,
+    ) -> Dict[str, Any]:
+        verified: List[Dict[str, Any]] = []
+        trust_issues: List[str] = []
+        error_msg: Optional[str] = None
+        nft_result: Optional[Dict[str, Any]] = None
+
+        for part in resp_parts:
+            raw_text = part.get("text") or part.get("content", "")
+            try:
+                payload = json.loads(raw_text)
+            except (TypeError, json.JSONDecodeError):
+                continue
+            if not isinstance(payload, dict) or "agent" not in payload:
+                continue
+
+            host_block = payload.get("host")
+            agent_block = payload["agent"]
+            signer_did = agent_block.get("agent")
+            env = agent_block.get("envelope", {})
+            sig = agent_block.get("signature")
+
+            if not (signer_did and env and sig and isinstance(env, dict)):
+                trust_issues.append("Missing fields in agent block")
+                print("Missing fields in agent block")
+                continue
+
+            env_verified = copy.deepcopy(env)
+            if not self.trust.verify_envelope(signer_did, env_verified, sig):
+                trust_issues.append(f"Invalid signature from {signer_did}")
+                print(f"Invalid signature from {signer_did}")
+                continue
+
+            if env_verified.get("original_message") != original_task:
+                trust_issues.append("Original message mismatch")
+                print("Original message mismatch")
+
+            verified.append({
+                "host": host_block,
+                "agent": {**agent_block, "envelope": copy.deepcopy(env_verified)},
+                "agent_sig_valid": True,
+            })
+            print("Verified agent block from", signer_did)
+
+        if not verified and not trust_issues:
+            error_msg = "No valid envelope response"
+            print("No valid envelope response")
+
+        # Snapshot for NFT payload + status
+        self.last_parts = verified
+        self.last_trust_issues = trust_issues or []
+        if not verified:
+            self.last_verification_status = "failed"
+        else:
+            self.last_verification_status = (
+                "failed" if self.last_trust_issues else "ok"
+            )
+
+        # NFT write — lazy-deploy on first need
+        if self.enable_nft and execute_nft and verified:
+            token = self._ensure_nft_token()
+            if token is not None:
+                try:
+                    nft_payload = self._build_nft_payload(remote_name)
+                    nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
+                    print("🚀 NFT execution result:", nft_result)
+                except Exception as e:
+                    print("⚠️ NFT execution failed:", e)
+
+        return {
+            "messages":     verified,
+            "trust_issues": self.last_trust_issues or None,
+            "error":        error_msg,
+            "nft_result":   nft_result,
+        }
+
+    # ─── NFT: lazy deploy + execute ───────────────────────────────────────────
+
+    def _ensure_nft_token(self) -> Optional[str]:
+        """Deploy (or load) the audit-log NFT on first need. Cached after that."""
+        if not self.enable_nft:
+            return None
+        if self.nft_token is not None:
+            return self.nft_token
+
+        if self.token_path is None:
+            env_path = os.getenv("AGENTDNA_TOKEN_PATH")
+            if env_path:
+                self.token_path = Path(env_path)
+            else:
+                token_dir = Path.home() / ".agentdna"
+                token_dir.mkdir(parents=True, exist_ok=True)
+                self.token_path = token_dir / self.token_filename
+            print("Path:", self.token_path)
+
+        self.nft_token = self._load_or_deploy_nft()
+        print("✅ Rubix NFT for alias", self.alias, ":", self.nft_token)
+        return self.nft_token
+
+    def _load_or_deploy_nft(self) -> str:
+        # Agent ID = CIDv0(sha256(did.alias))
+        digest = hashlib.sha256(f"{self.signer.did}.{self.alias}".encode("utf-8")).digest()
+        multihash_bytes = bytes([0x12, len(digest)]) + digest
+        agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
+
+        if not self.token_path:
+            raise RuntimeError("Agent info path not initialized")
+
+        agent_info: List[Dict[str, Any]] = []
+        if self.token_path.exists():
+            try:
+                with open(self.token_path, "r", encoding="utf-8") as f:
+                    agent_info = json.load(f)
+            except Exception as e:
+                raise RuntimeError(f"Failed to read agent info: {e}")
+            for agent in agent_info:
+                if agent.get("agent_id") == agent_id:
+                    print("Using existing Agent ID from:", self.token_path)
+                    return agent_id
+            print(f"Agent ID not found in {self.token_path}, deploying new Agent")
+        else:
+            print(f"agent_info.json not found at {self.token_path}, deploying new Agent")
+
+        resp = self.signer.deploy_nft(
+            nft_id=agent_id,
+            nft_value=self.nft_cfg["value"] or 5,
+            nft_data=json.dumps({"agent_name": self.alias}),
         )
+        if resp.get("error"):
+            raise RuntimeError(f"NFT deployment failed: {resp['error']}")
+        nft_address = resp["nft_address"]
+        if nft_address is None:
+            raise RuntimeError("unexpected error during Agent deployment: unable to fetch Agent ID")
+
+        agent_info.append({
+            "agent_id":   nft_address,
+            "agent_did":  self.signer.did,
+            "agent_name": self.alias,
+        })
+        with open(self.token_path, "w", encoding="utf-8") as f:
+            json.dump(agent_info, f, indent=2)
+        print("Stored Agent info in:", self.token_path)
+        return nft_address
+
+    def _execute_nft(self, nft_address: str, payload: Any) -> Dict[str, Any]:
+        nft_data = json.dumps(payload)
+        print("NFT address:", nft_address)
+        print("NFT data:", nft_data)
+        try:
+            response = self.signer.execute_nft(nft_address=nft_address, nft_data=nft_data)
+        except Exception as e:
+            raise RuntimeError(f"Rubix execute_nft call failed: {e}")
+        if not response.get("status", False):
+            raise RuntimeError(f"NFT Execution Failed: {response.get('message', '<no message>')}")
+        return response
+
+    def _build_nft_payload(self, remote_name: str) -> Dict[str, Any]:
+        host_block = None
+        responses: List[Dict[str, Any]] = []
+
+        for entry in self.last_parts:
+            if not host_block and entry.get("host"):
+                host_block = entry["host"]
+            if entry.get("agent"):
+                agent_entry = copy.deepcopy(entry["agent"])
+                env = agent_entry.get("envelope", {}) or {}
+                env["host_trust_issues"] = self.last_trust_issues
+                agent_entry["agent_did"] = agent_entry.get("agent")
+                agent_entry["agent"] = remote_name
+                agent_entry["envelope"] = env
+                responses.append(agent_entry)
+
+        return {
+            "comment":  f"Agent communication initiation to {remote_name}",
+            "executor": "host_agent",
+            "did":      self.did,
+            "verification": {
+                "status":       self.last_verification_status,
+                "trust_issues": self.last_trust_issues,
+            },
+            "host":      host_block,
+            "responses": responses,
+        }
+
+    # ─── Helpers for verify_reply() ──────────────────────────────────────────
+
+    @staticmethod
+    def _unwrap_signed_text(raw) -> Optional[str]:
+        """
+        Pull the signed combined_json out of whatever transport handed us.
+        Accepts:
+          - plain combined_json string (returned as-is)
+          - JSON-stringified ``{"combined_json": "..."}`` (one level of unwrap)
+          - dict already parsed (same unwrap)
+          - list of A2A-style parts (``[{"text": "..."}, ...]`` or list of
+            strings): walks the list and returns the first part whose body
+            parses to a signed envelope (a dict with a top-level ``"agent"``
+            block).
+        """
+        if raw is None:
+            return None
+
+        if isinstance(raw, list):
+            for item in raw:
+                if isinstance(item, str):
+                    text = item
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content") or ""
+                else:
+                    continue
+                if AgentDNA._looks_signed(text):
+                    return text
+            return None
+
+        if isinstance(raw, dict):
+            inner = raw.get("combined_json")
+            return inner if isinstance(inner, str) else json.dumps(raw)
+
+        text = (raw or "").strip()
+        if not text:
+            return None
+        try:
+            obj = json.loads(text)
+            if isinstance(obj, dict) and isinstance(obj.get("combined_json"), str):
+                return obj["combined_json"]
+        except Exception:
+            pass
+        return text
+
+    @staticmethod
+    def _looks_signed(text: str) -> bool:
+        """True iff ``text`` parses to a dict carrying a signed agent block."""
+        if not isinstance(text, str):
+            return False
+        stripped = text.lstrip()
+        if not stripped.startswith("{"):
+            return False
+        try:
+            obj = json.loads(text)
+        except Exception:
+            return False
+        if not isinstance(obj, dict):
+            return False
+        agent = obj.get("agent")
+        return isinstance(agent, dict) and "envelope" in agent
+
+    @staticmethod
+    def _infer_remote_name(signed_text: str) -> Optional[str]:
+        """
+        Best-effort remote_name extraction from the signed reply: prefer an
+        explicit ``agent_name`` / ``remote_name`` field inside the envelope,
+        else fall back to the agent's DID tail (last 16 chars).
+        """
+        try:
+            obj = json.loads(signed_text)
+        except Exception:
+            return None
+        agent_block = obj.get("agent") if isinstance(obj, dict) else None
+        if not isinstance(agent_block, dict):
+            return None
+        env = agent_block.get("envelope") or {}
+        for key in ("agent_name", "remote_name"):
+            if isinstance(env.get(key), str) and env[key]:
+                return env[key]
+        did = agent_block.get("agent")
+        if isinstance(did, str) and did:
+            return did.split(":")[-1][:16]
+        return None

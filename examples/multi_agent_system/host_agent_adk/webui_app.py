@@ -1,8 +1,6 @@
 import os, sys, uuid, asyncio
 import streamlit as st
 import nest_asyncio
-from rubix.client import RubixClient
-from rubix.querier import Querier
 from dotenv import load_dotenv
 from pathlib import Path
 
@@ -10,7 +8,6 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from agentdna import NodeClient
 from host.agent import HostAgent
 
 nest_asyncio.apply()
@@ -18,9 +15,6 @@ load_dotenv()
 HERE = os.path.dirname(__file__)
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-
-node = NodeClient(alias="host")
-DEFAULT_BASE_URL = node.get_base_url()
 
 REMOTE_URLS = [
     "http://localhost:10002",
@@ -52,6 +46,8 @@ if "session_id" not in st.session_state:
     st.session_state.session_id = str(uuid.uuid4())
 if "chat" not in st.session_state:
     st.session_state.chat = []
+if "chain_history" not in st.session_state:
+    st.session_state.chain_history = []
 
 
 async def consume_stream(q: str, sid: str) -> str:
@@ -67,14 +63,20 @@ def run_stream(q: str) -> str:
         consume_stream(q, st.session_state.session_id)
     )
 
-# 1) Render chat history ONCE
+# 1) Render chat history
 for role, msg in st.session_state.chat:
-    if role == "assistant_json":
-        st.chat_message("assistant").json(msg)
-    else:
-        st.chat_message(role).write(msg)
+    st.chat_message(role).write(msg)
 
-# 2) Single chat_input
+# 1b) Chain-history panel — foldable JSON tree, no horizontal overflow.
+if st.session_state.chain_history:
+    nft_id = HOST.dna.nft_token or ""
+    with st.expander(
+        f"Chain History — NFT `{nft_id}` — {len(st.session_state.chain_history)} record(s)",
+        expanded=True,
+    ):
+        st.json(st.session_state.chain_history, expanded=2)
+
+# 2) Chat input
 prompt = st.chat_input("Type a message for the Host Agent…", key="host_chat_input")
 
 # 3) Handle new input
@@ -92,6 +94,7 @@ if prompt:
 # -------------------------
 st.sidebar.subheader("Controls")
 
+
 def quick(q: str):
     st.session_state.chat.append(("user", f"(Quick) {q}"))
     with st.spinner("Running…"):
@@ -99,50 +102,25 @@ def quick(q: str):
     st.session_state.chat.append(("assistant", reply))
     st.rerun()
 
+
 st.sidebar.button("Court Availabilities", on_click=lambda: quick("/other next 3 slots"))
 
 st.sidebar.button(
     "New Session",
-    on_click=lambda: st.session_state.update(session_id=str(uuid.uuid4()), chat=[])
+    on_click=lambda: st.session_state.update(session_id=str(uuid.uuid4()), chat=[]),
 )
 
-def get_nft_token_from_host() -> str:
-    try:
-        return HOST.dna.handler.nft_token
-    except Exception:
-        return ""
+st.sidebar.divider()
 
-nft_id = get_nft_token_from_host()
-if not nft_id:
-    st.sidebar.write("⚠️ No NFT token available (HOST.dna.handler.nft_token not set)")
+# -------------------------
+# Audit-log NFT + chain history
+# -------------------------
+st.sidebar.subheader("Audit Log")
 
-def fetch_nft_data(nft_id: str, latest: bool = False) -> dict:
-    client = RubixClient(node_url=DEFAULT_BASE_URL, timeout=300)
-    rubixQuerier = Querier(client)
-    states = rubixQuerier.get_nft_states(
-        nft_address=nft_id,
-        only_latest_state=latest
-    )
-    print(f"Total NFT States Retrieved: {states}")
-    return states
+nft_id = HOST.dna.nft_token or ""
+st.sidebar.caption(f"NFT: `{nft_id}`" if nft_id else "NFT: (none yet)")
 
-if not nft_id:
-    st.sidebar.write("⚠️ token.txt not found")
-
-latest_only = False
-
-if st.sidebar.button("History Records"):
-    if not nft_id:
-        st.warning("No NFT ID found in token.txt")
-    else:
-        with st.spinner("Fetching NFT data…"):
-            nft_resp = fetch_nft_data(nft_id, latest_only)
-        st.session_state.chat.append(("user", f"(NFT Request) {nft_id}"))
-        st.session_state.chat.append(("assistant_json", nft_resp))
-        st.rerun()
-
-if "inject_fake" not in st.session_state:
-    st.session_state.inject_fake = False
-
-st.sidebar.checkbox("Inject Fake Response", key="inject_fake")
-HOST.inject_fake = st.session_state.inject_fake
+if st.sidebar.button("History Records", disabled=not nft_id):
+    with st.spinner("Fetching NFT data…"):
+        st.session_state.chain_history = HOST.dna.history()
+    st.rerun()
