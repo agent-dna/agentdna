@@ -1,6 +1,6 @@
-# AgentDNA — Architecture & Adoption Guide
+# AgentDNA Guide
 
-A short reference for **how the `agentdna` package is structured internally** and **how adopters wire it into their applications**.
+**How the `agentdna` package is structured internally** and **How adopters wire it into their agentic systems**.
 
 ---
 
@@ -9,7 +9,7 @@ A short reference for **how the `agentdna` package is structured internally** an
 ```
 agentdna/
 ├── __init__.py       — public exports
-├── core.py           — AgentDNA class (everything an adopter touches)
+├── core.py           — AgentDNA class 
 ├── trust.py          — RubixTrustService (rubix-py SDK adapter)
 └── node_client.py    — resolve_chain_url() + back-compat NodeClient shim
 ```
@@ -36,13 +36,12 @@ graph LR
     Core -. lazy import for history\(\) .-> RubixPy
 ```
 
-The split is intentional:
 
 | File | Role |
 |---|---|
 | **`core.py`** | What adopters use. Owns message envelope construction, NFT audit-log writes, and per-call state. |
-| **`trust.py`** | The *only* place that talks to `rubix-py` for sign/verify. Swap-out point if Rubix changes. |
-| **`node_client.py`** | URL resolution from config / env. Function + back-compat class. |
+| **`trust.py`** | Links to `rubix-py` for sign/verify. |
+| **`node_client.py`** | URL resolution from config / env. Function |
 
 ### Public exports
 
@@ -58,7 +57,7 @@ from agentdna import (
 )
 ```
 
-### The two public methods that do everything
+### The two public methods
 
 **`dna.build(...)`** signs. **`dna.handle(...)`** verifies. Their behavior depends on what you pass:
 
@@ -68,10 +67,7 @@ from agentdna import (
 | `dna.build(payload, ctx=ctx)` | Remote signing a reply under a verified context | wire string |
 | `await dna.handle(envelope)` | Remote verifying an inbound request | `RequestContext` |
 | `await dna.handle(reply, original=env)` | Host verifying a signed reply (also writes the audit-log NFT) | `VerifyResult` |
-| `dna.build(original_message=..., ...)` | Legacy (kwarg form) | `dict` |
-| `await dna.handle(raw_text=...)` / `(resp_parts=...)` | Legacy (kwarg form) | `dict` |
 
-The four explicit-name aliases (`dna.envelope` / `dna.verify_reply` / `dna.verify_request` / `dna.sign_response`) still exist for adopters who prefer self-documenting names — they're one-line wrappers around the same dispatch.
 
 ### The `AgentDNA` surface
 
@@ -117,17 +113,17 @@ classDiagram
 
 ---
 
-## 2. How an example adopts the package
+## 2. How to build an example
 
 Every example follows the **same two-sided pattern**: a **host** that initiates conversations and writes audit-log records, plus one or more **remotes** that verify and respond.
 
-### Host side (the initiator)
+### The Initiator (Host)
 
 ```python
 from agentdna import AgentDNA
 
 dna = AgentDNA(alias="MyHostAgent", api_key=AGENTDNA_API_KEY)
-# ↑ eagerly deploys this agent's audit-log NFT, tied to its DID
+# ↑ creates DID and deploys agent's audit-log 'NFT'
 
 # 1. Sign an outbound request
 env = dna.build({"user_query": "...", "tool": "...", "args": {...}})
@@ -145,13 +141,12 @@ result = await dna.handle(reply_text, original=env, remote_name="MyRemote")
 # result.nft_result       — chain receipt
 ```
 
-### Remote side (the responder)
+### The responders (Remote)
 
 ```python
 from agentdna import AgentDNA
 
 dna = AgentDNA(alias="MyRemote", api_key=AGENTDNA_API_KEY, enable_nft=False)
-# ↑ pure responder — never writes to chain, no NFT deploy on construction
 
 async def handle_call(args, dna_envelope=None):
     # 1. Verify the host's signed envelope
@@ -200,7 +195,6 @@ sequenceDiagram
     DNA_H-->>App: VerifyResult (payload, verified, trust_issues, nft_result)
 ```
 
-The **only** chain writes are: (a) one NFT deploy per agent at construction (for hosts), and (b) one NFT execute per host-side `dna.handle(reply, original=...)` call. Pure-remote agents do neither.
 
 ---
 
@@ -216,16 +210,16 @@ The **only** chain writes are: (a) one NFT deploy per agent at construction (for
 | `anthropic_managed_agents` | Anthropic Managed Agents API | (n/a — uses Anthropic's own session tracing instead of AgentDNA NFTs) | — | not applicable |
 | `JIRA` | MCP stdio | Streamlit app | `server.py` (Jira REST) | still on the **kwarg-form** legacy `dna.build` / `dna.handle` API — same two methods, just the older call shape |
 
-### Files an example needs to wire AgentDNA in
+### Required Files for a new example
 
 | File | Purpose |
 |---|---|
-| `pyproject.toml` | declares `agent-dna = { path = "../../", editable = true }` so changes to the live source apply immediately |
+| `pyproject.toml` | declares `agent-dna = { path = "../../", editable = true }` |
 | `.env` (+ `.env.sample`) | holds `AGENTDNA_API_KEY` (required) and any model/transport keys |
 | `app.py` / host code | constructs `AgentDNA(alias=..., api_key=...)`, uses `dna.build(payload)` + `await dna.handle(reply, original=env)` |
 | `server.py` / remote code | constructs `AgentDNA(alias=..., api_key=..., enable_nft=False)`, uses `await dna.handle(envelope)` + `dna.build(payload, ctx=ctx)` |
 
-### What the host-side audit-log NFT records
+### What is recorded on chain
 
 For each verified turn the host writes one record on chain. Decoded structure (rendered as a foldable tree by `dna.history()`):
 
@@ -250,11 +244,11 @@ For each verified turn the host writes one record on chain. Decoded structure (r
 }
 ```
 
-This is the immutable record any audit / verification party can later check against the chain.
+This is the immutable record any audit / verification party can later check from the chain.
 
 ---
 
-## 4. Lifecycle gotchas (saving future-you a debugging session)
+## 4. Common Bugs and Fixes
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -266,10 +260,6 @@ This is the immutable record any audit / verification party can later check agai
 
 ---
 
-## 5. Quick mental model
+## 5. A Quick 'What is AgentDNA'
 
-- **AgentDNA** is a thin trust layer on top of *any* agent transport. It knows nothing about MCP, A2A, HTTP — it just gives you signed strings to send and a typed result when you verify what you got back.
-- **Trust split**: signing/verification happens locally via `rubix-py`. Audit-log writes (NFT execute) hit the Rubix chain. Adopters never call `rubix-py` directly — `agentdna.trust` is the only consumer.
-- **Two methods, four call shapes**: `dna.build(payload)` signs a request, `dna.build(payload, ctx=ctx)` signs a reply, `await dna.handle(envelope)` verifies a request, `await dna.handle(reply, original=env)` verifies a reply.
-- **Two-sided usage**: one agent's `dna.build(payload)` is another agent's `dna.handle(envelope)`; one agent's `dna.build(reply, ctx=ctx)` is another agent's `dna.handle(reply, original=env)`. The four shapes always go in pairs.
-- **One audit record per verified turn**, written by the host. Pure remotes never write to chain.
+- **AgentDNA** is a trust layer on top of *any* agentic system. It is framework agnostic (MCP, A2A, HTTP). It just gives you signed strings to send and a typed result when you verify what you got back.
