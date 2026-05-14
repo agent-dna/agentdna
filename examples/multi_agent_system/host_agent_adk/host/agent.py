@@ -171,8 +171,8 @@ class HostAgent:
         Tool called by the Host's LLM to contact a remote agent.
 
         Trust-layer flow is two AgentDNA calls:
-          - dna.envelope(task, state=...)               sign + wrap host message
-          - await dna.verify_reply(parts, original=env) verify remote reply + NFT
+          - dna.build(task, state=...)               sign + wrap host message
+          - await dna.handle(parts, original=env) verify remote reply + NFT
 
         Returns a clean dict for the LLM:
           {
@@ -193,7 +193,7 @@ class HostAgent:
         state["task_id"] = task_id
 
         # ---- sign host → remote envelope ----
-        env = self.dna.envelope(task, state=state)
+        env = self.dna.build(task, state=state)
 
         request = SendMessageRequest(
             id=env.message_id,
@@ -231,7 +231,7 @@ class HostAgent:
                         resp_parts.append({"text": text})
 
         # ---- verify + NFT-record the reply ----
-        result = await self.dna.verify_reply(
+        result = await self.dna.handle(
             resp_parts,
             original=env,
             remote_name=agent_name,

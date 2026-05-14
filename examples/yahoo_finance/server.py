@@ -89,14 +89,14 @@ def _history_blocking(symbol: str, period: str):
 # MCP tools
 # ─────────────────────────────
 # Each tool follows the 3-step pattern:
-#   1. ctx = await dna.verify_request(dna_envelope)
+#   1. ctx = await dna.handle(dna_envelope)
 #   2. business logic
-#   3. return dna.sign_response(payload, ctx=ctx)
+#   3. return dna.build(payload, ctx=ctx)
 
 
 @mcp.tool()
 async def get_quote(symbol: str, dna_envelope=None):
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
     loop = asyncio.get_running_loop()
     try:
         payload = await asyncio.wait_for(
@@ -105,12 +105,12 @@ async def get_quote(symbol: str, dna_envelope=None):
         )
     except Exception as e:
         payload = {"ok": False, "error": str(e)}
-    return dna.sign_response(payload, ctx=ctx)
+    return dna.build(payload, ctx=ctx)
 
 
 @mcp.tool()
 async def get_history(symbol: str, period: str = "1mo", dna_envelope=None):
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
     loop = asyncio.get_running_loop()
     try:
         payload = await asyncio.wait_for(
@@ -119,7 +119,7 @@ async def get_history(symbol: str, period: str = "1mo", dna_envelope=None):
         )
     except Exception as e:
         payload = {"ok": False, "error": str(e)}
-    return dna.sign_response(payload, ctx=ctx)
+    return dna.build(payload, ctx=ctx)
 
 
 if __name__ == "__main__":

@@ -22,8 +22,8 @@ Environment variables (`GOOGLE_API_KEY`, `AGENTDNA_API_KEY`) are loaded from the
 
 Pure-remote agent — `AgentDNA(alias="kaitlynn", ..., enable_nft=False)`. Never writes to chain. On each incoming request:
 
-1. `dna.verify_request(raw)` → typed `RequestContext` (host_block, original_message, trust_issues).
+1. `dna.handle(raw)` → typed `RequestContext` (host_block, original_message, trust_issues).
 2. LangGraph reasoning over Kaitlynn's calendar.
-3. `dna.sign_response(reply, ctx=ctx)` → wire string returned to the host.
+3. `dna.build(reply, ctx=ctx)` → wire string returned to the host.
 
 Only the host (`host_agent_adk`) writes to chain when it verifies the reply.

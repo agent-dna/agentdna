@@ -232,47 +232,9 @@ class AgentDNA:
 
     # ─── New ergonomic API: envelope() / verify_reply() / history() ──────────
 
-    def envelope(
-        self,
-        payload: Union[str, dict, list],
-        *,
-        state: Optional[Dict[str, Any]] = None,
-    ) -> SignedEnvelope:
-        """
-        Sign a payload and return a wire-ready ``SignedEnvelope``.
+    # ─── Internal verify helpers (shared by handle() and aliases) ────────────
 
-        ``payload`` may be a dict (auto-JSON'd, sorted keys), a list, or an
-        already-stringified JSON. The returned object is a ``str`` subclass —
-        pass it directly as the transport value::
-
-            env = dna.envelope({"tool": "X", "args": {...}})
-            tool_args["dna_envelope"] = env
-
-        Pass ``state={"task_id": ..., "context_id": ...}`` to thread stable
-        A2A-style task / context identifiers across multiple calls in the same
-        conversation.
-
-        And carries the underlying signed metadata as attributes
-        (``.host_block``, ``.message_id``, ``.context_id``, ``.original_message``).
-        """
-        if isinstance(payload, str):
-            original_message = payload
-        else:
-            original_message = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-
-        built = self._build_host_request(
-            original_message=original_message,
-            state=state or {},
-        )
-        return SignedEnvelope(
-            built["host_json"],
-            host_block=built["host_block"],
-            message_id=built["message_id"],
-            context_id=built["context_id"],
-            original_message=original_message,
-        )
-
-    async def verify_reply(
+    async def _verify_reply(
         self,
         raw_text: Union[str, dict, list],
         *,
@@ -280,18 +242,6 @@ class AgentDNA:
         remote_name: Optional[str] = None,
         execute_nft: bool = True,
     ) -> VerifyResult:
-        """
-        Verify a signed reply against the original payload we sent. Writes the
-        audit-log NFT by default (``execute_nft=True``).
-
-        ``raw_text`` is the response from your transport. If it's wrapped (e.g.
-        ``{"combined_json": "..."}`` or a dict containing a signed envelope as
-        a field), the signed body is auto-extracted.
-
-        ``original`` is the payload you originally signed — pass either the
-        dict/string you handed to ``envelope()``, or the ``SignedEnvelope``
-        itself (its ``.original_message`` is used).
-        """
         # Resolve `original` back to the exact string the host signed
         if isinstance(original, SignedEnvelope):
             original_str = original.original_message or str(original)
@@ -324,11 +274,11 @@ class AgentDNA:
         first = messages[0] if messages else {}
         agent_block = first.get("agent") or {}
         host_block = first.get("host")
-        envelope = agent_block.get("envelope") or {}
+        env = agent_block.get("envelope") or {}
 
         # Extract the reply body. The server-signed envelope's "response" field
         # is what application code actually wants.
-        body = envelope.get("response")
+        body = env.get("response")
         parsed_payload: Any = body
         if isinstance(body, str):
             try:
@@ -347,28 +297,16 @@ class AgentDNA:
             verification_status=self.last_verification_status,
         )
 
-    # ─── Server side: verify_request() / sign_response() ─────────────────────
-
-    async def verify_request(
+    async def _verify_request(
         self,
         envelope: Union[str, dict, None],
         *,
         verify_mode: str = "light",
     ) -> RequestContext:
-        """
-        Verify an inbound host envelope received by a server tool.
-
-        ``envelope`` is whatever your transport delivered — a JSON string or an
-        already-parsed dict. Returns a ``RequestContext``; pass it to
-        ``dna.sign_response(payload, ctx=ctx)`` to produce the matching signed
-        reply.
-        """
         if envelope is None:
             return RequestContext(trust_issues=["No envelope provided"], verified=False)
-
         raw_text = envelope if isinstance(envelope, str) else json.dumps(envelope)
         info = self.trust.verify_message_payload(raw_text=raw_text, mode=verify_mode)
-
         return RequestContext(
             original_message=info.get("original_message") or "",
             host_block=info.get("host_block"),
@@ -376,35 +314,26 @@ class AgentDNA:
             verified=bool(info.get("verified")),
         )
 
-    def sign_response(
-        self,
-        payload: Union[str, dict, list],
-        *,
-        ctx: RequestContext,
-        extra: Optional[Dict[str, Any]] = None,
-    ) -> str:
-        """
-        Sign a reply under a verified request context. Returns the wire string
-        (``combined_json``) — drop it directly into your transport response.
+    # ─── Optional explicit-name aliases (build/handle still the canonical) ───
+    # Adopters who prefer self-documenting names can use these. They delegate
+    # to the same dispatch as build()/handle().
 
-        ``payload`` may be any JSON-able value; it's stringified internally.
-        Trust issues from the inbound verification are auto-attached under
-        ``host_trust_issues`` in the signed envelope.
-        """
-        if isinstance(payload, str):
-            response_str = payload
-        else:
-            response_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+    def envelope(self, payload, *, state=None):
+        return self.build(payload, state=state)
 
-        merged_extra = {"host_trust_issues": ctx.trust_issues, **(extra or {})}
-
-        built = self._build_agent_response(
-            original_message=ctx.original_message or response_str,
-            response=response_str,
-            host_block=ctx.host_block,
-            extra=merged_extra,
+    async def verify_reply(self, raw_text, *, original, remote_name=None, execute_nft=True):
+        return await self.handle(
+            raw_text,
+            original=original,
+            remote_name=remote_name,
+            execute_nft=execute_nft,
         )
-        return built["combined_json"]
+
+    async def verify_request(self, envelope, *, verify_mode="light"):
+        return await self.handle(envelope, verify_mode=verify_mode)
+
+    def sign_response(self, payload, *, ctx, extra=None):
+        return self.build(payload, ctx=ctx, extra=extra)
 
     def history(self, latest: bool = False) -> List[Dict[str, Any]]:
         """
@@ -440,12 +369,91 @@ class AgentDNA:
 
     # ─── BUILD: outbound messages (legacy primitives, still supported) ───────
 
-    def build(self, **kwargs) -> Dict[str, Any]:
-        if "original_message" not in kwargs:
-            raise ValueError("build() requires original_message")
-        if "response" in kwargs:
-            return self._build_agent_response(**kwargs)
-        return self._build_host_request(**kwargs)
+    def build(
+        self,
+        payload: Optional[Union[str, dict, list]] = None,
+        *,
+        ctx: Optional[RequestContext] = None,
+        state: Optional[Dict[str, Any]] = None,
+        extra: Optional[Dict[str, Any]] = None,
+        **legacy,
+    ) -> Union[SignedEnvelope, str, Dict[str, Any]]:
+        """
+        Sign an outbound envelope. Two ergonomic call shapes plus the legacy
+        kwarg form — all three coexist; pick whichever reads best.
+
+        Sign a fresh request (host side) — positional payload, no ctx::
+
+            env = dna.build(host_msg)              # returns SignedEnvelope (str-like)
+            transport.send(str(env))
+
+        Sign a reply under a verified context (remote side) — pass ``ctx=``::
+
+            wire = dna.build(payload, ctx=ctx)     # returns wire string
+
+        Legacy kwarg form — same as before the refactor, returns a dict::
+
+            built = dna.build(original_message=task)
+            built = dna.build(original_message=task, response=reply,
+                              host_block=host_block, extra={...})
+        """
+        # Legacy path — caller passed original_message= as a kwarg
+        if "original_message" in legacy:
+            original_message = legacy.pop("original_message")
+            response = legacy.pop("response", None)
+            host_block = legacy.pop("host_block", None)
+            legacy_extra = legacy.pop("extra", None) or extra
+            legacy_state = legacy.pop("state", None) or state
+            if response is not None:
+                return self._build_agent_response(
+                    original_message=original_message,
+                    response=response,
+                    host_block=host_block,
+                    extra=legacy_extra,
+                )
+            return self._build_host_request(
+                original_message=original_message,
+                state=legacy_state or {},
+            )
+
+        if payload is None:
+            raise ValueError(
+                "build() needs a payload — pass it positionally or use "
+                "the legacy original_message= kwarg."
+            )
+
+        # New ergonomic path
+        if ctx is not None:
+            # Sign a reply under a verified request context
+            if isinstance(payload, str):
+                response_str = payload
+            else:
+                response_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
+            merged_extra = {"host_trust_issues": ctx.trust_issues, **(extra or {})}
+            built = self._build_agent_response(
+                original_message=ctx.original_message or response_str,
+                response=response_str,
+                host_block=ctx.host_block,
+                extra=merged_extra,
+            )
+            return built["combined_json"]
+
+        # Sign a fresh request — returns SignedEnvelope
+        if isinstance(payload, str):
+            original_message = payload
+        else:
+            original_message = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        built = self._build_host_request(
+            original_message=original_message,
+            state=state or {},
+        )
+        return SignedEnvelope(
+            built["host_json"],
+            host_block=built["host_block"],
+            message_id=built["message_id"],
+            context_id=built["context_id"],
+            original_message=original_message,
+        )
 
     def _build_host_request(
         self,
@@ -507,17 +515,79 @@ class AgentDNA:
 
     # ─── HANDLE: inbound messages (legacy primitives, still supported) ───────
 
-    async def handle(self, **kwargs) -> Dict[str, Any]:
-        if "raw_text" in kwargs:
+    async def handle(
+        self,
+        payload: Any = None,
+        *,
+        original: Optional[Union[str, dict, list, SignedEnvelope]] = None,
+        remote_name: Optional[str] = None,
+        verify_mode: str = "light",
+        execute_nft: bool = True,
+        **legacy,
+    ) -> Union["VerifyResult", "RequestContext", Dict[str, Any]]:
+        """
+        Verify an inbound envelope. Two ergonomic call shapes plus the legacy
+        kwarg form.
+
+        Verify a signed reply (host side) — pass ``original=`` to compare
+        against what we sent. Returns ``VerifyResult``, writes the audit-log
+        NFT (set ``execute_nft=False`` to skip)::
+
+            result = await dna.handle(reply_text, original=env)
+            result.payload, result.verified, result.trust_issues
+
+        Verify an inbound request (remote side) — returns ``RequestContext``::
+
+            ctx = await dna.handle(dna_envelope)
+            ctx.original_message, ctx.host_block, ctx.verified
+
+        Legacy kwarg form (returns a dict)::
+
+            info   = await dna.handle(raw_text=...)
+            result = await dna.handle(
+                resp_parts=...,
+                original_task=...,
+                remote_name=...,
+            )
+        """
+        # Legacy: kwarg-based call
+        if "raw_text" in legacy:
             return self.trust.verify_message_payload(
-                raw_text=kwargs["raw_text"],
-                mode=kwargs.get("verify_mode", "light"),
+                raw_text=legacy["raw_text"],
+                mode=legacy.get("verify_mode", verify_mode),
+            )
+        if "resp_parts" in legacy:
+            resp_parts = legacy["resp_parts"]
+            original_task = legacy.get("original_task")
+            rname = legacy.get("remote_name", remote_name)
+            for label, value in (("original_task", original_task), ("remote_name", rname)):
+                if value is None:
+                    raise ValueError(f"handle() requires {label}")
+            return await self._handle_host_response(
+                resp_parts=resp_parts,
+                original_task=original_task,
+                remote_name=rname,
+                execute_nft=legacy.get("execute_nft", execute_nft),
             )
 
-        for required in ("resp_parts", "original_task", "remote_name"):
-            if required not in kwargs:
-                raise ValueError(f"handle() requires {required}")
-        return await self._handle_host_response(**kwargs)
+        # New ergonomic path
+        if original is not None:
+            # Verify a signed reply against what we sent
+            return await self._verify_reply(
+                payload,
+                original=original,
+                remote_name=remote_name,
+                execute_nft=execute_nft,
+            )
+
+        if payload is None:
+            raise ValueError(
+                "handle() needs a payload — pass the envelope (positional) "
+                "or use the legacy raw_text=/resp_parts= kwargs."
+            )
+
+        # Verify an inbound request → RequestContext
+        return await self._verify_request(payload, verify_mode=verify_mode)
 
     async def _handle_host_response(
         self,

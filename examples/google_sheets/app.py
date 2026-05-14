@@ -94,8 +94,8 @@ def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str 
     write the conversation to chain.
 
     The whole trust-layer round-trip lives in two AgentDNA calls:
-      - dna.envelope(host_msg)               → wire-ready signed string
-      - dna.verify_reply(raw_out, original=) → typed VerifyResult (+ NFT write)
+      - dna.build(host_msg)               → wire-ready signed string
+      - dna.handle(raw_out, original=) → typed VerifyResult (+ NFT write)
     """
     host_msg = {
         "user_query": user_query or tool_name,
@@ -103,11 +103,11 @@ def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str 
         "tool_args": tool_args,
     }
 
-    env = dna.envelope(host_msg)
+    env = dna.build(host_msg)
     args_with_dna = {**tool_args, "dna_envelope": str(env)}
 
     tool_output_text = run(mcp_call_raw(tool_name, args_with_dna))
-    result = run(dna.verify_reply(tool_output_text, original=env, remote_name=REMOTE_NAME))
+    result = run(dna.handle(tool_output_text, original=env, remote_name=REMOTE_NAME))
 
     return {
         "tool_output_text":    tool_output_text,

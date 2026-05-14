@@ -45,8 +45,8 @@ That installs deps into a local `.venv/` on first run, then opens the UI at <htt
 
 ## Trust layer at a glance
 
-- **Host** (`app.py`) signs every tool call with `dna.envelope(host_msg)` and verifies the signed reply via `dna.verify_reply(...)`. Each verified turn writes one record to the host's audit-log NFT.
-- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.verify_request(...)`, does the sheet work, and signs the reply with `dna.sign_response(payload, ctx=ctx)`.
+- **Host** (`app.py`) signs every tool call with `dna.build(host_msg)` and verifies the signed reply via `dna.handle(reply, original=env)`. Each verified turn writes one record to the host's audit-log NFT.
+- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.handle(envelope)`, does the sheet work, and signs the reply with `dna.build(payload, ctx=ctx)`.
 - The sidebar's **History Records** button fetches the chain history via `dna.history()` and renders it as a foldable JSON tree.
 
 ## Troubleshooting

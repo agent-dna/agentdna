@@ -70,9 +70,9 @@ def _gh_headers() -> dict:
 # MCP TOOLS
 # ─────────────────────────────
 # Each tool follows the same three-step pattern:
-#   1. ctx = await dna.verify_request(dna_envelope)
+#   1. ctx = await dna.handle(dna_envelope)
 #   2. business logic
-#   3. return dna.sign_response(payload, ctx=ctx)
+#   3. return dna.build(payload, ctx=ctx)
 
 
 @mcp.tool()
@@ -82,9 +82,9 @@ async def create_issue(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("[SERVER] create_issue called")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
     if not ctx.verified:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": "failed to verify signature of Agent"},
             ctx=ctx,
         )
@@ -100,7 +100,7 @@ async def create_issue(
     else:
         payload = {"ok": False, "status_code": resp.status_code, "error": resp.text}
 
-    return dna.sign_response(payload, ctx=ctx)
+    return dna.build(payload, ctx=ctx)
 
 
 @mcp.tool()
@@ -111,9 +111,9 @@ async def create_pull_request(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("[SERVER] create_pull_request called")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
     if not ctx.verified:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": "failed to verify signature of Agent"},
             ctx=ctx,
         )
@@ -134,7 +134,7 @@ async def create_pull_request(
     else:
         payload = {"ok": False, "status_code": resp.status_code, "error": resp.text}
 
-    return dna.sign_response(payload, ctx=ctx)
+    return dna.build(payload, ctx=ctx)
 
 
 if __name__ == "__main__":

@@ -69,7 +69,7 @@ class SchedulingAgentExecutor(AgentExecutor):
         raw = context.get_user_input()
         print("📨 Incoming from Host – raw user input   :", raw)
 
-        ctx = await self.dna.verify_request(raw)
+        ctx = await self.dna.handle(raw)
         if not ctx.verified:
             logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
 
@@ -84,7 +84,7 @@ class SchedulingAgentExecutor(AgentExecutor):
             print(f"Error invoking agent: {e}")
             raise ServerError(error=InternalError()) from e
 
-        combined_json = self.dna.sign_response(result, ctx=ctx)
+        combined_json = self.dna.build(result, ctx=ctx)
 
         parts = [
             Part(root=TextPart(text=result)),

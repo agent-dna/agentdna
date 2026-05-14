@@ -180,7 +180,7 @@ class ResearchPipeline:
             if len(response) > _MAX_SIGN_RESPONSE_LEN
             else response
         )
-        return dna.sign_response(response_for_signing, ctx=ctx, extra=extra or {})
+        return dna.build(response_for_signing, ctx=ctx, extra=extra or {})
 
     # ── Pipeline stages ──────────────────────────────────────────────────────
 
@@ -198,7 +198,7 @@ class ResearchPipeline:
                     "question": question,
                     "subtopic": subtopic,
                 })
-                env = self._coordinator_dna.envelope(task_json)
+                env = self._coordinator_dna.build(task_json)
                 self._host_built.append(env)
 
         return subtopics
@@ -211,7 +211,7 @@ class ResearchPipeline:
 
         if self._dna_active and index < len(self._host_built):
             env = self._host_built[index]
-            ctx = self._run(researcher_dna.verify_request(env))
+            ctx = self._run(researcher_dna.handle(env))
             if not ctx.verified:
                 raise RuntimeError(f"Host verification failed: {ctx.trust_issues}")
 
@@ -246,10 +246,10 @@ class ResearchPipeline:
                 "question": question,
                 "subtopics": subtopics,
             })
-            env = self._coordinator_dna.envelope(task_json)
+            env = self._coordinator_dna.build(task_json)
             self._host_built.append(env)
 
-            ctx = self._run(self._synthesizer_dna.verify_request(env))
+            ctx = self._run(self._synthesizer_dna.handle(env))
             if not ctx.verified:
                 raise RuntimeError(f"Host verification failed: {ctx.trust_issues}")
 
@@ -315,7 +315,7 @@ class ResearchPipeline:
             )
             for i, combined_json in enumerate(self._combined_jsons):
                 is_last = i == len(self._combined_jsons) - 1
-                self._run(self._coordinator_dna.verify_reply(
+                self._run(self._coordinator_dna.handle(
                     combined_json,
                     original=self._host_built[i],
                     remote_name=remote_names[i],

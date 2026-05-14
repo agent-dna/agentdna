@@ -60,7 +60,7 @@ class KaitlynAgentExecutor(AgentExecutor):
         raw = context.get_user_input()
         print("📨 Incoming from Host – raw user input:", raw)
 
-        ctx = await dna.verify_request(raw)
+        ctx = await dna.handle(raw)
         if not ctx.verified:
             logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
 
@@ -85,7 +85,7 @@ class KaitlynAgentExecutor(AgentExecutor):
                     )
                     break
                 else:
-                    combined_json = dna.sign_response(item["content"], ctx=ctx)
+                    combined_json = dna.build(item["content"], ctx=ctx)
                     parts.append(Part(root=TextPart(text=combined_json)))
 
                     await updater.add_artifact(parts, name="scheduling_result")

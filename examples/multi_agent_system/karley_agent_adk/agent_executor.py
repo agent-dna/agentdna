@@ -86,7 +86,7 @@ class KarleyAgentExecutor(AgentExecutor):
 
         logger.debug("📨 Incoming from Host – raw user input: %r", raw)
 
-        ctx = await self.dna.verify_request(raw)
+        ctx = await self.dna.handle(raw)
         if not ctx.verified:
             logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
         logger.debug("Derived original_message for ADK: %r", ctx.original_message)
@@ -154,7 +154,7 @@ class KarleyAgentExecutor(AgentExecutor):
 
         logger.debug("execute() ADK final reply text: %r", agent_reply_text)
 
-        combined_json = self.dna.sign_response(agent_reply_text, ctx=ctx)
+        combined_json = self.dna.build(agent_reply_text, ctx=ctx)
 
         parts = [
             Part(root=TextPart(text=agent_reply_text or "")),

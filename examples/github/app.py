@@ -106,7 +106,7 @@ async def run_agent_turn(user_input: str):
                 "tool_name": tool_name,
                 "tool_args": tool_args,
             }
-            env = dna.envelope(host_msg)
+            env = dna.build(host_msg)
 
             tool_result = await session.call_tool(
                 tool_name,
@@ -118,7 +118,7 @@ async def run_agent_turn(user_input: str):
                 for block in tool_result.content
             )
 
-            result = await dna.verify_reply(
+            result = await dna.handle(
                 tool_output_text,
                 original=env,
                 remote_name=MCP_TOOL_NAME,

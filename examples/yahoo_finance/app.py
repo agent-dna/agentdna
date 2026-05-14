@@ -98,7 +98,7 @@ async def run_agent_turn(user_input: str):
                 "tool_name": tool_name,
                 "tool_args": tool_args,
             }
-            env = dna.envelope(host_message)
+            env = dna.build(host_message)
 
             tool_result = await session.call_tool(
                 tool_name,
@@ -110,7 +110,7 @@ async def run_agent_turn(user_input: str):
                 if isinstance(block, mcp_types.TextContent)
             )
 
-            result = await dna.verify_reply(
+            result = await dna.handle(
                 tool_output_text,
                 original=env,
                 remote_name=MCP_TOOL_NAME,

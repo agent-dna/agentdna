@@ -52,8 +52,8 @@ The host LLM (Gemini 2.5 Flash) decides whether to call `create_issue` or `creat
 
 ## Trust layer at a glance
 
-- **Host** (`app.py`) signs the tool call with `dna.envelope(host_msg)` and verifies the reply with `dna.verify_reply(...)`. Each verified turn writes one record to the host's audit-log NFT.
-- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.verify_request(...)`, hits the GitHub REST API, then signs the reply with `dna.sign_response(payload, ctx=ctx)`.
+- **Host** (`app.py`) signs the tool call with `dna.build(host_msg)` and verifies the reply with `dna.handle(reply, original=env)`. Each verified turn writes one record to the host's audit-log NFT.
+- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.handle(envelope)`, hits the GitHub REST API, then signs the reply with `dna.build(payload, ctx=ctx)`.
 - The sidebar's **History Records** button fetches chain history via `dna.history()` and renders it as a foldable JSON tree.
 
 ## Troubleshooting

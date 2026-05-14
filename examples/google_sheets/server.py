@@ -141,9 +141,9 @@ def _norm(x: Any) -> str:
 
 # ---------------- MCP tools ----------------
 # Each tool follows the same shape:
-#   1. ctx = await dna.verify_request(dna_envelope)
+#   1. ctx = await dna.handle(dna_envelope)
 #   2. business logic
-#   3. return dna.sign_response(payload, ctx=ctx)
+#   3. return dna.build(payload, ctx=ctx)
 
 
 @mcp.tool()
@@ -154,7 +154,7 @@ async def append_task(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === append_task CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
 
@@ -163,7 +163,7 @@ async def append_task(
     row = [task_id, title, "open", owner or "", notes or "", created_at]
     updated_range = _append(f"{SHEET_NAME}!A:F", [row])
 
-    return dna.sign_response({
+    return dna.build({
         "ok": True,
         "task": {
             "id": task_id,
@@ -184,7 +184,7 @@ async def get_open_tasks(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === get_open_tasks CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
     values = _read(f"{SHEET_NAME}!A1:F1000")
@@ -197,7 +197,7 @@ async def get_open_tasks(
         and (not want_owner or _norm(t.get("owner", "")) == want_owner)
     ]
 
-    return dna.sign_response(
+    return dna.build(
         {"ok": True, "tasks": out, "action_executed": True},
         ctx=ctx,
     )
@@ -210,7 +210,7 @@ async def get_tasks(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === get_tasks CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
     values = _read(f"{SHEET_NAME}!A1:F1000")
@@ -224,7 +224,7 @@ async def get_tasks(
         and (not want_owner or _norm(t.get("owner", "")) == want_owner)
     ]
 
-    return dna.sign_response(
+    return dna.build(
         {"ok": True, "tasks": out, "action_executed": True},
         ctx=ctx,
     )
@@ -238,7 +238,7 @@ async def find_tasks(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === find_tasks CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
     values = _read(f"{SHEET_NAME}!A1:F1000")
@@ -259,7 +259,7 @@ async def find_tasks(
         if all(w in hay for w in words):
             out.append(t)
 
-    return dna.sign_response(
+    return dna.build(
         {"ok": True, "tasks": out, "action_executed": True},
         ctx=ctx,
     )
@@ -272,20 +272,20 @@ async def update_task_status(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === update_task_status CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
 
     status_norm = _norm(status)
     if status_norm not in {"open", "done"}:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": "status must be one of: open, done", "action_executed": False},
             ctx=ctx,
         )
 
     row_num = _find_task_row_by_id(task_id)
     if row_num is None:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": f"task_id not found: {task_id}", "action_executed": False},
             ctx=ctx,
         )
@@ -293,7 +293,7 @@ async def update_task_status(
     cell = f"{SHEET_NAME}!C{row_num}"
     _update(cell, [[status_norm]])
 
-    return dna.sign_response(
+    return dna.build(
         {
             "ok": True,
             "task_id": task_id,
@@ -314,13 +314,13 @@ async def update_task(
     dna_envelope: dict | str | None = None,
 ) -> str:
     print("\n[SERVER] === update_task CALLED ===")
-    ctx = await dna.verify_request(dna_envelope)
+    ctx = await dna.handle(dna_envelope)
 
     _ensure_header()
 
     row_num = _find_task_row_by_id(task_id)
     if row_num is None:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": f"task_id not found: {task_id}", "action_executed": False},
             ctx=ctx,
         )
@@ -334,12 +334,12 @@ async def update_task(
             updated[name] = val
 
     if not updated:
-        return dna.sign_response(
+        return dna.build(
             {"ok": False, "error": "No fields to update provided", "action_executed": False},
             ctx=ctx,
         )
 
-    return dna.sign_response(
+    return dna.build(
         {"ok": True, "task_id": task_id, "updated": updated, "action_executed": True},
         ctx=ctx,
     )
