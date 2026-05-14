@@ -216,11 +216,11 @@ class HostAgent:
         task_id = state.get("task_id") or str(uuid.uuid4())
         state["task_id"] = task_id
 
-        # ---- sign host → remote envelope (carries user_block when present) ----
+        # ---- sign host → remote envelope (wraps the user's signed block when present) ----
         env = self.host_dna.build(
             task,
             state=state,
-            user=self._current_user_signed,
+            parent=self._current_user_signed,
         )
 
         request = SendMessageRequest(

@@ -116,7 +116,7 @@ async def run_agent_turn(user_input: str, user_dna):
                 "tool_name": tool_name,
                 "tool_args": tool_args,
             }
-            env = host_dna.build(host_msg, user=user_signed)
+            env = host_dna.build(host_msg, parent=user_signed)
 
             tool_result = await session.call_tool(
                 tool_name,

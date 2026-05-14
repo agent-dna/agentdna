@@ -212,9 +212,9 @@ class ResearchPipeline:
                     "subtopic": subtopic,
                 })
                 # Host signs over the user's signed intent — every envelope in
-                # this run carries the same user_block, committing the chain to
+                # this run wraps the same user block, committing the chain to
                 # "this user delegated this work."
-                env = self._coordinator_dna.build(task_json, user=self._user_signed)
+                env = self._coordinator_dna.build(task_json, parent=self._user_signed)
                 self._host_built.append(env)
 
         return subtopics
@@ -262,7 +262,7 @@ class ResearchPipeline:
                 "question": question,
                 "subtopics": subtopics,
             })
-            env = self._coordinator_dna.build(task_json, user=self._user_signed)
+            env = self._coordinator_dna.build(task_json, parent=self._user_signed)
             self._host_built.append(env)
 
             ctx = self._run(self._synthesizer_dna.handle(env))

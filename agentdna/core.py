@@ -81,10 +81,10 @@ class SignedEnvelope(str):
         env.host_block                   # signed dict
         env.message_id, env.context_id   # ids
         env.original_message             # what we signed
-        env.user_block                   # user delegation block, if any
+        env.parent_block                 # upstream signer's signed block (delegation chain), if any
     """
 
-    _ATTRS = ("host_block", "message_id", "context_id", "original_message", "user_block")
+    _ATTRS = ("host_block", "message_id", "context_id", "original_message", "parent_block")
 
     def __new__(cls, wire: str, **attrs):
         obj = super().__new__(cls, wire or "")
@@ -269,13 +269,15 @@ class AgentDNA:
             except (TypeError, json.JSONDecodeError):
                 parsed_payload = body  # not JSON — keep as plain string
 
-        # If a user_block rode along (delegation chain), verify the user's sig.
+        # If a delegation chain rode along, walk down to the root (the user)
+        # and verify their signature. Intermediate signers are trusted via
+        # the outer signature already verified by _handle_host_response.
         user_block = None
         user_verified = False
         if isinstance(host_block, dict):
-            host_env = host_block.get("envelope") or {}
-            if isinstance(host_env, dict) and isinstance(host_env.get("user_block"), dict):
-                user_block = host_env["user_block"]
+            chain = self._walk_chain(host_block)
+            if len(chain) > 1:
+                user_block = chain[-1]
                 user_did = user_block.get("agent")
                 user_env = user_block.get("envelope") or {}
                 user_sig = user_block.get("signature")
@@ -309,30 +311,51 @@ class AgentDNA:
         if envelope is None:
             return RequestContext(trust_issues=["No envelope provided"], verified=False)
         raw_text = envelope if isinstance(envelope, str) else json.dumps(envelope)
+
+        # verify_message_payload always checks the host (outermost) signature
+        # and, in heavy mode, also verifies the agent + responses blocks. It
+        # does NOT walk the nested delegation chain — that's done below.
         info = self.trust.verify_message_payload(raw_text=raw_text, mode=verify_mode)
 
-        host_block = info.get("host_block") or {}
-        host_envelope = host_block.get("envelope") if isinstance(host_block, dict) else None
-        user_block = host_envelope.get("user_block") if isinstance(host_envelope, dict) else None
+        host_block = info.get("host_block")
+        trust_issues = list(info.get("trust_issues") or [])
+        mode = (verify_mode or "light").lower()
 
-        # Verify the embedded user signature, if present.
+        # Walk host → ... → user. chain[0] is host (already verified above),
+        # chain[-1] is the root user (or the host itself for un-delegated calls).
+        chain = self._walk_chain(host_block) if isinstance(host_block, dict) else []
+        user_block: Optional[Dict[str, Any]] = chain[-1] if len(chain) > 1 else None
+
         user_id: Optional[str] = None
         user_intent: Optional[str] = None
         user_verified = False
-        trust_issues = list(info.get("trust_issues") or [])
-        if isinstance(user_block, dict):
+        chain_ok = True
+
+        if user_block is not None:
+            # Heavy: verify every layer below host. Light: verify only the
+            # root (user) — intermediate signers are trusted transitively
+            # because each outer signature commits to the next inner block.
+            levels_to_verify = chain[1:] if mode == "heavy" else [chain[-1]]
+
+            for level in levels_to_verify:
+                did = level.get("agent") if isinstance(level, dict) else None
+                env = level.get("envelope") if isinstance(level, dict) else None
+                sig = level.get("signature") if isinstance(level, dict) else None
+                if not (did and sig and isinstance(env, dict)):
+                    trust_issues.append("Chain block missing agent/envelope/signature")
+                    chain_ok = False
+                    continue
+                try:
+                    ok = bool(self.trust.verify_envelope(did, env, sig))
+                except Exception:
+                    ok = False
+                if not ok:
+                    trust_issues.append(f"Invalid signature from {did}")
+                    chain_ok = False
+
             user_id = user_block.get("agent")
             user_env = user_block.get("envelope") or {}
-            user_sig = user_block.get("signature")
-            if user_id and user_sig and isinstance(user_env, dict):
-                try:
-                    user_verified = bool(
-                        self.trust.verify_envelope(user_id, user_env, user_sig)
-                    )
-                except Exception:
-                    user_verified = False
-            if not user_verified:
-                trust_issues.append(f"Invalid user signature for DID {user_id}")
+            user_verified = chain_ok
 
             raw_intent = user_env.get("original_message")
             if isinstance(raw_intent, str):
@@ -348,9 +371,9 @@ class AgentDNA:
 
         return RequestContext(
             original_message=info.get("original_message") or "",
-            host_block=info.get("host_block"),
+            host_block=host_block,
             trust_issues=trust_issues,
-            verified=bool(info.get("verified")) and (user_verified or user_block is None),
+            verified=bool(info.get("verified")) and chain_ok,
             user_block=user_block,
             user_id=user_id,
             user_intent=user_intent,
@@ -412,7 +435,7 @@ class AgentDNA:
         payload: Optional[Union[str, dict, list]] = None,
         *,
         ctx: Optional[RequestContext] = None,
-        user: Optional[Union[SignedEnvelope, Dict[str, Any]]] = None,
+        parent: Optional[Union[SignedEnvelope, RequestContext, Dict[str, Any]]] = None,
         state: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         **legacy,
@@ -429,12 +452,22 @@ class AgentDNA:
 
             wire = dna.build(payload, ctx=ctx)     # wire string
 
-        Pass ``user=`` to embed the user's signed intent (delegation chain).
-        The host signature commits to ``user_block``, so user attribution
-        can't be forged without breaking host verification::
+        Pass ``parent=`` to embed the upstream signer's signed block — this is
+        how the delegation chain nests. The current agent's signature commits
+        to the entire parent block, so any prior signer's contribution can't
+        be tampered with without breaking verification at this layer::
 
+            # Top of chain: the user signs their intent.
             user_signed = user_dna.build({"intent": prompt})
-            env        = host_dna.build(host_msg, user=user_signed)
+
+            # Next hop: host wraps the user's signed block + its own task.
+            env = host_dna.build(host_msg, parent=user_signed)
+
+            # Deeper hop: a sub-agent forwards by wrapping whatever it
+            # received. Pass the RequestContext directly — its host_block
+            # already carries the full upstream chain.
+            ctx     = await agent1_dna.handle(envelope)
+            sub_env = agent1_dna.build(sub_task, parent=ctx)
 
         Legacy kwarg form (returns a dict)::
 
@@ -457,7 +490,7 @@ class AgentDNA:
             return self._build_host_request(
                 original_message=original_message,
                 state=legacy_state or {},
-                user_block=self._extract_user_block(user) if user is not None else None,
+                parent_block=self._extract_parent_block(parent) if parent is not None else None,
             )
 
         if payload is None:
@@ -481,16 +514,16 @@ class AgentDNA:
             )
             return built["combined_json"]
 
-        # Sign a fresh request (host/user side) — returns SignedEnvelope
+        # Sign a fresh request (top-of-chain or forwarding) — returns SignedEnvelope
         if isinstance(payload, str):
             original_message = payload
         else:
             original_message = json.dumps(payload, sort_keys=True, ensure_ascii=False)
-        user_block = self._extract_user_block(user) if user is not None else None
+        parent_block = self._extract_parent_block(parent) if parent is not None else None
         built = self._build_host_request(
             original_message=original_message,
             state=state or {},
-            user_block=user_block,
+            parent_block=parent_block,
         )
         return SignedEnvelope(
             built["host_json"],
@@ -498,26 +531,38 @@ class AgentDNA:
             message_id=built["message_id"],
             context_id=built["context_id"],
             original_message=original_message,
-            user_block=user_block,
+            parent_block=parent_block,
         )
 
     @staticmethod
-    def _extract_user_block(user: Union[SignedEnvelope, Dict[str, Any], None]) -> Optional[Dict[str, Any]]:
+    def _extract_parent_block(
+        parent: Union[SignedEnvelope, "RequestContext", Dict[str, Any], None],
+    ) -> Optional[Dict[str, Any]]:
         """
-        Normalize ``user`` into a ``{agent, envelope, signature}`` dict.
-        Accepts a ``SignedEnvelope`` from ``user_dna.build(...)``, a raw
-        signed-block dict, or ``None``.
+        Normalize ``parent`` into a ``{agent, envelope, signature}`` dict.
+
+        Accepts:
+          - ``SignedEnvelope`` from an upstream ``build(...)`` — uses its
+            ``host_block``.
+          - ``RequestContext`` from a verified inbound ``handle(...)`` — uses
+            ``ctx.host_block`` (the immediate sender's signed block, which
+            itself carries the full upstream chain).
+          - Raw signed-block dict ``{agent, envelope, signature}``.
+          - ``None`` — top of chain.
         """
-        if user is None:
+        if parent is None:
             return None
-        if isinstance(user, SignedEnvelope):
-            return user.host_block
-        if isinstance(user, dict):
-            if all(k in user for k in ("agent", "envelope", "signature")):
-                return user
-            raise ValueError("user dict must contain agent / envelope / signature keys")
+        if isinstance(parent, SignedEnvelope):
+            return parent.host_block
+        if isinstance(parent, RequestContext):
+            return parent.host_block
+        if isinstance(parent, dict):
+            if all(k in parent for k in ("agent", "envelope", "signature")):
+                return parent
+            raise ValueError("parent dict must contain agent / envelope / signature keys")
         raise TypeError(
-            f"user must be a SignedEnvelope or signed-block dict; got {type(user).__name__}"
+            f"parent must be a SignedEnvelope, RequestContext, or signed-block dict; "
+            f"got {type(parent).__name__}"
         )
 
     def _build_host_request(
@@ -525,7 +570,7 @@ class AgentDNA:
         *,
         original_message: str,
         state: Optional[Dict[str, Any]] = None,
-        user_block: Optional[Dict[str, Any]] = None,
+        parent_block: Optional[Dict[str, Any]] = None,
         **_extra,
     ) -> Dict[str, Any]:
         state = state or {}
@@ -540,22 +585,23 @@ class AgentDNA:
             "message_id":       message_id,
             "timestamp":        datetime.utcnow().isoformat() + "Z",
         }
-        if user_block is not None:
-            # Embed user_block inside the host envelope so the host signature
-            # commits to it — tampering with user attribution breaks verify.
-            host_envelope["user_block"] = user_block
+        if parent_block is not None:
+            # Embed the parent's signed block inside this envelope so our
+            # signature commits to it — tampering with any upstream signer's
+            # contribution breaks verification at this layer.
+            host_envelope["parent_block"] = parent_block
 
         host_block = self.trust.sign_envelope(host_envelope)
         host_json = json.dumps({"host": host_block}, separators=(",", ":"), sort_keys=True)
 
         return {
-            "kind":       "host_request",
-            "host_block": host_block,
-            "host_json":  host_json,
-            "task_id":    task_id,
-            "context_id": context_id,
-            "message_id": message_id,
-            "user_block": user_block,
+            "kind":         "host_request",
+            "host_block":   host_block,
+            "host_json":    host_json,
+            "task_id":      task_id,
+            "context_id":   context_id,
+            "message_id":   message_id,
+            "parent_block": parent_block,
         }
 
     def _build_agent_response(
@@ -821,16 +867,23 @@ class AgentDNA:
     def _build_nft_payload(self, remote_name: str) -> Dict[str, Any]:
         host_block = None
         user_block = None
+        intermediates: List[Dict[str, Any]] = []
+        chain_depth = 0
         responses: List[Dict[str, Any]] = []
 
         for entry in self.last_parts:
             if not host_block and entry.get("host"):
                 host_block = entry["host"]
-                # Lift the embedded user_block to the top of the audit record
-                # so it sits next to host/responses.
-                host_env = host_block.get("envelope") if isinstance(host_block, dict) else None
-                if isinstance(host_env, dict) and isinstance(host_env.get("user_block"), dict):
-                    user_block = host_env["user_block"]
+                # Walk the delegation chain inside host_block:
+                #   chain[0]   = host (outermost)
+                #   chain[-1]  = root user (when len > 1)
+                #   chain[1:-1] = intermediate sub-agents (depth >= 3)
+                chain = self._walk_chain(host_block)
+                chain_depth = len(chain)
+                if chain_depth > 1:
+                    user_block = chain[-1]
+                if chain_depth > 2:
+                    intermediates = chain[1:-1]
             if entry.get("agent"):
                 agent_entry = copy.deepcopy(entry["agent"])
                 env = agent_entry.get("envelope", {}) or {}
@@ -851,15 +904,43 @@ class AgentDNA:
             "verification": {
                 "status":       self.last_verification_status,
                 "trust_issues": self.last_trust_issues,
+                "chain_depth":  chain_depth,
             },
         }
         if user_block is not None:
             payload["user"] = user_block
+        if intermediates:
+            payload["intermediate_agents"] = intermediates
         payload["host"] = host_block
         payload["responses"] = responses
         return payload
 
     # ─── Helpers for handle() ────────────────────────────────────────────────
+
+    @staticmethod
+    def _walk_chain(signed_block: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Walk a nested delegation chain from outermost to root.
+
+        Each layer is a signed block ``{agent, envelope, signature}`` whose
+        envelope may contain a ``parent_block`` field carrying the previous
+        signer's full signed block. The chain bottoms out when an envelope
+        has no ``parent_block``.
+
+        Returns ``[outermost, ..., root]``. The outermost is the immediate
+        sender; the root is the original user. At depth-1 (no delegation)
+        the list has a single entry.
+        """
+        chain: List[Dict[str, Any]] = []
+        cur = signed_block
+        # Hard cap to avoid pathological self-referential payloads.
+        for _ in range(64):
+            if not isinstance(cur, dict):
+                break
+            chain.append(cur)
+            env = cur.get("envelope")
+            cur = env.get("parent_block") if isinstance(env, dict) else None
+        return chain
 
     @staticmethod
     def _unwrap_signed_text(raw) -> Optional[str]:

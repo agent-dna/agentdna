@@ -98,9 +98,9 @@ async def mcp_list_tools() -> List[str]:
 def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     """
     Full user → host → MCP delegation chain:
-      - user_dna.build(intent)             → signed user intent
-      - host_dna.build(host_msg, user=…)   → host envelope carrying user_block
-      - user_dna.handle(reply, original=)  → typed VerifyResult + audit-log NFT
+      - user_dna.build(intent)               → signed user intent
+      - host_dna.build(host_msg, parent=…)   → host envelope wrapping the user's signed block
+      - user_dna.handle(reply, original=)    → typed VerifyResult + audit-log NFT
     """
     user_dna = st.session_state.user_dna
 
@@ -114,7 +114,7 @@ def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str 
         "tool_name": tool_name,
         "tool_args": tool_args,
     }
-    env = host_dna.build(host_msg, user=user_signed)
+    env = host_dna.build(host_msg, parent=user_signed)
     args_with_dna = {**tool_args, "dna_envelope": str(env)}
 
     tool_output_text = run(mcp_call_raw(tool_name, args_with_dna))
