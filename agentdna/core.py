@@ -86,7 +86,7 @@ class SignedEnvelope(str):
         env.original_message            # the JSON we signed
     """
 
-    _ATTRS = ("host_block", "message_id", "context_id", "original_message")
+    _ATTRS = ("host_block", "message_id", "context_id", "original_message", "user_block")
 
     def __new__(cls, wire: str, **attrs):
         obj = super().__new__(cls, wire or "")
@@ -111,6 +111,8 @@ class VerifyResult:
     agent_block: Optional[Dict[str, Any]] = None
     nft_result: Optional[Dict[str, Any]] = None
     verification_status: str = "unknown"            # "ok" | "failed" | "unknown"
+    user_block: Optional[Dict[str, Any]] = None     # signed user envelope (delegation chain)
+    user_verified: bool = False                     # was the user's signature valid?
 
 
 @dataclass
@@ -127,6 +129,10 @@ class RequestContext:
     host_block: Optional[Dict[str, Any]] = None     # signed host block (passed back when replying)
     trust_issues: List[str] = field(default_factory=list)
     verified: bool = False
+    user_block: Optional[Dict[str, Any]] = None     # signed user envelope (delegation chain)
+    user_id: Optional[str] = None                   # user DID from the signed user envelope
+    user_intent: Optional[str] = None               # the intent string the user signed
+    user_verified: bool = False                     # was the user's signature valid?
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -286,6 +292,24 @@ class AgentDNA:
             except (TypeError, json.JSONDecodeError):
                 parsed_payload = body  # leave as plain string
 
+        # Pull user_block + verify it (if a delegation chain was used)
+        user_block = None
+        user_verified = False
+        if isinstance(host_block, dict):
+            host_env = host_block.get("envelope") or {}
+            if isinstance(host_env, dict) and isinstance(host_env.get("user_block"), dict):
+                user_block = host_env["user_block"]
+                user_did = user_block.get("agent")
+                user_env = user_block.get("envelope") or {}
+                user_sig = user_block.get("signature")
+                if user_did and user_sig and isinstance(user_env, dict):
+                    try:
+                        user_verified = bool(
+                            self.trust.verify_envelope(user_did, user_env, user_sig)
+                        )
+                    except Exception:
+                        user_verified = False
+
         return VerifyResult(
             payload=parsed_payload,
             verified=(self.last_verification_status == "ok"),
@@ -295,6 +319,8 @@ class AgentDNA:
             agent_block=agent_block,
             nft_result=raw_result.get("nft_result"),
             verification_status=self.last_verification_status,
+            user_block=user_block,
+            user_verified=user_verified,
         )
 
     async def _verify_request(
@@ -307,11 +333,51 @@ class AgentDNA:
             return RequestContext(trust_issues=["No envelope provided"], verified=False)
         raw_text = envelope if isinstance(envelope, str) else json.dumps(envelope)
         info = self.trust.verify_message_payload(raw_text=raw_text, mode=verify_mode)
+
+        host_block = info.get("host_block") or {}
+        host_envelope = host_block.get("envelope") if isinstance(host_block, dict) else None
+        user_block = host_envelope.get("user_block") if isinstance(host_envelope, dict) else None
+
+        # Optionally verify the embedded user signature.
+        user_id: Optional[str] = None
+        user_intent: Optional[str] = None
+        user_verified = False
+        trust_issues = list(info.get("trust_issues") or [])
+        if isinstance(user_block, dict):
+            user_id = user_block.get("agent")
+            user_env = user_block.get("envelope") or {}
+            user_sig = user_block.get("signature")
+            if user_id and user_sig and isinstance(user_env, dict):
+                try:
+                    user_verified = bool(
+                        self.trust.verify_envelope(user_id, user_env, user_sig)
+                    )
+                except Exception:
+                    user_verified = False
+            if not user_verified:
+                trust_issues.append(f"Invalid user signature for DID {user_id}")
+
+            raw_intent = user_env.get("original_message")
+            if isinstance(raw_intent, str):
+                try:
+                    parsed = json.loads(raw_intent)
+                    user_intent = (
+                        parsed.get("intent")
+                        if isinstance(parsed, dict) and "intent" in parsed
+                        else raw_intent
+                    )
+                except Exception:
+                    user_intent = raw_intent
+
         return RequestContext(
             original_message=info.get("original_message") or "",
             host_block=info.get("host_block"),
-            trust_issues=list(info.get("trust_issues") or []),
-            verified=bool(info.get("verified")),
+            trust_issues=trust_issues,
+            verified=bool(info.get("verified")) and (user_verified or user_block is None),
+            user_block=user_block,
+            user_id=user_id,
+            user_intent=user_intent,
+            user_verified=user_verified,
         )
 
     # ─── Optional explicit-name aliases (build/handle still the canonical) ───
@@ -374,6 +440,7 @@ class AgentDNA:
         payload: Optional[Union[str, dict, list]] = None,
         *,
         ctx: Optional[RequestContext] = None,
+        user: Optional[Union[SignedEnvelope, Dict[str, Any]]] = None,
         state: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         **legacy,
@@ -390,6 +457,13 @@ class AgentDNA:
         Sign a reply under a verified context (remote side) — pass ``ctx=``::
 
             wire = dna.build(payload, ctx=ctx)     # returns wire string
+
+        Pass ``user=`` to attach a user's signed intent (delegation chain).
+        The host signature commits to the embedded ``user_block``, so any
+        tampering with user attribution breaks host verification::
+
+            user_signed = user_dna.build({"intent": prompt})  # user signs first
+            env = dna.build(host_msg, user=user_signed)        # host signs over it
 
         Legacy kwarg form — same as before the refactor, returns a dict::
 
@@ -414,6 +488,7 @@ class AgentDNA:
             return self._build_host_request(
                 original_message=original_message,
                 state=legacy_state or {},
+                user_block=self._extract_user_block(user) if user is not None else None,
             )
 
         if payload is None:
@@ -443,9 +518,11 @@ class AgentDNA:
             original_message = payload
         else:
             original_message = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        user_block = self._extract_user_block(user) if user is not None else None
         built = self._build_host_request(
             original_message=original_message,
             state=state or {},
+            user_block=user_block,
         )
         return SignedEnvelope(
             built["host_json"],
@@ -453,6 +530,26 @@ class AgentDNA:
             message_id=built["message_id"],
             context_id=built["context_id"],
             original_message=original_message,
+            user_block=user_block,
+        )
+
+    @staticmethod
+    def _extract_user_block(user: Union[SignedEnvelope, Dict[str, Any], None]) -> Optional[Dict[str, Any]]:
+        """
+        Normalize ``user`` into a signed-block dict (``{agent, envelope, signature}``).
+        Accepts a ``SignedEnvelope`` (from ``user_dna.build(...)``), a raw signed-block
+        dict, or ``None``.
+        """
+        if user is None:
+            return None
+        if isinstance(user, SignedEnvelope):
+            return user.host_block
+        if isinstance(user, dict):
+            if all(k in user for k in ("agent", "envelope", "signature")):
+                return user
+            raise ValueError("user dict must contain agent / envelope / signature keys")
+        raise TypeError(
+            f"user must be a SignedEnvelope or signed-block dict; got {type(user).__name__}"
         )
 
     def _build_host_request(
@@ -460,6 +557,7 @@ class AgentDNA:
         *,
         original_message: str,
         state: Optional[Dict[str, Any]] = None,
+        user_block: Optional[Dict[str, Any]] = None,
         **_extra,
     ) -> Dict[str, Any]:
         state = state or {}
@@ -467,13 +565,17 @@ class AgentDNA:
         context_id = state.get("context_id") or str(uuid.uuid4())
         message_id = str(uuid.uuid4())
 
-        host_envelope = {
+        host_envelope: Dict[str, Any] = {
             "original_message": original_message,
             "task_id":          task_id,
             "context_id":       context_id,
             "message_id":       message_id,
             "timestamp":        datetime.utcnow().isoformat() + "Z",
         }
+        if user_block is not None:
+            # Commit to the user attribution by signing it inside the host envelope.
+            host_envelope["user_block"] = user_block
+
         host_block = self.trust.sign_envelope(host_envelope)
         host_json = json.dumps({"host": host_block}, separators=(",", ":"), sort_keys=True)
 
@@ -484,6 +586,7 @@ class AgentDNA:
             "task_id":    task_id,
             "context_id": context_id,
             "message_id": message_id,
+            "user_block": user_block,
         }
 
     def _build_agent_response(
@@ -754,11 +857,17 @@ class AgentDNA:
 
     def _build_nft_payload(self, remote_name: str) -> Dict[str, Any]:
         host_block = None
+        user_block = None
         responses: List[Dict[str, Any]] = []
 
         for entry in self.last_parts:
             if not host_block and entry.get("host"):
                 host_block = entry["host"]
+                # Pull the embedded user_block (if any) out of the host envelope
+                # so it sits at the top of the audit record next to host/responses.
+                host_env = host_block.get("envelope") if isinstance(host_block, dict) else None
+                if isinstance(host_env, dict) and isinstance(host_env.get("user_block"), dict):
+                    user_block = host_env["user_block"]
             if entry.get("agent"):
                 agent_entry = copy.deepcopy(entry["agent"])
                 env = agent_entry.get("envelope", {}) or {}
@@ -768,17 +877,25 @@ class AgentDNA:
                 agent_entry["envelope"] = env
                 responses.append(agent_entry)
 
-        return {
+        # If a user_block was carried, the writing DNA is treated as the user
+        # who owns the audit-log NFT. Otherwise this falls back to the legacy
+        # "host_agent" framing for back-compat.
+        executor = "user" if user_block is not None else "host_agent"
+
+        payload: Dict[str, Any] = {
             "comment":  f"Agent communication initiation to {remote_name}",
-            "executor": "host_agent",
+            "executor": executor,
             "did":      self.did,
             "verification": {
                 "status":       self.last_verification_status,
                 "trust_issues": self.last_trust_issues,
             },
-            "host":      host_block,
-            "responses": responses,
         }
+        if user_block is not None:
+            payload["user"] = user_block
+        payload["host"] = host_block
+        payload["responses"] = responses
+        return payload
 
     # ─── Helpers for verify_reply() ──────────────────────────────────────────
 

@@ -1,9 +1,9 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, AsyncIterable, List
+from typing import Any, AsyncIterable, List, Optional
 
 from dotenv import load_dotenv
 import httpx
@@ -45,13 +45,22 @@ nest_asyncio.apply()
 class HostAgent:
     """The Host agent."""
 
-    def __init__(self):
+    def __init__(self, user_dna: Optional[AgentDNA] = None):
         self.remote_agent_connections: dict[str, RemoteAgentConnections] = {}
         self.cards: dict[str, AgentCard] = {}
         self.agents: str = ""
 
-        # AgentDNA (eager NFT deploy bound to this agent's DID at construction).
-        self.dna = AgentDNA(alias="host", api_key=os.environ.get("AGENTDNA_API_KEY"))
+        # Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+        # The user owns the audit-log NFT.
+        self.host_dna = AgentDNA(
+            alias="host",
+            api_key=os.environ.get("AGENTDNA_API_KEY"),
+            enable_nft=False,
+        )
+        self.user_dna = user_dna
+        # Per-query signed-user-intent block, set in stream() and threaded
+        # into every send_message() call this turn.
+        self._current_user_signed = None
 
         self._agent = self.create_agent()
         self._user_id = "host_agent"
@@ -86,8 +95,12 @@ class HostAgent:
         self.agents = "\n".join(agent_info) if agent_info else "No friends found"
 
     @classmethod
-    async def create(cls, remote_agent_addresses: List[str]):
-        instance = cls()
+    async def create(
+        cls,
+        remote_agent_addresses: List[str],
+        user_dna: Optional[AgentDNA] = None,
+    ):
+        instance = cls(user_dna=user_dna)
         await instance._async_init_components(remote_agent_addresses)
         return instance
 
@@ -139,6 +152,17 @@ class HostAgent:
         """
 
     async def stream(self, query: str, session_id: str) -> AsyncIterable[dict[str, Any]]:
+        # The user signs their intent up front. Every host envelope built for
+        # this query will carry the same user_block, so the chain commits to
+        # "<user DID> asked".
+        if self.user_dna is not None:
+            self._current_user_signed = self.user_dna.build({
+                "intent": query,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+        else:
+            self._current_user_signed = None
+
         session = await self._runner.session_service.get_session(
             app_name=self._agent.name,
             user_id=self._user_id,
@@ -192,8 +216,12 @@ class HostAgent:
         task_id = state.get("task_id") or str(uuid.uuid4())
         state["task_id"] = task_id
 
-        # ---- sign host → remote envelope ----
-        env = self.dna.build(task, state=state)
+        # ---- sign host → remote envelope (carries user_block when present) ----
+        env = self.host_dna.build(
+            task,
+            state=state,
+            user=self._current_user_signed,
+        )
 
         request = SendMessageRequest(
             id=env.message_id,
@@ -230,8 +258,9 @@ class HostAgent:
                     if text:
                         resp_parts.append({"text": text})
 
-        # ---- verify + NFT-record the reply ----
-        result = await self.dna.handle(
+        # ---- verify + NFT-record the reply (user owns the audit-log NFT) ----
+        verifier = self.user_dna or self.host_dna
+        result = await verifier.handle(
             resp_parts,
             original=env,
             remote_name=agent_name,

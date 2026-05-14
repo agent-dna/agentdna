@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import asyncio
+from datetime import datetime, timezone
 
 import streamlit as st
 from dotenv import load_dotenv, find_dotenv
@@ -24,7 +25,10 @@ if not HOST_AGENT_NAME:
 if not MCP_TOOL_NAME:
     raise RuntimeError("Missing MCP_TOOL_NAME")
 
-dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY)
+# Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+# The user (constructed below from a sidebar alias) owns the audit-log NFT.
+host_dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
+DEFAULT_USER_ALIAS = f"{HOST_AGENT_NAME}_USER"
 
 SYSTEM_PROMPT = """
 You are a Yahoo Finance assistant.
@@ -65,7 +69,7 @@ def extract_json(raw: str) -> str:
     return raw
 
 
-async def run_agent_turn(user_input: str):
+async def run_agent_turn(user_input: str, user_dna):
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["server.py"],
@@ -92,13 +96,19 @@ async def run_agent_turn(user_input: str):
             tool_name = decision["tool"]
             tool_args = decision.get("args", {})
 
-            # ── AgentDNA: sign the request → call MCP → verify the reply ──
+            # ── AgentDNA: user signs intent → host signs over it → MCP →
+            #             user verifies & writes the audit-log NFT ─────────
+            user_signed = user_dna.build({
+                "intent": user_input,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+
             host_message = {
                 "user_query": user_input,
                 "tool_name": tool_name,
                 "tool_args": tool_args,
             }
-            env = dna.build(host_message)
+            env = host_dna.build(host_message, user=user_signed)
 
             tool_result = await session.call_tool(
                 tool_name,
@@ -110,7 +120,7 @@ async def run_agent_turn(user_input: str):
                 if isinstance(block, mcp_types.TextContent)
             )
 
-            result = await dna.handle(
+            result = await user_dna.handle(
                 tool_output_text,
                 original=env,
                 remote_name=MCP_TOOL_NAME,
@@ -136,8 +146,8 @@ Answer plainly.
             return final.text.strip()
 
 
-def run_agent_sync(user_input: str):
-    return asyncio.run(run_agent_turn(user_input))
+def run_agent_sync(user_input: str, user_dna):
+    return asyncio.run(run_agent_turn(user_input, user_dna))
 
 
 # ─────────────────────────────
@@ -165,16 +175,29 @@ if "messages" not in st.session_state:
     st.session_state.messages = []
 if "chain_history" not in st.session_state:
     st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
 
-# ── Sidebar: NFT + chain history ──
+# ── Sidebar: user identity, NFT + chain history ──
 with st.sidebar:
+    st.subheader("Signed in as")
+    new_alias = st.text_input(
+        "User alias",
+        value=st.session_state.user_alias,
+        help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+    )
+    if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
+        st.session_state.user_alias = new_alias
+        st.session_state.user_dna = AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY)
+
+    st.divider()
     st.subheader("Audit Log")
-    nft_id = dna.nft_token or ""
+    nft_id = st.session_state.user_dna.nft_token or ""
     st.caption(f"NFT: `{nft_id}`" if nft_id else "NFT: (none yet)")
 
     if st.button("History Records", disabled=not nft_id):
         with st.spinner("Fetching NFT data…"):
-            st.session_state.chain_history = dna.history()
+            st.session_state.chain_history = st.session_state.user_dna.history()
         st.rerun()
 
 # Chain history — foldable JSON tree
@@ -193,6 +216,6 @@ query = st.text_area("Ask about a stock:")
 if st.button("Send") and query.strip():
     st.session_state.messages.append({"role": "user", "content": query})
     with st.spinner("Working..."):
-        answer = run_agent_sync(query)
+        answer = run_agent_sync(query, st.session_state.user_dna)
     st.session_state.messages.append({"role": "agent", "content": answer})
     st.rerun()

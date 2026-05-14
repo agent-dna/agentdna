@@ -3,22 +3,15 @@ import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
+
+from agentdna import AgentDNA
 from pipeline import ResearchPipeline
 
 HERE = Path(__file__).parent
 load_dotenv(HERE / ".env")
 
-# ── singleton setup ───────────────────────────────────────────────────────────
-
-def _init_pipeline() -> ResearchPipeline:
-    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-    agentdna_api_key = os.environ.get("AGENTDNA_API_KEY") or None
-    return ResearchPipeline(client, agentdna_api_key=agentdna_api_key)
-
-if "pipeline" not in st.session_state:
-    st.session_state.pipeline = _init_pipeline()
-
-pipeline: ResearchPipeline = st.session_state.pipeline
+AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY") or None
+DEFAULT_USER_ALIAS = "Research_Head_Coordinator_USER"
 
 # ── page config ───────────────────────────────────────────────────────────────
 
@@ -32,6 +25,38 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "chain_history" not in st.session_state:
     st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
+
+# ── user identity (top of the trust chain) ────────────────────────────────────
+# Users own the audit-log NFT. Per signed-in alias we create one AgentDNA with
+# enable_nft=True (default) — its DID is the chain-side identity that holds
+# every audit record. The host & remotes are pure signers (enable_nft=False).
+
+st.sidebar.subheader("Signed in as")
+new_alias = st.sidebar.text_input(
+    "User alias",
+    value=st.session_state.user_alias,
+    help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+)
+
+# Re-init pipeline if user changes alias
+if new_alias != st.session_state.user_alias or "pipeline" not in st.session_state:
+    st.session_state.user_alias = new_alias
+    user_dna = (
+        AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY)
+        if AGENTDNA_API_KEY else None
+    )
+    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+    st.session_state.pipeline = ResearchPipeline(
+        client,
+        agentdna_api_key=AGENTDNA_API_KEY,
+        user_dna=user_dna,
+    )
+
+pipeline: ResearchPipeline = st.session_state.pipeline
+
+st.sidebar.divider()
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 

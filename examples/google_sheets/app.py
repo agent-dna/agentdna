@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -32,12 +33,19 @@ CHAIN_URL = os.environ.get("CHAIN_URL")
 if not CHAIN_URL:
     raise RuntimeError("Missing CHAIN_URL")
 
-# Host AgentDNA (assumes your AgentDNA handler is now using Path.home()/.agentdna)
-dna = AgentDNA(alias="GoogleSheetsAgent", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
+# Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+# The user (constructed below from a sidebar alias) owns the audit-log NFT.
+host_dna = AgentDNA(
+    alias="GoogleSheetsAgent",
+    api_key=AGENTDNA_API_KEY,
+    chain_url=CHAIN_URL,
+    enable_nft=False,
+)
 node = NodeClient(alias="gsheets_GoogleSheetsAgenthost")
 DEFAULT_BASE_URL = node.get_base_url()
 
 REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "GoogleSheetsMCP")
+DEFAULT_USER_ALIAS = "GoogleSheetsAgent_USER"
 
 
 def _server_params() -> StdioServerParameters:
@@ -90,24 +98,28 @@ async def mcp_list_tools() -> List[str]:
 
 def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     """
-    Sign the host-side request, call the MCP tool, verify the signed reply, and
-    write the conversation to chain.
-
-    The whole trust-layer round-trip lives in two AgentDNA calls:
-      - dna.build(host_msg)               → wire-ready signed string
-      - dna.handle(raw_out, original=) → typed VerifyResult (+ NFT write)
+    Full user → host → MCP delegation chain:
+      - user_dna.build(intent)             → signed user intent
+      - host_dna.build(host_msg, user=…)   → host envelope carrying user_block
+      - user_dna.handle(reply, original=)  → typed VerifyResult + audit-log NFT
     """
+    user_dna = st.session_state.user_dna
+
+    user_signed = user_dna.build({
+        "intent": user_query or tool_name,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+
     host_msg = {
         "user_query": user_query or tool_name,
         "tool_name": tool_name,
         "tool_args": tool_args,
     }
-
-    env = dna.build(host_msg)
+    env = host_dna.build(host_msg, user=user_signed)
     args_with_dna = {**tool_args, "dna_envelope": str(env)}
 
     tool_output_text = run(mcp_call_raw(tool_name, args_with_dna))
-    result = run(dna.handle(tool_output_text, original=env, remote_name=REMOTE_NAME))
+    result = run(user_dna.handle(tool_output_text, original=env, remote_name=REMOTE_NAME))
 
     return {
         "tool_output_text":    tool_output_text,
@@ -215,7 +227,8 @@ def fetch_tasks(status: str = ""):
 
 
 def get_nft_token_from_host() -> str:
-    return getattr(dna, "nft_token", None) or ""
+    user_dna = st.session_state.get("user_dna")
+    return getattr(user_dna, "nft_token", None) or ""
 
 
 def fetch_nft_data(nft_id: str, latest: bool = False) -> Any:
@@ -237,6 +250,8 @@ if "view" not in st.session_state:
     st.session_state.view = "open"
 if "chain_history" not in st.session_state:
     st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
 
 
 def _decode_nft_state(state: dict) -> dict:
@@ -251,6 +266,22 @@ def _decode_nft_state(state: dict) -> dict:
     return state
 
 with st.sidebar:
+    st.subheader("Signed in as")
+    new_alias = st.text_input(
+        "User alias",
+        value=st.session_state.user_alias,
+        help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+    )
+    if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
+        st.session_state.user_alias = new_alias
+        st.session_state.user_dna = AgentDNA(
+            alias=new_alias,
+            api_key=AGENTDNA_API_KEY,
+            chain_url=CHAIN_URL,
+        )
+
+    st.divider()
+
     st.subheader("Controls")
 
     st.session_state.view = st.radio(

@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from agentdna import AgentDNA
 from host.agent import HostAgent
 
 nest_asyncio.apply()
@@ -22,18 +23,44 @@ REMOTE_URLS = [
     "http://localhost:10004",
 ]
 
+AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
+DEFAULT_USER_ALIAS = "host_USER"
+
 # -------------------------
-# Host singleton in session
+# User identity (top of the trust chain)
 # -------------------------
-if "HOST" not in st.session_state:
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
+
+st.sidebar.subheader("Signed in as")
+new_alias = st.sidebar.text_input(
+    "User alias",
+    value=st.session_state.user_alias,
+    help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+)
+
+# Rebuild user_dna + HOST whenever alias changes.
+if (
+    "user_dna" not in st.session_state
+    or new_alias != st.session_state.user_alias
+    or "HOST" not in st.session_state
+):
+    st.session_state.user_alias = new_alias
+    st.session_state.user_dna = (
+        AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY) if AGENTDNA_API_KEY else None
+    )
     loop = asyncio.get_event_loop()
     try:
         st.session_state.HOST = loop.run_until_complete(
-            HostAgent.create(remote_agent_addresses=REMOTE_URLS)
+            HostAgent.create(
+                remote_agent_addresses=REMOTE_URLS,
+                user_dna=st.session_state.user_dna,
+            )
         )
     except Exception:
-        st.session_state.HOST = HostAgent()
+        st.session_state.HOST = HostAgent(user_dna=st.session_state.user_dna)
 
+st.sidebar.divider()
 HOST = st.session_state.HOST
 
 # -------------------------
@@ -69,7 +96,7 @@ for role, msg in st.session_state.chat:
 
 # 1b) Chain-history panel — foldable JSON tree, no horizontal overflow.
 if st.session_state.chain_history:
-    nft_id = HOST.dna.nft_token or ""
+    nft_id = (HOST.user_dna.nft_token if HOST.user_dna else "") or ""
     with st.expander(
         f"Chain History — NFT `{nft_id}` — {len(st.session_state.chain_history)} record(s)",
         expanded=True,
@@ -117,10 +144,10 @@ st.sidebar.divider()
 # -------------------------
 st.sidebar.subheader("Audit Log")
 
-nft_id = HOST.dna.nft_token or ""
+nft_id = (HOST.user_dna.nft_token if HOST.user_dna else "") or ""
 st.sidebar.caption(f"NFT: `{nft_id}`" if nft_id else "NFT: (none yet)")
 
 if st.sidebar.button("History Records", disabled=not nft_id):
     with st.spinner("Fetching NFT data…"):
-        st.session_state.chain_history = HOST.dna.history()
+        st.session_state.chain_history = HOST.user_dna.history()
     st.rerun()

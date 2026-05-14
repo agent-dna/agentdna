@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from datetime import datetime, timezone
 from typing import Optional, Any
 
 # The Rubix verify-signature endpoint is a GET, so long signed payloads cause
@@ -83,11 +84,20 @@ Combine the specialist findings into one coherent report:
 
 
 class ResearchPipeline:
-    def __init__(self, client: genai.Client, agentdna_api_key: Optional[str] = None):
+    def __init__(
+        self,
+        client: genai.Client,
+        agentdna_api_key: Optional[str] = None,
+        user_dna: Optional[Any] = None,
+    ):
         self.client = client
         self.last_trace_url: str | None = None
         self.last_nft_token: str | None = None
 
+        # The user owns the audit-log NFT. The host (coordinator) and remotes
+        # never write to chain — they only sign envelopes. The user_dna is
+        # constructed by app.py (one per "signed-in" user alias).
+        self._user_dna: Optional[Any] = user_dna
         self._coordinator_dna: Optional[Any] = None
         self._researcher_dnas: list[Any] = []
         self._synthesizer_dna: Optional[Any] = None
@@ -95,15 +105,17 @@ class ResearchPipeline:
         # Per-run internal state (reset each research() call)
         self._host_built: list[Any] = []        # SignedEnvelope per coordinator-signed task
         self._combined_jsons: list[str] = []    # wire string per remote-signed reply
+        self._user_signed: Optional[Any] = None # user's signed intent for this run
 
         if _AGENTDNA_AVAILABLE and agentdna_api_key:
             try:
-                # Coordinator is the host — it writes audit-log NFTs per run.
+                # Coordinator + remotes are all enable_nft=False — only the user
+                # holds the audit-log NFT.
                 self._coordinator_dna = AgentDNA(
                     alias="Research_Head_Coordinator",
                     api_key=agentdna_api_key,
+                    enable_nft=False,
                 )
-                # Researchers + synthesizer are pure remotes — never write to chain.
                 self._researcher_dnas = [
                     AgentDNA(
                         alias=f"Sub_Theory_Researcher_{i}",
@@ -117,7 +129,7 @@ class ResearchPipeline:
                     api_key=agentdna_api_key,
                     enable_nft=False,
                 )
-                self.last_nft_token = self._coordinator_dna.nft_token
+                self.last_nft_token = self._user_dna.nft_token if self._user_dna else None
             except Exception as exc:
                 print(f"[AgentDNA] init failed, running without trust layer: {exc}")
                 self._coordinator_dna = None
@@ -127,16 +139,17 @@ class ResearchPipeline:
     @property
     def _dna_active(self) -> bool:
         return (
-            self._coordinator_dna is not None
+            self._user_dna is not None
+            and self._coordinator_dna is not None
             and len(self._researcher_dnas) == 3
             and self._synthesizer_dna is not None
         )
 
     def history(self) -> list[dict]:
-        """Decoded NFT chain history for the coordinator's audit-log NFT."""
-        if self._coordinator_dna is None:
+        """Decoded NFT chain history for the user's audit-log NFT."""
+        if self._user_dna is None:
             return []
-        return self._coordinator_dna.history()
+        return self._user_dna.history()
 
     def _run(self, coro):
         return asyncio.get_event_loop().run_until_complete(coro)
@@ -198,7 +211,10 @@ class ResearchPipeline:
                     "question": question,
                     "subtopic": subtopic,
                 })
-                env = self._coordinator_dna.build(task_json)
+                # Host signs over the user's signed intent — every envelope in
+                # this run carries the same user_block, committing the chain to
+                # "this user delegated this work."
+                env = self._coordinator_dna.build(task_json, user=self._user_signed)
                 self._host_built.append(env)
 
         return subtopics
@@ -246,7 +262,7 @@ class ResearchPipeline:
                 "question": question,
                 "subtopics": subtopics,
             })
-            env = self._coordinator_dna.build(task_json)
+            env = self._coordinator_dna.build(task_json, user=self._user_signed)
             self._host_built.append(env)
 
             ctx = self._run(self._synthesizer_dna.handle(env))
@@ -291,10 +307,20 @@ class ResearchPipeline:
 
     @observe(name="research-assistant")
     def research(self, question: str) -> dict:
-        """Full pipeline: coordinator → researchers → synthesizer → coordinator verifies + NFT."""
+        """Full pipeline: user signs intent → coordinator/researchers/synthesizer
+        sign envelopes → USER's NFT records the audit log."""
         # Reset per-run state
         self._host_built = []
         self._combined_jsons = []
+        self._user_signed = None
+
+        # User signs their intent up front. Every host envelope in this run will
+        # embed this signed block, so the chain commits to "<user DID> asked".
+        if self._dna_active:
+            self._user_signed = self._user_dna.build({
+                "intent": question,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
 
         subtopics = self._plan_and_dispatch(question)
 
@@ -305,9 +331,10 @@ class ResearchPipeline:
 
         synthesis = self._synthesize(question, subtopics, findings)
 
-        # Coordinator verifies every signed reply; only the last triggers an NFT
-        # write so the synthesizer's envelope (with nested researcher digests in
-        # `extra`) is what lands on chain — one record per run.
+        # The USER (not the host) verifies every signed reply and writes the
+        # audit-log NFT — only the last call carries execute_nft=True so a
+        # single chain record captures the whole run (synthesizer's envelope
+        # nests the researcher digests via `extra`).
         if self._dna_active and self._combined_jsons:
             remote_names = (
                 [f"researcher_{i+1}" for i in range(len(self._combined_jsons) - 1)]
@@ -315,13 +342,13 @@ class ResearchPipeline:
             )
             for i, combined_json in enumerate(self._combined_jsons):
                 is_last = i == len(self._combined_jsons) - 1
-                self._run(self._coordinator_dna.handle(
+                self._run(self._user_dna.handle(
                     combined_json,
                     original=self._host_built[i],
                     remote_name=remote_names[i],
                     execute_nft=is_last,
                 ))
-            self.last_nft_token = self._coordinator_dna.nft_token
+            self.last_nft_token = self._user_dna.nft_token
 
         trace_id = get_client().get_current_trace_id()
         self.last_trace_url = get_client().get_trace_url(trace_id=trace_id)
