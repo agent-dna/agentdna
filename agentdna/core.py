@@ -26,11 +26,10 @@ def _default_nft_config_path() -> Path:
 
 def _deep_json_decode(obj: Any) -> Any:
     """
-    Recursively replace JSON-string values with their parsed equivalents.
+    Recursively parse JSON-string values into their objects.
 
-    Used by ``AgentDNA.history()`` so chain records render as a foldable tree
-    end-to-end. Strings that aren't valid JSON (or don't open with ``{`` /
-    ``[``) are returned untouched, so plain free-text fields stay strings.
+    Used by ``AgentDNA.history()`` so chain records render as a fully
+    foldable tree. Strings that aren't valid JSON are left untouched.
     """
     if isinstance(obj, dict):
         return {k: _deep_json_decode(v) for k, v in obj.items()}
@@ -67,23 +66,22 @@ def _load_nft_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Public types: SignedEnvelope (wire-ready string + metadata) and VerifyResult
-# (typed verify outcome).  Both are additive — they don't replace the dicts
-# returned by the legacy build()/handle() entry points.
+# Public types returned by build() and handle().
 # ──────────────────────────────────────────────────────────────────────────────
 
 class SignedEnvelope(str):
     """
-    Wire-ready signed host envelope.
+    Wire-ready signed envelope returned by ``dna.build(payload)``.
 
-    Behaves as a string (the JSON you put on transport) and carries the
-    underlying signed block as attributes::
+    It behaves as the wire string itself; the signed block and ids hang off
+    as attributes::
 
-        env = dna.envelope({"tool": "append_task", "args": {...}})
-        send_over_wire(env)             # env IS the wire string
-        env.host_block                  # the signed dict
-        env.message_id, env.context_id  # ids
-        env.original_message            # the JSON we signed
+        env = dna.build({"tool": "append_task", "args": {...}})
+        transport.send(env)              # env IS the wire string
+        env.host_block                   # signed dict
+        env.message_id, env.context_id   # ids
+        env.original_message             # what we signed
+        env.user_block                   # user delegation block, if any
     """
 
     _ATTRS = ("host_block", "message_id", "context_id", "original_message", "user_block")
@@ -97,71 +95,55 @@ class SignedEnvelope(str):
 
 @dataclass
 class VerifyResult:
-    """
-    Typed outcome of verifying a signed reply (host side).
+    """Typed outcome of ``await dna.handle(reply, original=env)``."""
 
-    Read this instead of walking the dict returned by the legacy handle() path.
-    """
-
-    payload: Optional[Any] = None                  # parsed reply body (JSON or str)
-    verified: bool = False                          # all signature checks passed
+    payload: Optional[Any] = None                   # parsed reply body
+    verified: bool = False                          # all signatures passed
     trust_issues: List[str] = field(default_factory=list)
     signed_text: Optional[str] = None               # the inner combined_json we verified
     host_block: Optional[Dict[str, Any]] = None
     agent_block: Optional[Dict[str, Any]] = None
     nft_result: Optional[Dict[str, Any]] = None
     verification_status: str = "unknown"            # "ok" | "failed" | "unknown"
-    user_block: Optional[Dict[str, Any]] = None     # signed user envelope (delegation chain)
-    user_verified: bool = False                     # was the user's signature valid?
+    user_block: Optional[Dict[str, Any]] = None     # signed user envelope, if any
+    user_verified: bool = False                     # user signature valid?
 
 
 @dataclass
 class RequestContext:
     """
-    Verified inbound request (server side).
+    Typed outcome of ``await dna.handle(envelope)`` on the remote side.
 
-    A server tool calls ``dna.verify_request(envelope)`` to get one of these,
-    then passes it to ``dna.sign_response(payload, ctx=ctx)`` so the reply is
-    cryptographically stitched to the exact request it answers.
+    Pass it back into ``dna.build(payload, ctx=ctx)`` to sign a reply that's
+    cryptographically bound to the exact request it answers.
     """
 
-    original_message: str = ""                      # the JSON string the host signed
-    host_block: Optional[Dict[str, Any]] = None     # signed host block (passed back when replying)
+    original_message: str = ""                      # the JSON the host signed
+    host_block: Optional[Dict[str, Any]] = None     # signed host block (echo back when replying)
     trust_issues: List[str] = field(default_factory=list)
     verified: bool = False
-    user_block: Optional[Dict[str, Any]] = None     # signed user envelope (delegation chain)
-    user_id: Optional[str] = None                   # user DID from the signed user envelope
-    user_intent: Optional[str] = None               # the intent string the user signed
-    user_verified: bool = False                     # was the user's signature valid?
+    user_block: Optional[Dict[str, Any]] = None     # signed user envelope, if any
+    user_id: Optional[str] = None                   # user DID
+    user_intent: Optional[str] = None               # what the user signed
+    user_verified: bool = False                     # user signature valid?
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# AgentDNA — single entry point. Owns envelope construction, response
-# verification, and the NFT audit log. Sign/verify primitives live in
-# RubixTrustService (the rubix-py SDK adapter).
+# AgentDNA — the single entry point. build() signs, handle() verifies.
+# Sign/verify primitives live in RubixTrustService (rubix-py adapter).
 # ──────────────────────────────────────────────────────────────────────────────
 
 class AgentDNA:
     """
-    Single entry point for agent developers.
+    Single entry point for adopters. Two methods do everything:
 
-    Two ergonomic helpers (recommended):
+        env    = dna.build(payload)                       # sign outbound
+        result = await dna.handle(reply, original=env)    # verify + write NFT
 
-        env    = dna.envelope(payload)              # sign outbound
-        result = await dna.verify_reply(            # verify inbound + NFT
-            raw_text, original=payload,
-        )
+    Plus shortcuts:
 
-    Plus low-level primitives if you need them:
-
-        dna.build(original_message=...)             # returns dict
-        await dna.handle(raw_text=...)              # returns dict
-        await dna.handle(resp_parts=..., original_task=..., remote_name=...)
-
-    And one-line conveniences:
-
-        AgentDNA.from_env(alias="...")              # build from env vars
-        dna.history()                               # decoded chain history
+        AgentDNA.from_env(alias="...")                    # construct from env vars
+        dna.history()                                     # decoded chain log
     """
 
     # ─── Construction ────────────────────────────────────────────────────────
@@ -175,7 +157,7 @@ class AgentDNA:
         enable_nft: bool = True,
         **_legacy,
     ) -> None:
-        # Back-compat: silently accept role= from older callers
+        # Back-compat: silently drop role= from older callers
         _legacy.pop("role", None)
 
         # Trust layer — sign/verify primitives via rubix-py
@@ -193,15 +175,13 @@ class AgentDNA:
         self.last_trust_issues: List[str] = []
         self.last_verification_status: str = "unknown"  # "ok" | "failed" | "unknown"
 
-        # NFT registration — populated eagerly below.
         self.token_path: Optional[Path] = None
         self.nft_token: Optional[str] = None
 
-        # An agent's audit-log NFT is bound to its DID. Deploy it eagerly so the
-        # chain identity exists the moment the agent is constructed (cached in
-        # agent_info.json on first deploy; subsequent constructions reuse it).
-        # Pass enable_nft=False at construction to skip — useful for pure-remote
-        # agents that never write to chain.
+        # Deploy the audit-log NFT eagerly so the chain identity exists from
+        # construction. Cached in agent_info.json — re-runs reuse it.
+        # Pass enable_nft=False for pure signers (hosts/remotes that don't
+        # own the audit log).
         if self.enable_nft:
             self._ensure_nft_token()
 
@@ -236,9 +216,7 @@ class AgentDNA:
     def handler(self) -> "AgentDNA":
         return self
 
-    # ─── New ergonomic API: envelope() / verify_reply() / history() ──────────
-
-    # ─── Internal verify helpers (shared by handle() and aliases) ────────────
+    # ─── Internal verify helpers (used by handle() and the aliases) ──────────
 
     async def _verify_reply(
         self,
@@ -282,17 +260,16 @@ class AgentDNA:
         host_block = first.get("host")
         env = agent_block.get("envelope") or {}
 
-        # Extract the reply body. The server-signed envelope's "response" field
-        # is what application code actually wants.
+        # Pull the reply body out of the signed envelope (parse JSON if we can).
         body = env.get("response")
         parsed_payload: Any = body
         if isinstance(body, str):
             try:
                 parsed_payload = json.loads(body)
             except (TypeError, json.JSONDecodeError):
-                parsed_payload = body  # leave as plain string
+                parsed_payload = body  # not JSON — keep as plain string
 
-        # Pull user_block + verify it (if a delegation chain was used)
+        # If a user_block rode along (delegation chain), verify the user's sig.
         user_block = None
         user_verified = False
         if isinstance(host_block, dict):
@@ -338,7 +315,7 @@ class AgentDNA:
         host_envelope = host_block.get("envelope") if isinstance(host_block, dict) else None
         user_block = host_envelope.get("user_block") if isinstance(host_envelope, dict) else None
 
-        # Optionally verify the embedded user signature.
+        # Verify the embedded user signature, if present.
         user_id: Optional[str] = None
         user_intent: Optional[str] = None
         user_verified = False
@@ -380,9 +357,7 @@ class AgentDNA:
             user_verified=user_verified,
         )
 
-    # ─── Optional explicit-name aliases (build/handle still the canonical) ───
-    # Adopters who prefer self-documenting names can use these. They delegate
-    # to the same dispatch as build()/handle().
+    # ─── Explicit-name aliases — all delegate to build() / handle() ─────────
 
     def envelope(self, payload, *, state=None):
         return self.build(payload, state=state)
@@ -403,20 +378,17 @@ class AgentDNA:
 
     def history(self, latest: bool = False) -> List[Dict[str, Any]]:
         """
-        Fetch decoded NFT chain history for this agent.
+        Decoded NFT chain log for this agent.
 
-        Returns ``[]`` if the audit-log NFT hasn't been deployed yet (i.e. this
-        agent has never verified a reply).
-
-        Any field whose value is a JSON-encoded string (``NFTData``, ``data``,
-        and nested ones like ``original_message``) is recursively parsed so
-        renderers like ``st.json()`` get a foldable tree all the way down
-        instead of one long escaped blob.
+        Returns ``[]`` if the NFT hasn't been deployed yet. JSON-string fields
+        (``NFTData``, ``data``, nested ``original_message``, …) are parsed
+        recursively so renderers like ``st.json()`` show a foldable tree
+        rather than one escaped blob.
         """
         if not self.nft_token:
             return []
 
-        # Local imports keep the chain-query dependency optional at import time.
+        # Lazy import — keeps the chain-query dep optional at import time.
         from rubix.client import RubixClient
         from rubix.querier import Querier
 
@@ -433,7 +405,7 @@ class AgentDNA:
 
         return [_deep_json_decode(s) for s in states]
 
-    # ─── BUILD: outbound messages (legacy primitives, still supported) ───────
+    # ─── build() — sign outbound envelopes ──────────────────────────────────
 
     def build(
         self,
@@ -446,30 +418,27 @@ class AgentDNA:
         **legacy,
     ) -> Union[SignedEnvelope, str, Dict[str, Any]]:
         """
-        Sign an outbound envelope. Two ergonomic call shapes plus the legacy
-        kwarg form — all three coexist; pick whichever reads best.
+        Sign an outbound envelope.
 
-        Sign a fresh request (host side) — positional payload, no ctx::
+        Sign a fresh request (host side) — positional payload::
 
-            env = dna.build(host_msg)              # returns SignedEnvelope (str-like)
+            env = dna.build(host_msg)              # SignedEnvelope (str-like)
             transport.send(str(env))
 
         Sign a reply under a verified context (remote side) — pass ``ctx=``::
 
-            wire = dna.build(payload, ctx=ctx)     # returns wire string
+            wire = dna.build(payload, ctx=ctx)     # wire string
 
-        Pass ``user=`` to attach a user's signed intent (delegation chain).
-        The host signature commits to the embedded ``user_block``, so any
-        tampering with user attribution breaks host verification::
+        Pass ``user=`` to embed the user's signed intent (delegation chain).
+        The host signature commits to ``user_block``, so user attribution
+        can't be forged without breaking host verification::
 
-            user_signed = user_dna.build({"intent": prompt})  # user signs first
-            env = dna.build(host_msg, user=user_signed)        # host signs over it
+            user_signed = user_dna.build({"intent": prompt})
+            env        = host_dna.build(host_msg, user=user_signed)
 
-        Legacy kwarg form — same as before the refactor, returns a dict::
+        Legacy kwarg form (returns a dict)::
 
             built = dna.build(original_message=task)
-            built = dna.build(original_message=task, response=reply,
-                              host_block=host_block, extra={...})
         """
         # Legacy path — caller passed original_message= as a kwarg
         if "original_message" in legacy:
@@ -497,9 +466,8 @@ class AgentDNA:
                 "the legacy original_message= kwarg."
             )
 
-        # New ergonomic path
+        # Sign a reply (remote side) — under a verified request context
         if ctx is not None:
-            # Sign a reply under a verified request context
             if isinstance(payload, str):
                 response_str = payload
             else:
@@ -513,7 +481,7 @@ class AgentDNA:
             )
             return built["combined_json"]
 
-        # Sign a fresh request — returns SignedEnvelope
+        # Sign a fresh request (host/user side) — returns SignedEnvelope
         if isinstance(payload, str):
             original_message = payload
         else:
@@ -536,9 +504,9 @@ class AgentDNA:
     @staticmethod
     def _extract_user_block(user: Union[SignedEnvelope, Dict[str, Any], None]) -> Optional[Dict[str, Any]]:
         """
-        Normalize ``user`` into a signed-block dict (``{agent, envelope, signature}``).
-        Accepts a ``SignedEnvelope`` (from ``user_dna.build(...)``), a raw signed-block
-        dict, or ``None``.
+        Normalize ``user`` into a ``{agent, envelope, signature}`` dict.
+        Accepts a ``SignedEnvelope`` from ``user_dna.build(...)``, a raw
+        signed-block dict, or ``None``.
         """
         if user is None:
             return None
@@ -573,7 +541,8 @@ class AgentDNA:
             "timestamp":        datetime.utcnow().isoformat() + "Z",
         }
         if user_block is not None:
-            # Commit to the user attribution by signing it inside the host envelope.
+            # Embed user_block inside the host envelope so the host signature
+            # commits to it — tampering with user attribution breaks verify.
             host_envelope["user_block"] = user_block
 
         host_block = self.trust.sign_envelope(host_envelope)
@@ -616,7 +585,7 @@ class AgentDNA:
             "combined_json": combined_json,
         }
 
-    # ─── HANDLE: inbound messages (legacy primitives, still supported) ───────
+    # ─── handle() — verify inbound envelopes ────────────────────────────────
 
     async def handle(
         self,
@@ -629,12 +598,11 @@ class AgentDNA:
         **legacy,
     ) -> Union["VerifyResult", "RequestContext", Dict[str, Any]]:
         """
-        Verify an inbound envelope. Two ergonomic call shapes plus the legacy
-        kwarg form.
+        Verify an inbound envelope.
 
-        Verify a signed reply (host side) — pass ``original=`` to compare
-        against what we sent. Returns ``VerifyResult``, writes the audit-log
-        NFT (set ``execute_nft=False`` to skip)::
+        Verify a signed reply (user/host side) — pass ``original=``. Returns
+        ``VerifyResult`` and writes the audit-log NFT (``execute_nft=False``
+        to skip)::
 
             result = await dna.handle(reply_text, original=env)
             result.payload, result.verified, result.trust_issues
@@ -647,11 +615,7 @@ class AgentDNA:
         Legacy kwarg form (returns a dict)::
 
             info   = await dna.handle(raw_text=...)
-            result = await dna.handle(
-                resp_parts=...,
-                original_task=...,
-                remote_name=...,
-            )
+            result = await dna.handle(resp_parts=..., original_task=..., remote_name=...)
         """
         # Legacy: kwarg-based call
         if "raw_text" in legacy:
@@ -673,9 +637,8 @@ class AgentDNA:
                 execute_nft=legacy.get("execute_nft", execute_nft),
             )
 
-        # New ergonomic path
+        # Verify a signed reply — compare against what we sent (`original=`)
         if original is not None:
-            # Verify a signed reply against what we sent
             return await self._verify_reply(
                 payload,
                 original=original,
@@ -689,7 +652,7 @@ class AgentDNA:
                 "or use the legacy raw_text=/resp_parts= kwargs."
             )
 
-        # Verify an inbound request → RequestContext
+        # Verify an inbound request (remote side) → RequestContext
         return await self._verify_request(payload, verify_mode=verify_mode)
 
     async def _handle_host_response(
@@ -747,7 +710,7 @@ class AgentDNA:
             error_msg = "No valid envelope response"
             print("No valid envelope response")
 
-        # Snapshot for NFT payload + status
+        # Snapshot for the NFT payload + status flag
         self.last_parts = verified
         self.last_trust_issues = trust_issues or []
         if not verified:
@@ -757,7 +720,7 @@ class AgentDNA:
                 "failed" if self.last_trust_issues else "ok"
             )
 
-        # NFT write — lazy-deploy on first need
+        # Write the audit record to chain
         if self.enable_nft and execute_nft and verified:
             token = self._ensure_nft_token()
             if token is not None:
@@ -775,10 +738,10 @@ class AgentDNA:
             "nft_result":   nft_result,
         }
 
-    # ─── NFT: lazy deploy + execute ───────────────────────────────────────────
+    # ─── NFT: deploy + execute ──────────────────────────────────────────────
 
     def _ensure_nft_token(self) -> Optional[str]:
-        """Deploy (or load) the audit-log NFT on first need. Cached after that."""
+        """Deploy (or load) the audit-log NFT. Cached after first call."""
         if not self.enable_nft:
             return None
         if self.nft_token is not None:
@@ -863,8 +826,8 @@ class AgentDNA:
         for entry in self.last_parts:
             if not host_block and entry.get("host"):
                 host_block = entry["host"]
-                # Pull the embedded user_block (if any) out of the host envelope
-                # so it sits at the top of the audit record next to host/responses.
+                # Lift the embedded user_block to the top of the audit record
+                # so it sits next to host/responses.
                 host_env = host_block.get("envelope") if isinstance(host_block, dict) else None
                 if isinstance(host_env, dict) and isinstance(host_env.get("user_block"), dict):
                     user_block = host_env["user_block"]
@@ -877,9 +840,8 @@ class AgentDNA:
                 agent_entry["envelope"] = env
                 responses.append(agent_entry)
 
-        # If a user_block was carried, the writing DNA is treated as the user
-        # who owns the audit-log NFT. Otherwise this falls back to the legacy
-        # "host_agent" framing for back-compat.
+        # With a user_block the writer is the user (top of chain). Without
+        # one, fall back to "host_agent" for back-compat.
         executor = "user" if user_block is not None else "host_agent"
 
         payload: Dict[str, Any] = {
@@ -897,20 +859,17 @@ class AgentDNA:
         payload["responses"] = responses
         return payload
 
-    # ─── Helpers for verify_reply() ──────────────────────────────────────────
+    # ─── Helpers for handle() ────────────────────────────────────────────────
 
     @staticmethod
     def _unwrap_signed_text(raw) -> Optional[str]:
         """
-        Pull the signed combined_json out of whatever transport handed us.
-        Accepts:
-          - plain combined_json string (returned as-is)
-          - JSON-stringified ``{"combined_json": "..."}`` (one level of unwrap)
-          - dict already parsed (same unwrap)
-          - list of A2A-style parts (``[{"text": "..."}, ...]`` or list of
-            strings): walks the list and returns the first part whose body
-            parses to a signed envelope (a dict with a top-level ``"agent"``
-            block).
+        Pull the signed combined_json out of whatever the transport handed us:
+          - plain combined_json string  → returned as-is
+          - ``{"combined_json": "..."}`` dict or JSON string  → unwrapped
+          - list of A2A-style parts (``[{"text": "..."}, ...]``)  → returns
+            the first part whose body parses to a signed envelope (dict with
+            a top-level ``"agent"`` block).
         """
         if raw is None:
             return None
@@ -944,7 +903,7 @@ class AgentDNA:
 
     @staticmethod
     def _looks_signed(text: str) -> bool:
-        """True iff ``text`` parses to a dict carrying a signed agent block."""
+        """True if ``text`` parses to a dict with a signed agent block."""
         if not isinstance(text, str):
             return False
         stripped = text.lstrip()
@@ -962,9 +921,9 @@ class AgentDNA:
     @staticmethod
     def _infer_remote_name(signed_text: str) -> Optional[str]:
         """
-        Best-effort remote_name extraction from the signed reply: prefer an
-        explicit ``agent_name`` / ``remote_name`` field inside the envelope,
-        else fall back to the agent's DID tail (last 16 chars).
+        Best-effort remote name from the signed reply: prefer an explicit
+        ``agent_name`` / ``remote_name`` field in the envelope, else fall
+        back to the last 16 chars of the agent's DID.
         """
         try:
             obj = json.loads(signed_text)

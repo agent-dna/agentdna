@@ -9,9 +9,8 @@
 ```
 agentdna/
 ├── __init__.py       — public exports
-├── core.py           — AgentDNA class 
-├── trust.py          — RubixTrustService (rubix-py SDK adapter)
-└── node_client.py    — resolve_chain_url() + back-compat NodeClient shim
+├── core.py           — AgentDNA class
+└── trust.py          — RubixTrustService (rubix-py SDK adapter) + resolve_chain_url()
 ```
 
 ### What lives where
@@ -20,8 +19,7 @@ agentdna/
 graph LR
     subgraph "agentdna package (what your app imports)"
         Core["core.py<br/>AgentDNA class<br/>━━━━━━━━━━━<br/>· build()<br/>· handle()<br/>· history()<br/>· NFT deploy + execute"]
-        Trust["trust.py<br/>RubixTrustService<br/>━━━━━━━━━━━<br/>· sign_envelope<br/>· verify_envelope<br/>· verify_message_payload"]
-        Node["node_client.py<br/>resolve_chain_url"]
+        Trust["trust.py<br/>RubixTrustService<br/>━━━━━━━━━━━<br/>· sign_envelope<br/>· verify_envelope<br/>· verify_message_payload<br/>· resolve_chain_url"]
     end
 
     subgraph "External SDKs"
@@ -31,7 +29,6 @@ graph LR
 
     Core --> Trust
     Core --> Mhash
-    Trust --> Node
     Trust --> RubixPy
     Core -. lazy import for history\(\) .-> RubixPy
 ```
@@ -40,8 +37,7 @@ graph LR
 | File | Role |
 |---|---|
 | **`core.py`** | What adopters use. Owns message envelope construction, NFT audit-log writes, and per-call state. |
-| **`trust.py`** | Links to `rubix-py` for sign/verify. |
-| **`node_client.py`** | URL resolution from config / env. Function |
+| **`trust.py`** | Links to `rubix-py` for sign/verify. Also hosts `resolve_chain_url()` (config / env URL lookup). |
 
 ### Public exports
 
@@ -52,8 +48,7 @@ from agentdna import (
     VerifyResult,     # dataclass returned by dna.handle(reply, original=env)
     RequestContext,   # dataclass returned by dna.handle(envelope)
     RubixTrustService,# usually accessed via dna.trust
-    NodeClient,       # back-compat shim
-    resolve_chain_url,# preferred function form
+    resolve_chain_url,# Rubix node URL resolver
 )
 ```
 

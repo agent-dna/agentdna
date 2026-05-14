@@ -17,7 +17,7 @@ from mcp import ClientSession, StdioServerParameters, types as mcp_types
 
 from pathlib import Path
 
-from agentdna import AgentDNA, NodeClient
+from agentdna import AgentDNA, resolve_chain_url
 from rubix.client import RubixClient
 from rubix.querier import Querier
 
@@ -41,8 +41,7 @@ host_dna = AgentDNA(
     chain_url=CHAIN_URL,
     enable_nft=False,
 )
-node = NodeClient(alias="gsheets_GoogleSheetsAgenthost")
-DEFAULT_BASE_URL = node.get_base_url()
+DEFAULT_BASE_URL = resolve_chain_url()
 
 REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "GoogleSheetsMCP")
 DEFAULT_USER_ALIAS = "GoogleSheetsAgent_USER"

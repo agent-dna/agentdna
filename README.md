@@ -114,9 +114,7 @@ result = await self.dna.handle(
 ```
 agentdna/
  ├── core.py
- ├── handler.py
  ├── trust.py
- ├── node_client.py
  └── ...
 ```
 

@@ -1,13 +1,42 @@
 import json
 import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 from pathlib import Path
 import requests
 from rubix.client import RubixClient
 from rubix.signer import Signer
 from rubix.did import online_signature_verify, signatureResponseError
 
-from .node_client import resolve_chain_url
+
+def resolve_chain_url(
+    base_url: Optional[str] = None,
+    chain_url: Optional[str] = None,
+    config_path: Optional[Union[str, Path]] = None,
+) -> str:
+    """
+    Resolve the Rubix node URL from, in order:
+      1. base_url (explicit)
+      2. chain_url (explicit)
+      3. config_path (or agentdna/config.json)['chain_url']
+      4. CHAIN_URL env var
+    Raises ValueError if none of those produce a URL.
+    """
+    if config_path is None:
+        config_path = Path(__file__).resolve().parent / "config.json"
+
+    cfg_chain: Optional[str] = None
+    try:
+        with Path(config_path).open("r", encoding="utf-8") as f:
+            cfg_chain = json.load(f).get("chain_url")
+    except (FileNotFoundError, json.JSONDecodeError):
+        cfg_chain = None
+
+    final_url = base_url or chain_url or cfg_chain or os.getenv("CHAIN_URL")
+    if not final_url:
+        raise ValueError(
+            "No Rubix node URL found. Set chain_url, config.json['chain_url'], or CHAIN_URL."
+        )
+    return final_url.rstrip("/")
 
 
 class RubixTrustService:
