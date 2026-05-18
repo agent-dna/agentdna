@@ -19,6 +19,7 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "rubix-py>=1.0.0",
   "py-multiformats-cid>=0.4.4",
+  "pyyaml>=6.0",
 ]
 
 [tool.setuptools.package-data]

@@ -126,6 +126,7 @@ class RequestContext:
     user_id: Optional[str] = None                   # user DID
     user_intent: Optional[str] = None               # what the user signed
     user_verified: bool = False                     # user signature valid?
+    cbac_result: Optional[Any] = None               # CBACResult when handle(cbac=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -155,6 +156,8 @@ class AgentDNA:
         chain_url: Optional[str] = None,
         token_filename: str = "agent_info.json",
         enable_nft: bool = True,
+        cbac: bool = False,
+        card_nft: Optional[str] = None,
         **_legacy,
     ) -> None:
         # Back-compat: silently drop role= from older callers
@@ -168,12 +171,21 @@ class AgentDNA:
         self.alias = alias
         self.token_filename = token_filename
 
+        # CBAC opt-in. When `cbac=True`, handle() runs the policy chain check
+        # alongside CoCA verification. `card_nft` is this agent's own policy
+        # card NFT hash — automatically attached to every envelope build()
+        # produces, so downstream verifiers can fetch and enforce it.
+        self.cbac_enabled = bool(cbac)
+        self.card_nft = card_nft
+        self._cbac_engine = None        # lazily created when CBAC is invoked
+
         # NFT config + per-call audit state
         self.enable_nft = enable_nft
         self.nft_cfg = _load_nft_config()
         self.last_parts: List[Dict[str, Any]] = []
         self.last_trust_issues: List[str] = []
         self.last_verification_status: str = "unknown"  # "ok" | "failed" | "unknown"
+        self.last_cbac_summary: Optional[Dict[str, Any]] = None  # from resource's reply
 
         self.token_path: Optional[Path] = None
         self.nft_token: Optional[str] = None
@@ -369,7 +381,7 @@ class AgentDNA:
                 except Exception:
                     user_intent = raw_intent
 
-        return RequestContext(
+        ctx = RequestContext(
             original_message=info.get("original_message") or "",
             host_block=host_block,
             trust_issues=trust_issues,
@@ -379,6 +391,25 @@ class AgentDNA:
             user_intent=user_intent,
             user_verified=user_verified,
         )
+
+        # CBAC — runs only when this agent was constructed with cbac=True.
+        # CoCA must pass first; otherwise CBAC would be checking unverified
+        # signers.
+        if self.cbac_enabled and ctx.verified:
+            ctx.cbac_result = await self._cbac_verify(ctx)
+            if ctx.cbac_result is not None and ctx.cbac_result.decision == "deny":
+                ctx.trust_issues.append(
+                    f"CBAC denied: {ctx.cbac_result.reason}"
+                )
+
+        return ctx
+
+    async def _cbac_verify(self, ctx: "RequestContext"):
+        """Soft-imported CBAC engine, instantiated once per AgentDNA."""
+        if self._cbac_engine is None:
+            from .cbac import CBAC
+            self._cbac_engine = CBAC(trust=self.trust)
+        return await self._cbac_engine.verify(ctx)
 
     # ─── Explicit-name aliases — all delegate to build() / handle() ─────────
 
@@ -506,6 +537,14 @@ class AgentDNA:
             else:
                 response_str = json.dumps(payload, separators=(",", ":"), sort_keys=True)
             merged_extra = {"host_trust_issues": ctx.trust_issues, **(extra or {})}
+            # If CBAC ran inside handle(), attest the decision in the signed
+            # reply so the upstream auditor can surface it without re-running.
+            if getattr(ctx, "cbac_result", None) is not None and "cbac" not in merged_extra:
+                cr = ctx.cbac_result
+                merged_extra["cbac"] = {
+                    "decision": cr.decision,
+                    "n_denied": sum(1 for c in cr.trace if not c.passed),
+                }
             built = self._build_agent_response(
                 original_message=ctx.original_message or response_str,
                 response=response_str,
@@ -585,6 +624,12 @@ class AgentDNA:
             "message_id":       message_id,
             "timestamp":        datetime.utcnow().isoformat() + "Z",
         }
+        if self.card_nft is not None:
+            # CBAC: this agent's policy card NFT hash. Downstream verifiers
+            # fetch the card and enforce its allowed-actions/constraints/etc.
+            # The signature commits to it, so it can't be swapped after the
+            # fact.
+            host_envelope["agent_card_nft"] = self.card_nft
         if parent_block is not None:
             # Embed the parent's signed block inside this envelope so our
             # signature commits to it — tampering with any upstream signer's
@@ -766,6 +811,16 @@ class AgentDNA:
                 "failed" if self.last_trust_issues else "ok"
             )
 
+        # Pull CBAC summary from the first reply that carries one (the resource
+        # auto-attaches `cbac` in build(ctx=ctx) when its CBAC engine ran).
+        self.last_cbac_summary = None
+        for entry in verified:
+            env = (entry.get("agent") or {}).get("envelope") or {}
+            cbac_attest = env.get("cbac")
+            if isinstance(cbac_attest, dict):
+                self.last_cbac_summary = cbac_attest
+                break
+
         # Write the audit record to chain
         if self.enable_nft and execute_nft and verified:
             token = self._ensure_nft_token()
@@ -907,6 +962,8 @@ class AgentDNA:
                 "chain_depth":  chain_depth,
             },
         }
+        if self.last_cbac_summary is not None:
+            payload["cbac"] = self.last_cbac_summary
         if user_block is not None:
             payload["user"] = user_block
         if intermediates:

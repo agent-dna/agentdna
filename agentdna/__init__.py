@@ -5,6 +5,7 @@ Public interface for AgentDNA utilities.
 
 from .core import AgentDNA, SignedEnvelope, VerifyResult, RequestContext
 from .trust import RubixTrustService, resolve_chain_url
+from .cbac import CBAC, Card, CardCheck, CBACResult, parse_skill_md
 
 __all__ = [
     "AgentDNA",
@@ -13,4 +14,10 @@ __all__ = [
     "RequestContext",
     "RubixTrustService",
     "resolve_chain_url",
+    # CBAC
+    "CBAC",
+    "Card",
+    "CardCheck",
+    "CBACResult",
+    "parse_skill_md",
 ]
