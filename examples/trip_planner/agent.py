@@ -23,7 +23,7 @@ from pathlib import Path
 from string import Template
 from typing import Any, Dict, List, Optional, Tuple
 
-from agentdna import AgentDNA, CBAC, Card, parse_skill_md
+from agentdna import AgentDNA, Card, parse_skill_md, deploy_card
 
 
 HERE = Path(__file__).parent
@@ -168,7 +168,6 @@ class TripPlanner:
 
     def _provision_cards(self) -> None:
         cache = _load_card_cache()
-        cbac = CBAC(trust=self.admin.trust)
 
         issued_at  = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
         expires_at = (datetime.now(timezone.utc) + timedelta(days=365)).replace(
@@ -193,7 +192,7 @@ class TripPlanner:
             else:
                 tmp = SKILLS_DIR / f".{template_name}.rendered.md"
                 tmp.write_text(text, encoding="utf-8")
-                addr = cbac.deploy_card(self.admin, tmp)
+                addr = deploy_card(self.admin, tmp)
                 tmp.unlink(missing_ok=True)
                 cache[ck] = addr
                 print(f"Deployed card NFT for {template_name}: {addr}")

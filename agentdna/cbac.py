@@ -30,9 +30,9 @@ Usage
         card_nft="Qm...flight...",
     )
 
-    # Admin — deploy a card from a skill.md file
-    cbac = CBAC(trust=admin_dna.trust)
-    nft_hash = cbac.deploy_card(admin_dna, "skills/flight.md")
+    # Admin — deploy a card from a skill.md file (standalone helper,
+    # outside the CBAC engine — same pattern as user enrollment).
+    nft_hash = deploy_card(admin_dna, "skills/flight.md")
 
     # Inbound — CoCA + CBAC run inside handle() when cbac=True
     ctx = await dna.handle(envelope)
@@ -42,15 +42,12 @@ Usage
 
 from __future__ import annotations
 
-import hashlib
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 
 import yaml
-from multiformats_cid.cid import CIDv0
 
 from .trust import RubixTrustService
 
@@ -169,59 +166,6 @@ class CBAC:
     def __init__(self, trust: RubixTrustService) -> None:
         self.trust = trust
         self._card_cache: Dict[str, Card] = {}
-
-    # ─── admin: deploy a card NFT ─────────────────────────────────────────
-
-    def deploy_card(
-        self,
-        admin_dna,                                  # AgentDNA — circular, hence late typing
-        skill_md_path: Union[str, Path],
-    ) -> str:
-        """
-        Admin signs and deploys a skill.md as a card NFT. Returns the
-        NFT address. The card's ``issued-by`` field must match the
-        admin's DID.
-        """
-        text = Path(skill_md_path).read_text(encoding="utf-8")
-        card = parse_skill_md(text)
-
-        if card.issued_by != admin_dna.did:
-            raise ValueError(
-                f"Card issued-by={card.issued_by!r} does not match admin DID "
-                f"{admin_dna.did!r}"
-            )
-
-        # Deterministic NFT id from (admin DID, agent DID, content hash) so
-        # re-running the same card on the same admin/agent is idempotent.
-        content_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        seed = f"card.{admin_dna.did}.{card.agent_did}.{content_hash[:16]}"
-        digest = hashlib.sha256(seed.encode("utf-8")).digest()
-        multihash_bytes = bytes([0x12, len(digest)]) + digest
-        nft_id = CIDv0(multihash_bytes).encode().decode("utf-8")
-
-        # Admin signs the card content; signature ships inside the NFT so
-        # offline verifiers can confirm the card came from this admin.
-        admin_signature = self.trust.sign_envelope({"skill_md": text})
-
-        nft_data = json.dumps({
-            "skill_md":        text,
-            "admin_signature": admin_signature,
-        })
-
-        resp = admin_dna.signer.deploy_nft(
-            nft_id=nft_id,
-            nft_value=0.001,
-            nft_data=nft_data,
-        )
-        if resp.get("error"):
-            raise RuntimeError(f"Card NFT deployment failed: {resp['error']}")
-        nft_address = resp.get("nft_address")
-        if not nft_address:
-            raise RuntimeError("Card NFT deployment returned no nft_address")
-
-        card.nft_address = nft_address
-        self._card_cache[nft_address] = card
-        return nft_address
 
     # ─── fetch + verify a card from Rubix ─────────────────────────────────
 
