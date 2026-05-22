@@ -30,7 +30,6 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
         "agent_did":      dna.did,
         "agent_metadata": dna.metadata,
         "policy":         dna.policy,
-        "deployer":       dna.did,
     }
 
 
