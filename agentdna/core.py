@@ -1,21 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import copy
 import hashlib
 import json
 import os
 import uuid
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, cast
 
 from multiformats_cid.cid import CIDv0
 
 from .trust import RubixTrustService
 
-
+EPOCH_THRESHOLD_SECONDS = 3600
 # ──────────────────────────────────────────────────────────────────────────────
 # NFT config loader (file + env, with sensible defaults)
 # ──────────────────────────────────────────────────────────────────────────────
@@ -149,6 +151,8 @@ class AgentDNA:
 
     # ─── Construction ────────────────────────────────────────────────────────
 
+    VALID_KINDS = ("user", "agent")
+
     def __init__(
         self,
         alias: str,
@@ -158,10 +162,38 @@ class AgentDNA:
         enable_nft: bool = True,
         cbac: bool = False,
         card_nft: Optional[str] = None,
+        kind: str = "agent",
+        policy_file: Optional[Union[str, Path]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
         **_legacy,
     ) -> None:
         # Back-compat: silently drop role= from older callers
         _legacy.pop("role", None)
+        # Back-compat: older callers used skill_md=; accept it as an alias.
+        if "skill_md" in _legacy and policy_file is None:
+            policy_file = _legacy.pop("skill_md")
+        _legacy.pop("skill_md", None)
+
+        if kind not in self.VALID_KINDS:
+            raise ValueError(
+                f"kind={kind!r} not in {self.VALID_KINDS} — "
+                "human principals use 'user', software agents use 'agent'"
+            )
+        # Users sign intents at the top of the chain; they don't hold policy
+        # files. Agents act on behalf of users; they don't carry user metadata.
+        # Reject the wrong-side combinations up front.
+        if kind == "user" and (card_nft or policy_file):
+            raise ValueError(
+                "kind='user' cannot carry card_nft= or policy_file= "
+                "(policies govern agent actions, not user intents)"
+            )
+        if kind == "agent" and metadata is not None:
+            raise ValueError(
+                "metadata= belongs on kind='user' (user-profile data); "
+                "agent identity carries its policy via policy_file=, not metadata"
+            )
+        if card_nft and policy_file:
+            raise ValueError("pass either card_nft= or policy_file=, not both")
 
         # Trust layer — sign/verify primitives via rubix-py
         self.trust = RubixTrustService(alias=alias, api_key=api_key, chain_url=chain_url)
@@ -169,6 +201,7 @@ class AgentDNA:
         self.signer = self.trust.signer
 
         self.alias = alias
+        self.kind = kind
         self.token_filename = token_filename
 
         # CBAC opt-in. When `cbac=True`, handle() runs the policy chain check
@@ -179,6 +212,24 @@ class AgentDNA:
         self.card_nft = card_nft
         self._cbac_engine = None        # lazily created when CBAC is invoked
 
+        # Kind-specific identity-NFT payload inputs:
+        #   user:  metadata        (free-form profile dict, defaults to {})
+        #   agent: policy  (base64-encoded contents of the file at
+        #                      policy_file, "" if none provided). The
+        #                      file is treated as opaque bytes — projects
+        #                      choose their own format (markdown, JSON,
+        #                      plain text, custom DSL).
+        self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
+        self.policy: str = ""
+
+        if kind == "agent":
+            if policy_file is not None:
+                self.policy = base64.b64encode(
+                    Path(policy_file).read_bytes()
+                ).decode("ascii")
+            else:
+                raise ValueError("kind='agent' requires a policy_file to be provided")
+        
         # NFT config + per-call audit state
         self.enable_nft = enable_nft
         self.nft_cfg = _load_nft_config()
@@ -190,12 +241,20 @@ class AgentDNA:
         self.token_path: Optional[Path] = None
         self.nft_token: Optional[str] = None
 
-        # Deploy the audit-log NFT eagerly so the chain identity exists from
-        # construction. Cached in agent_info.json — re-runs reuse it.
-        # Pass enable_nft=False for pure signers (hosts/remotes that don't
-        # own the audit log).
+        # Eagerly publish the kind-specific identity NFT so the on-chain
+        # record exists from construction. Branch is explicit so a reader of
+        # __init__ sees exactly which deploy runs for which kind. Idempotent
+        # across re-runs via agent_info.json. Pass enable_nft=False for pure
+        # signers (hosts/remotes that don't own an identity record).
         if self.enable_nft:
-            self._ensure_nft_token()
+            if self.kind == "user":
+                self.deploy_user_nft()
+            elif self.kind == "agent":
+                self.deploy_card()
+
+        # Intent NFT Ops
+        self.current_nft_intent_id = ""
+        self.current_nft_intent_epoch = 0
 
     @classmethod
     def from_env(cls, alias: Optional[str] = None, **overrides) -> "AgentDNA":
@@ -227,6 +286,18 @@ class AgentDNA:
     @property
     def handler(self) -> "AgentDNA":
         return self
+
+    # ─── Identity NFT deployment (kind-specific helpers live in agent/user) ─
+
+    def deploy_card(self) -> str:
+        """Publish the agent's identity NFT. See ``agent.deploy_card``."""
+        from .agent import deploy_card
+        return deploy_card(self)
+
+    def deploy_user_nft(self) -> str:
+        """Publish the user's identity NFT. See ``user.deploy_user_nft``."""
+        from .user import deploy_user_nft
+        return deploy_user_nft(self)
 
     # ─── Internal verify helpers (used by handle() and the aliases) ──────────
 
@@ -411,8 +482,57 @@ class AgentDNA:
             self._cbac_engine = CBAC(trust=self.trust)
         return await self._cbac_engine.verify(ctx)
 
-    # ─── Explicit-name aliases — all delegate to build() / handle() ─────────
+    # ─── One-shot helpers ───────────────────────────────────────────────────
 
+    async def initialise_intent(
+        self,
+        payload: Union[str, dict, list],
+        *,
+        state: Optional[Dict[str, Any]] = None,
+    ) -> Tuple["SignedEnvelope", "RequestContext"]:
+        """
+        Sign an intent and self-verify in one call.
+
+        Folds the usual two-step::
+
+            env = dna.build(payload)
+            ctx = await dna.handle(env)
+
+        into a single ``await``. Returns ``(envelope, ctx)``:
+
+          - ``envelope`` — the wire-ready ``SignedEnvelope`` to forward
+            downstream.
+          - ``ctx`` — the ``RequestContext`` from running ``handle()``
+            against what we just signed, so the caller can log / inspect
+            / display what's been committed before sending.
+
+        Typical use is at the top of a chain — a ``kind='user'`` principal
+        initialising a new intent — but nothing restricts it to users;
+        any AgentDNA that originates an intent can use it.
+        """
+
+        if self.kind != "user":
+            raise RuntimeError("initialise_intent is only for kind='user' principals")
+        
+        if self.nft_token is None:
+            raise RuntimeError(
+                "NFT not deployed yet — initialise_intent requires the user's identity NFT to exist so it can write the first audit record."
+            )
+
+        if self.current_nft_intent_id == "" or int(time.time()) - self.current_nft_intent_epoch > EPOCH_THRESHOLD_SECONDS:
+            child_nft_details = self.trust.deploy_child_nft(self.nft_token, "\{\}")
+            self.current_nft_intent_id = child_nft_details["childNFTId"]
+            self.current_nft_intent_epoch = int(time.time())
+
+        # build(positional payload, no ctx) always returns SignedEnvelope;
+        # handle(positional envelope, no original=) always returns
+        # RequestContext. The dispatching unions on those signatures hide
+        # that from the type checker, so narrow explicitly.
+        envelope = cast(SignedEnvelope, self.build(payload, state=state))
+        ctx = cast(RequestContext, await self.handle(envelope))
+        return envelope, ctx
+
+    # ─── Explicit-name aliases — all delegate to build() / handle() ─────────
     def envelope(self, payload, *, state=None):
         return self.build(payload, state=state)
 
@@ -447,10 +567,19 @@ class AgentDNA:
         from rubix.querier import Querier
 
         client = RubixClient(node_url=self.trust.base_url, timeout=300)
-        states = Querier(client).get_nft_states(
-            nft_address=self.nft_token,
-            only_latest_state=latest,
-        )
+        
+        child_nfts = Querier(client).get_child_nfts(self.nft_token)
+
+        states = []
+
+        for child in child_nfts:
+            state = Querier(client).get_nft_states(
+                nft_address=child["nft_id"],
+                only_latest_state=latest,
+            )
+
+            for s in state:
+                states.append(s)
 
         if isinstance(states, dict):
             states = [states]
@@ -823,8 +952,8 @@ class AgentDNA:
 
         # Write the audit record to chain
         if self.enable_nft and execute_nft and verified:
-            token = self._ensure_nft_token()
-            if token is not None:
+            token = self.current_nft_intent_id
+            if token != "":
                 try:
                     nft_payload = self._build_nft_payload(remote_name)
                     nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
@@ -841,10 +970,16 @@ class AgentDNA:
 
     # ─── NFT: deploy + execute ──────────────────────────────────────────────
 
-    def _ensure_nft_token(self) -> Optional[str]:
-        """Deploy (or load) the audit-log NFT. Cached after first call."""
-        if not self.enable_nft:
-            return None
+    def _publish_identity_nft(self) -> str:
+        """
+        Shared internal used by ``deploy_card`` / ``deploy_user_nft``.
+
+        Resolves ``self.token_path`` (cache file on disk), then delegates to
+        ``_load_or_deploy_nft`` which builds the kind-specific payload via
+        ``_identity_nft_payload``. Idempotent: returns the cached NFT
+        address if this identity has already been published in-process or
+        recorded in ``agent_info.json`` from a previous run.
+        """
         if self.nft_token is not None:
             return self.nft_token
 
@@ -859,11 +994,23 @@ class AgentDNA:
             print("Path:", self.token_path)
 
         self.nft_token = self._load_or_deploy_nft()
-        print("✅ Rubix NFT for alias", self.alias, ":", self.nft_token)
+        print(f"✅ Rubix identity NFT for {self.kind} '{self.alias}':", self.nft_token)
         return self.nft_token
 
+    def _ensure_nft_token(self) -> Optional[str]:
+        """
+        Gated dispatcher for the lazy handle()-driven deploy path. Picks the
+        right kind-specific deploy so the audit-log write can lazily mint an
+        identity NFT if one hasn't been published yet.
+        """
+        if not self.enable_nft:
+            return None
+        if self.kind == "user":
+            return self.deploy_user_nft()
+        return self.deploy_card()
+
     def _load_or_deploy_nft(self) -> str:
-        # Agent ID = CIDv0(sha256(did.alias))
+        # Identity NFT id = CIDv0(sha256(did.alias))
         digest = hashlib.sha256(f"{self.signer.did}.{self.alias}".encode("utf-8")).digest()
         multihash_bytes = bytes([0x12, len(digest)]) + digest
         agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
@@ -880,32 +1027,43 @@ class AgentDNA:
                 raise RuntimeError(f"Failed to read agent info: {e}")
             for agent in agent_info:
                 if agent.get("agent_id") == agent_id:
-                    print("Using existing Agent ID from:", self.token_path)
+                    print("Using existing Identity NFT from:", self.token_path)
                     return agent_id
-            print(f"Agent ID not found in {self.token_path}, deploying new Agent")
+            print(f"Identity NFT not found in {self.token_path}, deploying new {self.kind}")
         else:
-            print(f"agent_info.json not found at {self.token_path}, deploying new Agent")
+            print(f"agent_info.json not found at {self.token_path}, deploying new {self.kind}")
 
-        resp = self.signer.deploy_nft(
+        # Kind-specific identity payload — what gets stamped on chain.
+        nft_payload = self._identity_nft_payload()
+
+        resp = self.trust.deploy_nft(
             nft_id=agent_id,
-            nft_value=self.nft_cfg["value"] or 5,
-            nft_data=json.dumps({"agent_name": self.alias}),
+            nft_value=self.nft_cfg["value"] or 0.001,
+            nft_data=json.dumps(nft_payload),
         )
         if resp.get("error"):
             raise RuntimeError(f"NFT deployment failed: {resp['error']}")
         nft_address = resp["nft_address"]
         if nft_address is None:
-            raise RuntimeError("unexpected error during Agent deployment: unable to fetch Agent ID")
+            raise RuntimeError("unexpected error during identity NFT deployment: unable to fetch id")
 
         agent_info.append({
             "agent_id":   nft_address,
             "agent_did":  self.signer.did,
-            "agent_name": self.alias,
+            "agent_name": self.alias
         })
         with open(self.token_path, "w", encoding="utf-8") as f:
             json.dump(agent_info, f, indent=2)
-        print("Stored Agent info in:", self.token_path)
+        print("Stored identity info in:", self.token_path)
         return nft_address
+
+    def _identity_nft_payload(self) -> Dict[str, Any]:
+        """Dispatch to the kind-specific payload builder in agent.py/user.py."""
+        if self.kind == "user":
+            from .user import identity_payload
+        else:
+            from .agent import identity_payload
+        return identity_payload(self)
 
     def _execute_nft(self, nft_address: str, payload: Any) -> Dict[str, Any]:
         nft_data = json.dumps(payload)

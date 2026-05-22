@@ -72,6 +72,42 @@ class RubixTrustService:
         print("✅ RubixTrustService DID:", self.did)
         print("✅ RubixTrustService base URL:", self.base_url)
 
+    # ---------- NFT deployment ----------
+
+    def deploy_nft(
+        self,
+        nft_id: str,
+        nft_value: float,
+        nft_data: str,
+    ) -> Dict[str, Any]:
+        """
+        Deploy an NFT via the underlying rubix-py signer.
+
+        Thin wrapper that keeps NFT writes inside the trust layer — callers
+        (e.g. ``AgentDNA._load_or_deploy_nft``) build the payload and the
+        deterministic id, then hand the bytes here.
+        """
+        return self.signer.deploy_nft(
+            nft_id=nft_id,
+            nft_value=nft_value,
+            nft_data=nft_data,
+        )
+
+    def deploy_child_nft(
+        self,
+        parent_nft_id: str,
+        nft_data: str,
+    ) -> Dict[str, Any]:
+        response = self.signer.create_child_nft(
+            parent_nft_address=parent_nft_id,
+            nft_data=nft_data,
+        )
+
+        if response.get("error") is not None:
+            raise Exception(f"Child NFT creation failed: {response['error']}")
+        else:
+            return response["child_nfts"][0]
+
     # ---------- signing ----------
 
     def sign_envelope(self, envelope: Dict[str, Any]) -> Dict[str, Any]:
