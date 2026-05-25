@@ -1,0 +1,13 @@
+[project]
+name = "trip-planner-v2"
+version = "0.1.0"
+description = "Trip-planner on AgentDNA's new constructs (kind=/policy_file=/initialise_intent)"
+requires-python = ">=3.11"
+dependencies = [
+    "agent-dna",
+    "python-dotenv",
+    "streamlit>=1.36",
+]
+
+[tool.uv.sources]
+agent-dna = { path = "../../", editable = true }
