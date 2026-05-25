@@ -19,12 +19,13 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
     """
     Build the on-chain payload for a user's identity NFT::
 
-        {"user_did", "metadata"}
+        {"type", "user_did", "metadata"}
 
     ``metadata`` is a free-form dict supplied via ``metadata=`` at init
     (defaults to ``{}``).
     """
     return {
+        "type": "user_nft",
         "user_did": dna.did,
         "metadata": dna.metadata,
     }

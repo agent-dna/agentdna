@@ -256,6 +256,34 @@ class AgentDNA:
         self.current_nft_intent_id = ""
         self.current_nft_intent_epoch = 0
 
+    def update_policy(self):
+        """
+        For kind='agent', update the on-chain identity NFT with the current
+        policy file contents. Does nothing for kind='user' (users don't have
+        policies).
+
+        Raises RuntimeError if this AgentDNA is kind='user' or if the NFT
+        hasn't been deployed yet.
+        """
+        if self.kind != "agent":
+            raise RuntimeError("update_policy() is only for kind='agent' principals")
+        if not self.nft_token:
+            raise RuntimeError("NFT not deployed yet — cannot update policy")
+
+        # Update the on-chain NFT with the new policy value. The identity
+        # payload is fixed except for the policy field, so we can reuse all
+        # the existing values from the original mint.
+        payload = {
+            "type":           "agent_nft",
+            "agent_did":      self.did,
+            "agent_metadata": self.metadata,
+            "policy":         self.policy,
+        }
+        try: 
+            self._execute_nft(nft_address=self.nft_token, payload=payload)
+        except Exception as e:
+            raise RuntimeError(f"Failed to update policy on-chain: {e}")
+
     @classmethod
     def from_env(cls, alias: Optional[str] = None, **overrides) -> "AgentDNA":
         """
@@ -956,6 +984,7 @@ class AgentDNA:
             if token != "":
                 try:
                     nft_payload = self._build_nft_payload(remote_name)
+                    nft_payload["type"] = "intent_nft"
                     nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
                     print("🚀 NFT execution result:", nft_result)
                 except Exception as e:

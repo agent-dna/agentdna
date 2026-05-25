@@ -27,6 +27,7 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
     (markdown, JSON, plain text, etc.).
     """
     return {
+        "type":           "agent_nft",
         "agent_did":      dna.did,
         "agent_metadata": dna.metadata,
         "policy":         dna.policy,
