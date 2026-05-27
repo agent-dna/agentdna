@@ -187,11 +187,7 @@ class AgentDNA:
                 "kind='user' cannot carry card_nft= or policy_file= "
                 "(policies govern agent actions, not user intents)"
             )
-        if kind == "agent" and metadata is not None:
-            raise ValueError(
-                "metadata= belongs on kind='user' (user-profile data); "
-                "agent identity carries its policy via policy_file=, not metadata"
-            )
+
         if card_nft and policy_file:
             raise ValueError("pass either card_nft= or policy_file=, not both")
 
