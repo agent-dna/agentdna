@@ -38,7 +38,7 @@ if not MCP_TOOL_NAME:
     raise RuntimeError("Missing MCP_TOOL_NAME")
 
 # Pure-remote agent — never writes to chain; enable_nft=False skips deploy.
-dna = AgentDNA(alias=MCP_TOOL_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
+dna = AgentDNA(alias=MCP_TOOL_NAME, api_key=AGENTDNA_API_KEY, kind="agent", enable_nft=False)
 
 mcp = FastMCP("YahooFinanceMCP")
 

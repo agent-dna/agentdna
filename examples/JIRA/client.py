@@ -17,7 +17,7 @@ def init_dna() -> AgentDNA:
     if not api_key:
         raise RuntimeError("Missing AGENTDNA_API_KEY environment variable.")
 
-    dna = AgentDNA(alias="jira_cli_host", role="host", api_key=api_key)
+    dna = AgentDNA(alias="jira_cli_host", api_key=api_key, kind="agent", enable_nft=False)
     print("✅ CLI Host DID:", dna.trust.did)
     print("✅ CLI Host base URL:", dna.trust.base_url)
     return dna

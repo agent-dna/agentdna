@@ -27,7 +27,7 @@ if not MCP_TOOL_NAME:
 
 # Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
 # The user (constructed below from a sidebar alias) owns the audit-log NFT.
-host_dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
+host_dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY, kind="agent", enable_nft=False)
 DEFAULT_USER_ALIAS = f"{HOST_AGENT_NAME}_USER"
 
 SYSTEM_PROMPT = """
@@ -188,7 +188,7 @@ with st.sidebar:
     )
     if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
         st.session_state.user_alias = new_alias
-        st.session_state.user_dna = AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY)
+        st.session_state.user_dna = AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY, kind="user")
 
     st.divider()
     st.subheader("Audit Log")

@@ -10,7 +10,7 @@ HERE = Path(__file__).parent
 load_dotenv(HERE / ".env")
 
 AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
-DEFAULT_USER_ALIAS = "Traveller_USER"
+DEFAULT_USER_ALIAS = "TravellerUSER"
 
 st.set_page_config(page_title="Trip Planner", layout="wide")
 st.title("Trip Planner")
@@ -250,7 +250,7 @@ def _render_result(r: dict) -> None:
         st.json(
             {
                 "Traveller (root, NFT owner)": r["traveller_did"],
-                "ACME IT Admin":               r.get("admin_did"),
+                "Deployer (user DID)":         r.get("deployer_did"),
                 "ConciergeAgent":              r["concierge_did"],
                 "ConciergeAgent card NFT":     r.get("concierge_card"),
                 "FlightAgent":                 r["flight_did"],

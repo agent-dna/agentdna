@@ -42,6 +42,7 @@ Usage
 
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -289,7 +290,12 @@ class CBAC:
             )
 
         # Extract the action this layer is performing.
-        action = _extract_action(env.get("original_message"))
+        orig_msg = (
+            (env.get("payload") or {}).get("original_message")
+            or (env.get("payload") or {}).get("message")
+            or env.get("original_message")
+        )
+        action = _extract_action(orig_msg)
 
         # ─── deterministic checks ───
         # 1. Card binds to this agent's DID.
@@ -313,7 +319,7 @@ class CBAC:
                     f"{card.allowed_actions}"
                 )
         # 4. Constraints (numeric / string-list).
-        constraint_failures = _check_constraints(env.get("original_message"), card.constraints)
+        constraint_failures = _check_constraints(orig_msg, card.constraints)
         reasons.extend(constraint_failures)
         # 5. Delegation: if there's a layer above us, our card must allow that DID.
         if next_block is not None and card.can_delegate_to:
@@ -435,10 +441,19 @@ def _check_requires(requires: Dict[str, Any], ctx) -> List[str]:
 
 
 def _extract_skill_md(state: Dict[str, Any]) -> Optional[str]:
-    """Recursively search an NFT state dict for the skill_md field."""
+    """Recursively search an NFT state dict for the skill_md field.
+    Also handles identity NFT format where policy is base64-encoded skill.md."""
     if isinstance(state, dict):
         if "skill_md" in state and isinstance(state["skill_md"], str):
             return state["skill_md"]
+        # Identity NFT format: policy is base64-encoded skill.md content.
+        if "policy" in state and isinstance(state["policy"], str) and state.get("type") == "agent_nft":
+            try:
+                decoded = base64.b64decode(state["policy"]).decode("utf-8")
+                if decoded.strip().startswith("---"):
+                    return decoded
+            except Exception:
+                pass
         for v in state.values():
             if isinstance(v, str):
                 stripped = v.lstrip()

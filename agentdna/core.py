@@ -51,12 +51,14 @@ def _load_nft_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str
     if not config_path:
         config_path = _default_nft_config_path()
 
-    cfg_nft: Dict[str, Any] = {}
+    cfg: Dict[str, Any] = {}
     try:
         with Path(config_path).open("r", encoding="utf-8") as f:
-            cfg_nft = (json.load(f).get("nft") or {})
+            cfg = json.load(f)
     except Exception:
-        cfg_nft = {}
+        cfg = {}
+
+    cfg_nft = cfg.get("nft") or {}
 
     return {
         "value":       float(os.getenv("NFT_VALUE", cfg_nft.get("value", 0.001))),
@@ -64,6 +66,7 @@ def _load_nft_config(config_path: Optional[Union[str, Path]] = None) -> Dict[str
         "password":    cfg_nft.get("password"),
         "timeout":     float(cfg_nft.get("timeout", 100.0)),
         "quorum_type": int(cfg_nft.get("quorum_type", 2)),
+        "chain_url":   os.getenv("CHAIN_URL") or cfg.get("chain_url"),
     }
 
 
@@ -165,6 +168,7 @@ class AgentDNA:
         kind: str = "agent",
         policy_file: Optional[Union[str, Path]] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        deployer_did: Optional[str] = None,
         **_legacy,
     ) -> None:
         # Back-compat: silently drop role= from older callers
@@ -191,7 +195,11 @@ class AgentDNA:
         if card_nft and policy_file:
             raise ValueError("pass either card_nft= or policy_file=, not both")
 
-        # Trust layer — sign/verify primitives via rubix-py
+        # Trust layer — sign/verify primitives via rubix-py.
+        # Resolution order: explicit arg → CHAIN_URL env var → config.json chain_url.
+        if chain_url is None:
+            nft_cfg_early = _load_nft_config()
+            chain_url = nft_cfg_early.get("chain_url")
         self.trust = RubixTrustService(alias=alias, api_key=api_key, chain_url=chain_url)
         self.did = self.trust.did
         self.signer = self.trust.signer
@@ -217,6 +225,7 @@ class AgentDNA:
         #                      plain text, custom DSL).
         self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
         self.policy: str = ""
+        self.deployer_did: Optional[str] = deployer_did
 
         if kind == "agent":
             if policy_file is not None:
@@ -245,12 +254,12 @@ class AgentDNA:
         if self.enable_nft:
             if self.kind == "user":
                 self.deploy_user_nft()
-            elif self.kind == "agent":
-                self.deploy_card()
+            # Agents do NOT self-deploy — a user/admin calls deploy_agent_nft(agent, policy_file)
 
         # Intent NFT Ops
         self.current_nft_intent_id = ""
         self.current_nft_intent_epoch = 0
+        self._last_chain_depth: int = 0
 
     def update_policy(self):
         """
@@ -323,6 +332,86 @@ class AgentDNA:
         from .user import deploy_user_nft
         return deploy_user_nft(self)
 
+    def deploy_agent_nft(
+        self,
+        agent: "AgentDNA",
+        *,
+        policy_content: Optional[str] = None,
+    ) -> str:
+        """
+        Deploy an agent's identity NFT using THIS principal's wallet (user or admin).
+
+        The caller (self) pays for and signs the Rubix transaction; the agent's DID
+        is embedded as ``agent_did`` and ``self.did`` is recorded as ``deployer``.
+        The resulting NFT address is stored in agent_info.json and set on ``agent.nft_token``.
+
+        The agent must have been created with ``policy_file=`` (sets ``agent.policy``).
+        Pass ``policy_content=`` to override with a rendered version of the template
+        (substituted DIDs, dates etc.) before storing on chain — this is the common case
+        when skill.md files contain ``${DID}`` / ``${DATE}`` placeholders.
+        """
+        if policy_content is not None:
+            agent.policy = base64.b64encode(policy_content.encode("utf-8")).decode("ascii")
+        elif not agent.policy:
+            raise ValueError(
+                f"Agent {agent.alias} has no policy — create it with policy_file= "
+                "or pass policy_content= to deploy_agent_nft()"
+            )
+        agent.deployer_did = self.did
+
+        # Ensure token_path is set on the agent
+        if agent.token_path is None:
+            token_dir = Path.home() / ".agentdna"
+            token_dir.mkdir(parents=True, exist_ok=True)
+            agent.token_path = token_dir / agent.token_filename
+
+        # Build the agent NFT payload
+        from .agent import identity_payload
+        nft_payload = identity_payload(agent)
+
+        # Derive deterministic NFT id from agent's did.alias
+        digest = hashlib.sha256(f"{agent.signer.did}.{agent.alias}".encode()).digest()
+        multihash_bytes = bytes([0x12, len(digest)]) + digest
+        agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
+
+        # Check cache first
+        agent_info: List[Dict[str, Any]] = []
+        if agent.token_path.exists():
+            try:
+                with open(agent.token_path, "r", encoding="utf-8") as f:
+                    agent_info = json.load(f)
+            except Exception:
+                agent_info = []
+            for entry in agent_info:
+                if entry.get("agent_id") == agent_id:
+                    print(f"Using existing agent NFT for {agent.alias}: {agent_id}")
+                    agent.nft_token = agent_id
+                    return agent_id
+
+        # Deploy using THIS principal's trust layer (self.trust = deployer's signer)
+        resp = self.trust.deploy_nft(
+            nft_id=agent_id,
+            nft_value=self.nft_cfg.get("value") or 0.001,
+            nft_data=json.dumps(nft_payload),
+        )
+        if resp.get("error"):
+            raise RuntimeError(f"Agent NFT deployment failed for {agent.alias}: {resp['error']}")
+        nft_address = resp.get("nft_address")
+        if nft_address is None:
+            raise RuntimeError(f"Unexpected error deploying NFT for {agent.alias}: no address returned")
+
+        agent_info.append({
+            "agent_id":   nft_address,
+            "agent_did":  agent.signer.did,
+            "agent_name": agent.alias,
+        })
+        with open(agent.token_path, "w", encoding="utf-8") as f:
+            json.dump(agent_info, f, indent=2)
+
+        agent.nft_token = nft_address
+        print(f"✅ Deployed agent NFT for {agent.alias} (deployer: {self.alias}): {nft_address}")
+        return nft_address
+
     # ─── Internal verify helpers (used by handle() and the aliases) ──────────
 
     async def _verify_reply(
@@ -368,7 +457,9 @@ class AgentDNA:
         env = agent_block.get("envelope") or {}
 
         # Pull the reply body out of the signed envelope (parse JSON if we can).
-        body = env.get("response")
+        # New format: payload.response.  Legacy fallback: flat response field.
+        env_payload = env.get("payload") or {}
+        body = env_payload.get("response") or env.get("response")
         parsed_payload: Any = body
         if isinstance(body, str):
             try:
@@ -464,7 +555,11 @@ class AgentDNA:
             user_env = user_block.get("envelope") or {}
             user_verified = chain_ok
 
-            raw_intent = user_env.get("original_message")
+            # New format: payload.message.  Legacy fallback: original_message flat.
+            raw_intent = (
+                (user_env.get("payload") or {}).get("message")
+                or user_env.get("original_message")
+            )
             if isinstance(raw_intent, str):
                 try:
                     parsed = json.loads(raw_intent)
@@ -476,8 +571,19 @@ class AgentDNA:
                 except Exception:
                     user_intent = raw_intent
 
+        # rubix-py may not find original_message when the new envelope format is
+        # used (payload.message instead of flat original_message).  Fall back to
+        # extracting it from the host block's typed payload.
+        orig_msg = info.get("original_message") or ""
+        if not orig_msg and isinstance(host_block, dict):
+            orig_msg = (
+                (host_block.get("envelope") or {})
+                .get("payload", {})
+                .get("message", "")
+            )
+
         ctx = RequestContext(
-            original_message=info.get("original_message") or "",
+            original_message=orig_msg,
             host_block=host_block,
             trust_issues=trust_issues,
             verified=bool(info.get("verified")) and chain_ok,
@@ -544,7 +650,7 @@ class AgentDNA:
             )
 
         if self.current_nft_intent_id == "" or int(time.time()) - self.current_nft_intent_epoch > EPOCH_THRESHOLD_SECONDS:
-            child_nft_details = self.trust.deploy_child_nft(self.nft_token, "\{\}")
+            child_nft_details = self.trust.deploy_child_nft(self.nft_token, "{}")
             self.current_nft_intent_id = child_nft_details["childNFTId"]
             self.current_nft_intent_epoch = int(time.time())
 
@@ -620,8 +726,11 @@ class AgentDNA:
         *,
         ctx: Optional[RequestContext] = None,
         parent: Optional[Union[SignedEnvelope, RequestContext, Dict[str, Any]]] = None,
+        downstream: Optional[Union["VerifyResult", "SignedEnvelope", Dict[str, Any]]] = None,
         state: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
+        recipient_name: Optional[str] = None,
+        block_type: Optional[str] = None,
         **legacy,
     ) -> Union[SignedEnvelope, str, Dict[str, Any]]:
         """
@@ -675,6 +784,8 @@ class AgentDNA:
                 original_message=original_message,
                 state=legacy_state or {},
                 parent_block=self._extract_parent_block(parent) if parent is not None else None,
+                recipient_name=recipient_name,
+                block_type=block_type,
             )
 
         if payload is None:
@@ -698,10 +809,23 @@ class AgentDNA:
                     "decision": cr.decision,
                     "n_denied": sum(1 for c in cr.trace if not c.passed),
                 }
+            # For middle agents: extract the downstream response block to use
+            # as parent_block, so the return chain nests correctly per spec.
+            parent_block_override: Optional[Dict[str, Any]] = None
+            if downstream is not None:
+                if isinstance(downstream, VerifyResult):
+                    parent_block_override = downstream.agent_block
+                elif isinstance(downstream, SignedEnvelope):
+                    parent_block_override = downstream.host_block
+                elif isinstance(downstream, dict) and all(
+                    k in downstream for k in ("agent", "envelope", "signature")
+                ):
+                    parent_block_override = downstream
             built = self._build_agent_response(
                 original_message=ctx.original_message or response_str,
                 response=response_str,
                 host_block=ctx.host_block,
+                parent_block=parent_block_override,
                 extra=merged_extra,
             )
             return built["combined_json"]
@@ -716,6 +840,8 @@ class AgentDNA:
             original_message=original_message,
             state=state or {},
             parent_block=parent_block,
+            recipient_name=recipient_name,
+            block_type=block_type,
         )
         return SignedEnvelope(
             built["host_json"],
@@ -763,33 +889,66 @@ class AgentDNA:
         original_message: str,
         state: Optional[Dict[str, Any]] = None,
         parent_block: Optional[Dict[str, Any]] = None,
+        recipient_name: Optional[str] = None,
+        block_type: Optional[str] = None,
         **_extra,
     ) -> Dict[str, Any]:
         state = state or {}
         task_id = state.get("task_id") or str(uuid.uuid4())
         context_id = state.get("context_id") or str(uuid.uuid4())
         message_id = str(uuid.uuid4())
+        ts = datetime.utcnow().isoformat() + "Z"
+
+        # Determine block type from kind + parent presence when not explicit.
+        if block_type is None:
+            if self.kind == "user":
+                block_type = "intent"
+            elif parent_block is not None:
+                block_type = "delegate"
+            else:
+                block_type = "intent"
+
+        # Auto-derive received_from from the parent block's signer name.
+        received_from = ""
+        if parent_block is not None and isinstance(parent_block, dict):
+            received_from = parent_block.get("name") or ""
+
+        # Build the spec-compliant typed payload.
+        spec_payload: Dict[str, Any] = {
+            "message":          original_message,
+            "ts":               ts,
+            # Internal echo used by the response-side verification check.
+            # Not shown in the NFT chain but covered by this block's signature.
+            "original_message": original_message,
+        }
+        if block_type == "intent":
+            if recipient_name:
+                spec_payload["delegate_to"] = recipient_name
+        elif block_type in ("delegate", "execute"):
+            spec_payload["decision"] = block_type
+            if received_from:
+                spec_payload["received_from"] = received_from
+            if recipient_name:
+                spec_payload["delegate_to"] = recipient_name
 
         host_envelope: Dict[str, Any] = {
-            "original_message": original_message,
-            "task_id":          task_id,
-            "context_id":       context_id,
-            "message_id":       message_id,
-            "timestamp":        datetime.utcnow().isoformat() + "Z",
+            "payload":     spec_payload,
+            "_task_id":    task_id,
+            "_context_id": context_id,
+            "_message_id": message_id,
         }
         if self.card_nft is not None:
-            # CBAC: this agent's policy card NFT hash. Downstream verifiers
-            # fetch the card and enforce its allowed-actions/constraints/etc.
-            # The signature commits to it, so it can't be swapped after the
-            # fact.
             host_envelope["agent_card_nft"] = self.card_nft
         if parent_block is not None:
-            # Embed the parent's signed block inside this envelope so our
-            # signature commits to it — tampering with any upstream signer's
-            # contribution breaks verification at this layer.
             host_envelope["parent_block"] = parent_block
 
         host_block = self.trust.sign_envelope(host_envelope)
+        # Block-level metadata — not covered by the signature per spec.
+        host_block["name"]         = self.alias
+        host_block["direction"]    = "outbound"
+        host_block["type"]         = block_type
+        host_block["verification"] = {"signature_valid": True, "trust_issues": []}
+
         host_json = json.dumps({"host": host_block}, separators=(",", ":"), sort_keys=True)
 
         return {
@@ -808,13 +967,58 @@ class AgentDNA:
         original_message: str,
         response: str,
         host_block: Optional[Dict[str, Any]] = None,
+        parent_block: Optional[Dict[str, Any]] = None,
         extra: Optional[Dict[str, Any]] = None,
         **_extra,
     ) -> Dict[str, Any]:
-        envelope: Dict[str, Any] = {"original_message": original_message, "response": response}
+        # Determine the actual block that becomes parent_block in the envelope.
+        # When a middle agent wraps a downstream response, caller passes
+        # parent_block explicitly; otherwise fall back to host_block (simple case).
+        actual_parent = parent_block if parent_block is not None else host_block
+
+        # Derive verified_upstream — name of the agent whose signature this
+        # block is vouching for.
+        #   - If parent is our own outbound block (execute), the agent we
+        #     verified is the one who delegated TO us (host_block).
+        #   - Otherwise the agent we verified is the one whose block we're
+        #     wrapping (actual_parent).
+        verified_upstream = ""
+        if actual_parent is not None and isinstance(actual_parent, dict):
+            parent_signer = actual_parent.get("agent", "")
+            if parent_signer == self.did:
+                # Parent is our own execute block — verified the upstream caller.
+                if isinstance(host_block, dict):
+                    verified_upstream = host_block.get("name") or host_block.get("agent", "")
+            else:
+                verified_upstream = actual_parent.get("name") or parent_signer
+        elif isinstance(host_block, dict):
+            verified_upstream = host_block.get("name") or host_block.get("agent", "")
+
+        spec_payload: Dict[str, Any] = {
+            "response":          response,
+            "verified_upstream": verified_upstream,
+            # Internal echo used by the caller's verification check.
+            # Covered by this block's signature; omitted from the NFT chain.
+            "original_message":  original_message,
+        }
+
+        # Lift CBAC attestation into the spec payload; leave other extra fields
+        # (e.g. host_trust_issues) in the envelope but outside payload.
+        extra = extra or {}
+        if "cbac" in extra:
+            spec_payload["cbac"] = extra.pop("cbac")
+
+        envelope: Dict[str, Any] = {"payload": spec_payload}
         if extra:
             envelope.update(extra)
+        if actual_parent is not None:
+            envelope["parent_block"] = actual_parent
+
         agent_block = self.trust.sign_envelope(envelope)
+        agent_block["name"]         = self.alias
+        agent_block["direction"]    = "inbound"
+        agent_block["type"]         = "response"
+        agent_block["verification"] = {"signature_valid": True, "trust_issues": []}
 
         combined: Dict[str, Any] = {"agent": agent_block}
         if host_block is not None:
@@ -939,7 +1143,12 @@ class AgentDNA:
                 print(f"Invalid signature from {signer_did}")
                 continue
 
-            if env_verified.get("original_message") != original_task:
+            # Support both new format (payload.original_message) and legacy flat field.
+            echoed = (
+                (env_verified.get("payload") or {}).get("original_message")
+                or env_verified.get("original_message")
+            )
+            if echoed and echoed != original_task:
                 trust_issues.append("Original message mismatch")
                 print("Original message mismatch")
 
@@ -969,7 +1178,8 @@ class AgentDNA:
         self.last_cbac_summary = None
         for entry in verified:
             env = (entry.get("agent") or {}).get("envelope") or {}
-            cbac_attest = env.get("cbac")
+            # New format: payload.cbac.  Legacy fallback: flat cbac field.
+            cbac_attest = (env.get("payload") or {}).get("cbac") or env.get("cbac")
             if isinstance(cbac_attest, dict):
                 self.last_cbac_summary = cbac_attest
                 break
@@ -980,7 +1190,6 @@ class AgentDNA:
             if token != "":
                 try:
                     nft_payload = self._build_nft_payload(remote_name)
-                    nft_payload["type"] = "intent_nft"
                     nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
                     print("🚀 NFT execution result:", nft_result)
                 except Exception as e:
@@ -1103,57 +1312,97 @@ class AgentDNA:
         return response
 
     def _build_nft_payload(self, remote_name: str) -> Dict[str, Any]:
-        host_block = None
-        user_block = None
-        intermediates: List[Dict[str, Any]] = []
-        chain_depth = 0
-        responses: List[Dict[str, Any]] = []
+        trust_issues = list(self.last_trust_issues or [])
+
+        # Collect the first valid outbound (host) and inbound (agent) blocks.
+        host_block: Optional[Dict[str, Any]] = None
+        response_block: Optional[Dict[str, Any]] = None
+        response_sig_valid = False
 
         for entry in self.last_parts:
             if not host_block and entry.get("host"):
                 host_block = entry["host"]
-                # Walk the delegation chain inside host_block:
-                #   chain[0]   = host (outermost)
-                #   chain[-1]  = root user (when len > 1)
-                #   chain[1:-1] = intermediate sub-agents (depth >= 3)
-                chain = self._walk_chain(host_block)
-                chain_depth = len(chain)
-                if chain_depth > 1:
-                    user_block = chain[-1]
-                if chain_depth > 2:
-                    intermediates = chain[1:-1]
-            if entry.get("agent"):
-                agent_entry = copy.deepcopy(entry["agent"])
-                env = agent_entry.get("envelope", {}) or {}
-                env["host_trust_issues"] = self.last_trust_issues
-                agent_entry["agent_did"] = agent_entry.get("agent")
-                agent_entry["agent"] = remote_name
-                agent_entry["envelope"] = env
-                responses.append(agent_entry)
+            if not response_block and entry.get("agent"):
+                response_block = copy.deepcopy(entry["agent"])
+                response_sig_valid = bool(entry.get("agent_sig_valid"))
 
-        # With a user_block the writer is the user (top of chain). Without
-        # one, fall back to "host_agent" for back-compat.
-        executor = "user" if user_block is not None else "host_agent"
+        # Annotate the response block with spec block-level fields when they
+        # weren't set by an older build() call (e.g. remote agent on old SDK).
+        if response_block is not None:
+            if not response_block.get("name"):
+                response_block["name"] = remote_name
+            if not response_block.get("direction"):
+                response_block["direction"] = "inbound"
+            if not response_block.get("type"):
+                response_block["type"] = "response"
+            if not response_block.get("verification"):
+                response_block["verification"] = {
+                    "signature_valid": response_sig_valid,
+                    "trust_issues":    [],
+                }
+            # Ensure the response envelope's parent_block points to the
+            # outbound chain when the remote agent didn't include it (old SDK).
+            if host_block is not None:
+                resp_env = response_block.setdefault("envelope", {})
+                if "parent_block" not in resp_env:
+                    resp_env["parent_block"] = host_block
 
-        payload: Dict[str, Any] = {
-            "comment":  f"Agent communication initiation to {remote_name}",
+        # Walk the outbound chain to find the root signer and total depth.
+        outbound_chain = self._walk_chain(host_block) if host_block else []
+        executor = "user" if len(outbound_chain) > 1 else "system"
+
+        # Extract the response value to surface in the verify block.
+        final_response = ""
+        if response_block is not None:
+            resp_env = response_block.get("envelope") or {}
+            resp_payload = resp_env.get("payload") or {}
+            final_response = resp_payload.get("response", "")
+
+        # Build the outermost verify block: this agent/user signs the audit.
+        verify_spec_payload: Dict[str, Any] = {
+            "response":          final_response,
+            "verified_upstream": remote_name,
+            "nft_executed":      True,
+        }
+        verify_envelope: Dict[str, Any] = {"payload": verify_spec_payload}
+        if response_block is not None:
+            verify_envelope["parent_block"] = response_block
+
+        verify_block = self.trust.sign_envelope(verify_envelope)
+        verify_block["name"]         = self.alias
+        verify_block["direction"]    = "inbound"
+        verify_block["type"]         = "verify"
+        verify_block["verification"] = {
+            "signature_valid": True,
+            "trust_issues":    trust_issues,
+        }
+
+        # Total chain depth = all blocks reachable from verify outward to root.
+        chain_depth = len(self._walk_chain(verify_block))
+
+        # Build a readable comment from the agent names in the chain.
+        chain_names: List[str] = []
+        for blk in reversed(outbound_chain):
+            n = blk.get("name", "")
+            if n and n not in chain_names:
+                chain_names.append(n)
+        if remote_name not in chain_names:
+            chain_names.append(remote_name)
+        comment = "Agent communication — " + " → ".join(chain_names)
+
+        self._last_chain_depth = chain_depth
+
+        return {
+            "comment":  comment,
             "executor": executor,
             "did":      self.did,
             "verification": {
                 "status":       self.last_verification_status,
-                "trust_issues": self.last_trust_issues,
                 "chain_depth":  chain_depth,
+                "trust_issues": trust_issues,
             },
+            "chain": verify_block,
         }
-        if self.last_cbac_summary is not None:
-            payload["cbac"] = self.last_cbac_summary
-        if user_block is not None:
-            payload["user"] = user_block
-        if intermediates:
-            payload["intermediate_agents"] = intermediates
-        payload["host"] = host_block
-        payload["responses"] = responses
-        return payload
 
     # ─── Helpers for handle() ────────────────────────────────────────────────
 

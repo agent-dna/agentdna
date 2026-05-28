@@ -12,6 +12,11 @@ Three defence layers:
                      policy walk. Last line of defence.
 
 Three toggles let the demo trigger each layer deliberately.
+
+NFT chain structure (happy path, per spec Flow 4):
+  verify(Traveller) → response(Concierge) → response(Flight) →
+  response(Booking) → execute(Booking) → delegate(Flight) →
+  delegate(Concierge) → intent(Traveller)
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from pathlib import Path
 from string import Template
 from typing import Any, Dict, List, Optional, Tuple
 
-from agentdna import AgentDNA, Card, parse_skill_md, deploy_card
+from agentdna import AgentDNA, Card, parse_skill_md
 
 
 HERE = Path(__file__).parent
@@ -143,15 +148,50 @@ class TripPlanner:
         self.user_alias = user_alias
         self.enable_cbac = enable_cbac
 
-        self.traveller = AgentDNA(alias=user_alias, api_key=api_key)
-        self.admin     = AgentDNA(alias="ACME_IT_Admin",  api_key=api_key, enable_nft=False)
-        self.concierge = AgentDNA(alias="ConciergeAgent", api_key=api_key, enable_nft=False)
-        self.flight    = AgentDNA(alias="FlightAgent",    api_key=api_key, enable_nft=False)
-        self.booking   = AgentDNA(alias="BookingAgent",   api_key=api_key, enable_nft=False,
-                                  cbac=enable_cbac)
+        # User: creates their own DID + user NFT.
+        self.traveller = AgentDNA(
+            alias=user_alias,
+            api_key=api_key,
+            kind="user",
+            metadata={"email": "", "orgId": "TripPlannerOrg", "agentAccessList": []},
+        )
+
+        # Agents: create DIDs + load policy (policy_file required for kind='agent').
+        # enable_nft=False — user deploys their NFTs below, not the agents themselves.
+        self.concierge = AgentDNA(alias="Concierge_Agent", api_key=api_key, kind="agent", enable_nft=False,
+                                  policy_file=SKILLS_DIR / "concierge.md",
+                                  metadata={"orgId": "TripPlannerOrg"})
+        self.flight    = AgentDNA(alias="Flight_Agent",    api_key=api_key, kind="agent", enable_nft=False,
+                                  policy_file=SKILLS_DIR / "flight.md",
+                                  metadata={"orgId": "TripPlannerOrg"})
+        self.booking   = AgentDNA(alias="Booking_Agent",   api_key=api_key, kind="agent", enable_nft=False,
+                                  policy_file=SKILLS_DIR / "booking.md",
+                                  metadata={"orgId": "TripPlannerOrg"}, cbac=enable_cbac)
+
+        # Render skill templates now that all DIDs are known, and deploy NFTs.
+        # The rendered content (with real DIDs + dates) is what gets stored on chain.
+        issued_at  = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(days=365)).replace(microsecond=0).isoformat()
+        _subs = {
+            "DEPLOYER_DID":  self.traveller.did,
+            "CONCIERGE_DID": self.concierge.did,
+            "FLIGHT_DID":    self.flight.did,
+            "BOOKING_DID":   self.booking.did,
+            "ISSUED_AT":     issued_at,
+            "EXPIRES_AT":    expires_at,
+        }
+        self._rendered_skills = {
+            "concierge": _render_skill(SKILLS_DIR / "concierge.md", **_subs),
+            "flight":    _render_skill(SKILLS_DIR / "flight.md",    **_subs),
+            "booking":   _render_skill(SKILLS_DIR / "booking.md",   **_subs),
+        }
+
+        # User deploys each agent's identity NFT with the rendered (substituted) content.
+        self.traveller.deploy_agent_nft(self.concierge, policy_content=self._rendered_skills["concierge"])
+        self.traveller.deploy_agent_nft(self.flight,    policy_content=self._rendered_skills["flight"])
+        self.traveller.deploy_agent_nft(self.booking,   policy_content=self._rendered_skills["booking"])
 
         self.last_nft_result: Optional[Dict[str, Any]] = None
-        self.last_chain_depth: int = 0
         self.cbac_setup_error: Optional[str] = None
         self.concierge_card_nft: Optional[str] = None
         self.flight_card_nft:    Optional[str] = None
@@ -167,39 +207,22 @@ class TripPlanner:
                 print(f"CBAC setup failed; continuing without policy enforcement: {e}")
 
     def _provision_cards(self) -> None:
+        # Identity NFTs were already deployed in __init__ with rendered content.
+        # Parse in-memory card objects from the rendered text; use nft_token as card_nft.
         cache = _load_card_cache()
 
-        issued_at  = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-        expires_at = (datetime.now(timezone.utc) + timedelta(days=365)).replace(
-            microsecond=0).isoformat()
-
-        substitutions = {
-            "ADMIN_DID":      self.admin.did,
-            "CONCIERGE_DID":  self.concierge.did,
-            "FLIGHT_DID":     self.flight.did,
-            "BOOKING_DID":    self.booking.did,
-            "ISSUED_AT":      issued_at,
-            "EXPIRES_AT":     expires_at,
-        }
-
-        def _deploy(template_name: str, agent_did: str) -> Tuple[str, Card]:
-            text = _render_skill(SKILLS_DIR / template_name, **substitutions)
-            card = parse_skill_md(text)
-            ck = f"{self.admin.did}::{agent_did}"
-            if ck in cache:
-                addr = cache[ck]
-                print(f"Using cached card for {template_name}: {addr}")
-            else:
-                tmp = SKILLS_DIR / f".{template_name}.rendered.md"
-                tmp.write_text(text, encoding="utf-8")
-                addr = deploy_card(self.admin, tmp)
-                tmp.unlink(missing_ok=True)
+        def _get_card(agent: AgentDNA, skill_key: str) -> Tuple[str, Card]:
+            addr = agent.nft_token
+            if addr is None:
+                raise RuntimeError(f"Agent {agent.alias} has no identity NFT")
+            card = parse_skill_md(self._rendered_skills[skill_key])
+            ck = f"{self.traveller.did}::{agent.did}"
+            if ck not in cache:
                 cache[ck] = addr
-                print(f"Deployed card NFT for {template_name}: {addr}")
             return addr, card
 
-        self.concierge_card_nft, self.concierge_card = _deploy("concierge.md", self.concierge.did)
-        self.flight_card_nft,    self.flight_card    = _deploy("flight.md",    self.flight.did)
+        self.concierge_card_nft, self.concierge_card = _get_card(self.concierge, "concierge")
+        self.flight_card_nft,    self.flight_card    = _get_card(self.flight,    "flight")
         _save_card_cache(cache)
 
         self.concierge.card_nft = self.concierge_card_nft
@@ -238,9 +261,6 @@ class TripPlanner:
         base = self._base_result(intent, rogue_concierge, wrong_delegation, constraint_breach)
 
         # ── Hop 1: traveller signs intent ─────────────────────────────────
-        # Active misbehaviour toggles are recorded in the signed intent so
-        # they land in every audit chain record. Names are kept short to
-        # avoid bloating the on-chain payload.
         active_toggles = []
         if rogue_concierge:   active_toggles.append("rogue_concierge")
         if wrong_delegation:  active_toggles.append("wrong_delegation")
@@ -253,7 +273,16 @@ class TripPlanner:
         if active_toggles:
             intent_envelope["sim"] = active_toggles
 
-        traveller_signed = self.traveller.build(intent_envelope)
+        traveller_signed, traveller_ctx = await self.traveller.initialise_intent(intent_envelope)
+        if not traveller_ctx.verified:
+            raise RuntimeError(
+                f"Traveller self-verification failed: {traveller_ctx.trust_issues}"
+            )
+
+        # ── Concierge receives the user's intent ──────────────────────────
+        ctx_concierge = await self.concierge.handle(str(traveller_signed), verify_mode="heavy")
+        if not ctx_concierge.verified:
+            raise RuntimeError(f"ConciergeAgent CoCA failed: {ctx_concierge.trust_issues}")
 
         # ── Layer 1: Concierge self-check ─────────────────────────────────
         # Skipped when rogue_concierge is set, to demonstrate layer 2 catching it.
@@ -273,23 +302,40 @@ class TripPlanner:
                     "chain_initiated": False,
                 }
 
-        # Concierge picks its payload (rogue path overrides with a forbidden action).
         concierge_payload = _concierge_rogue() if rogue_concierge else _concierge_plan()
-        env_concierge = self.concierge.build(concierge_payload, parent=traveller_signed)
 
-        # ── Wrong-delegation toggle: skip Flight entirely; Concierge "delegates"
-        #     straight to Booking. Concierge's can-delegate-to is [FLIGHT_DID]
-        #     so CBAC at Booking denies. ─────────────────────────────────────
+        # ── Wrong-delegation toggle: Concierge skips Flight and goes straight
+        #    to Booking. Concierge's can-delegate-to = [FLIGHT_DID] so CBAC
+        #    at Booking will deny. ──────────────────────────────────────────
         if wrong_delegation:
-            return await self._send_to_booking(
+            env_concierge = self.concierge.build(
+                concierge_payload,
+                parent=ctx_concierge,
+                block_type="delegate",
+                recipient_name="Booking_Agent",
+            )
+            return await self._booking_return_path(
                 env_for_booking=env_concierge,
+                ctx_booking_upstream=ctx_concierge,
+                env_booking_upstream=env_concierge,
+                relay_agents=[],          # no intermediate agents on return path
+                ctx_concierge=ctx_concierge,
+                env_concierge=env_concierge,
+                traveller_signed=traveller_signed,
                 base=base,
                 concierge_payload=concierge_payload,
                 flight_payload=None,
-                wrong_delegation=True,
             )
 
-        # ── Hop 3: Flight verifies inbound CoCA + runs layer-2 upstream check ──
+        # ── Concierge builds outbound delegate to Flight ───────────────────
+        env_concierge = self.concierge.build(
+            concierge_payload,
+            parent=ctx_concierge,
+            block_type="delegate",
+            recipient_name="Flight_Agent",
+        )
+
+        # ── Flight receives + verifies CoCA + layer-2 upstream check ──────
         ctx_flight = await self.flight.handle(str(env_concierge), verify_mode="heavy")
         if not ctx_flight.verified:
             raise RuntimeError(f"FlightAgent CoCA failed: {ctx_flight.trust_issues}")
@@ -301,60 +347,89 @@ class TripPlanner:
                 concierge_payload.get("action"),
             )
             if not up_ok:
-                # Flight signs a layer-2 refusal back to the traveller. The
-                # chain is shorter (Concierge -> Flight) but still audited.
+                # Flight refuses. Chain: Concierge relays → Traveller verifies.
                 refusal = {"refused": True, "by": "FlightAgent", "layer": 2, "why": up_why}
-                reply = self.flight.build(refusal, ctx=ctx_flight)
+                flight_reply = self.flight.build(refusal, ctx=ctx_flight)
+                concierge_flight_result = await self.concierge.handle(
+                    flight_reply, original=env_concierge, execute_nft=False,
+                )
+                concierge_reply = self.concierge.build(
+                    refusal, ctx=ctx_concierge, downstream=concierge_flight_result,
+                )
                 result = await self.traveller.handle(
-                    reply,
-                    original=env_concierge,
-                    remote_name="FlightAgent",
+                    concierge_reply,
+                    original=traveller_signed,
+                    remote_name="Concierge_Agent",
                     execute_nft=True,
                 )
                 return {
                     **base,
-                    "caught_at":       "layer-2 upstream-check",
-                    "caught_by":       "FlightAgent",
-                    "caught_why":      up_why,
-                    "verified":        False,
-                    "refused":         True,
-                    "refusal_reason":  f"FlightAgent declined: {up_why}",
+                    "caught_at":         "layer-2 upstream-check",
+                    "caught_by":         "FlightAgent",
+                    "caught_why":        up_why,
+                    "verified":          False,
+                    "refused":           True,
+                    "refusal_reason":    f"FlightAgent declined: {up_why}",
                     "concierge_payload": concierge_payload,
-                    "booking_payload": refusal,
-                    "nft_result":      result.nft_result,
-                    "user_verified":   result.user_verified,
-                    "trust_issues":    result.trust_issues,
-                    "chain_initiated": True,
+                    "booking_payload":   refusal,
+                    "nft_result":        result.nft_result,
+                    "user_verified":     result.user_verified,
+                    "trust_issues":      result.trust_issues,
+                    "chain_initiated":   True,
                 }
 
-        # ── Flight builds its outbound; constraint_breach makes max_price too high ──
+        # ── Flight builds outbound delegate to Booking ────────────────────
         flight_payload = _flight_search_breach() if constraint_breach else _flight_search()
-        env_flight = self.flight.build(flight_payload, parent=ctx_flight)
+        env_flight = self.flight.build(
+            flight_payload,
+            parent=ctx_flight,
+            block_type="delegate",
+            recipient_name="Booking_Agent",
+        )
 
-        return await self._send_to_booking(
+        return await self._booking_return_path(
             env_for_booking=env_flight,
+            ctx_booking_upstream=ctx_flight,
+            env_booking_upstream=env_flight,
+            # Return path: Booking → Flight → Concierge → Traveller.
+            relay_agents=[
+                {"dna": self.flight, "ctx": ctx_flight, "env": env_flight},
+            ],
+            ctx_concierge=ctx_concierge,
+            env_concierge=env_concierge,
+            traveller_signed=traveller_signed,
             base=base,
             concierge_payload=concierge_payload,
             flight_payload=flight_payload,
-            wrong_delegation=False,
         )
 
-    async def _send_to_booking(
+    async def _booking_return_path(
         self,
         *,
         env_for_booking,
+        ctx_booking_upstream,   # RequestContext of the agent that sent to Booking
+        env_booking_upstream,   # SignedEnvelope sent to Booking (for echo check)
+        relay_agents: List[Dict[str, Any]],  # intermediate agents on the return path
+        ctx_concierge,
+        env_concierge,
+        traveller_signed,
         base: Dict[str, Any],
         concierge_payload: Dict[str, Any],
         flight_payload: Optional[Dict[str, Any]],
-        wrong_delegation: bool,
     ) -> Dict[str, Any]:
-        # Layer 3: BookingAgent runs CoCA + CBAC inside handle().
+        """
+        Booking receives, optionally relays through intermediate agents, then
+        Concierge wraps the reply and Traveller verifies + writes the NFT.
+
+        relay_agents: list of {dna, ctx, env} for agents between Booking and
+        Concierge (only Flight in the happy path; empty for wrong_delegation).
+        """
+        # ── Layer 3: Booking receives + CBAC ──────────────────────────────
         ctx_booking = await self.booking.handle(str(env_for_booking), verify_mode="heavy")
         if not ctx_booking.verified:
             raise RuntimeError(f"BookingAgent CoCA failed: {ctx_booking.trust_issues}")
 
         cbac_result = ctx_booking.cbac_result
-
         cbac_trace = []
         if cbac_result is not None:
             for c in cbac_result.trace:
@@ -366,31 +441,66 @@ class TripPlanner:
                     "passed":    c.passed,
                     "reasons":   c.reasons,
                 })
-        self.last_chain_depth = len(AgentDNA._walk_chain(env_for_booking.host_block))
 
         refused = (cbac_result is not None and cbac_result.decision == "deny")
+        booking_payload = {"refused": True, "n_denied": sum(1 for c in cbac_result.trace if not c.passed)} \
+            if refused else _booking_confirm()
 
-        if refused:
-            failed = [c for c in cbac_result.trace if not c.passed]
-            booking_payload = {"refused": True, "n_denied": len(failed)}
-        else:
-            booking_payload = _booking_confirm()
+        # ── Booking signs execute block (outbound, per spec) ───────────────
+        execute_env = self.booking.build(
+            ctx_booking.original_message,
+            parent=ctx_booking,
+            block_type="execute",
+        )
 
-        reply = self.booking.build(booking_payload, ctx=ctx_booking)
+        # ── Booking signs inbound response wrapping execute block ──────────
+        booking_reply = self.booking.build(
+            booking_payload,
+            ctx=ctx_booking,
+            downstream=execute_env,
+        )
+
+        # ── Return path: relay through intermediate agents ─────────────────
+        # Each entry in relay_agents wraps the downstream reply in its own
+        # signed response block. In the happy path this is just FlightAgent.
+        current_reply = booking_reply
+        current_original = env_booking_upstream
+        for hop in relay_agents:
+            relay_result = await hop["dna"].handle(
+                current_reply, original=current_original, execute_nft=False,
+            )
+            current_reply = hop["dna"].build(
+                booking_payload,
+                ctx=hop["ctx"],
+                downstream=relay_result,
+            )
+            current_original = env_concierge  # next check is against Concierge's outbound
+
+        # ── Concierge verifies the upstream reply + wraps it ──────────────
+        concierge_upstream_result = await self.concierge.handle(
+            current_reply, original=env_concierge, execute_nft=False,
+        )
+        concierge_reply = self.concierge.build(
+            booking_payload,
+            ctx=ctx_concierge,
+            downstream=concierge_upstream_result,
+        )
+
+        # ── Traveller verifies Concierge's reply + writes NFT ─────────────
         result = await self.traveller.handle(
-            reply,
-            original=env_for_booking,
-            remote_name="BookingAgent",
+            concierge_reply,
+            original=traveller_signed,
+            remote_name="Concierge_Agent",
             execute_nft=True,
         )
         self.last_nft_result = result.nft_result
 
-        caught = "layer-3 cbac" if refused else None
+        caught    = "layer-3 cbac" if refused else None
         caught_by = "BookingAgent (CBAC)" if refused else None
 
         return {
             **base,
-            "chain_depth":       self.last_chain_depth,
+            "chain_depth":       self.traveller._last_chain_depth,
             "concierge_payload": concierge_payload,
             "flight_payload":    flight_payload,
             "verified":          result.verified and not refused,
@@ -407,7 +517,6 @@ class TripPlanner:
             "caught_why":        cbac_result.reason if refused else None,
             "nft_result":        result.nft_result,
             "chain_initiated":   True,
-            "wrong_delegation":  wrong_delegation,
         }
 
     def _base_result(
@@ -421,7 +530,7 @@ class TripPlanner:
             "intent":             intent,
             "chain_depth":        0,
             "traveller_did":      self.traveller.did,
-            "admin_did":          self.admin.did,
+            "deployer_did":       self.traveller.did,
             "concierge_did":      self.concierge.did,
             "flight_did":         self.flight.did,
             "booking_did":        self.booking.did,

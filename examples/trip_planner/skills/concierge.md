@@ -1,7 +1,7 @@
 ---
 agent-did:    ${CONCIERGE_DID}
 agent-name:   ConciergeAgent
-issued-by:    ${ADMIN_DID}
+issued-by:    ${DEPLOYER_DID}
 issued-at:    ${ISSUED_AT}
 expires-at:   ${EXPIRES_AT}
 

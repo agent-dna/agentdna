@@ -39,6 +39,7 @@ host_dna = AgentDNA(
     alias="GoogleSheetsAgent",
     api_key=AGENTDNA_API_KEY,
     chain_url=CHAIN_URL,
+    kind="agent",
     enable_nft=False,
 )
 DEFAULT_BASE_URL = resolve_chain_url()
@@ -277,6 +278,7 @@ with st.sidebar:
             alias=new_alias,
             api_key=AGENTDNA_API_KEY,
             chain_url=CHAIN_URL,
+            kind="user",
         )
 
     st.divider()

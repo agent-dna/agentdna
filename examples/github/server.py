@@ -53,7 +53,7 @@ API_BASE = "https://api.github.com"
 mcp = FastMCP("GitHubMCP")
 
 # Pure-remote agent — never writes to chain, so enable_nft=False skips deploy.
-dna = AgentDNA(alias=MCP_TOOL_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
+dna = AgentDNA(alias=MCP_TOOL_NAME, api_key=AGENTDNA_API_KEY, kind="agent", enable_nft=False)
 print("[SERVER] ✅ GitHub MCP server DID:", dna.trust.did)
 print("[SERVER] ✅ Repo URL:", REPO_URL)
 

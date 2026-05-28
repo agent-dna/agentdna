@@ -1,7 +1,7 @@
 ---
 agent-did:    ${FLIGHT_DID}
 agent-name:   FlightAgent
-issued-by:    ${ADMIN_DID}
+issued-by:    ${DEPLOYER_DID}
 issued-at:    ${ISSUED_AT}
 expires-at:   ${EXPIRES_AT}
 

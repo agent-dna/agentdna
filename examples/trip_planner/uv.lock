@@ -1447,7 +1447,7 @@ wheels = [
 
 [[package]]
 name = "rubix-py"
-version = "1.0.2"
+version = "1.1.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bip32utils" },
@@ -1459,9 +1459,9 @@ dependencies = [
     { name = "py-cid" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ba/38/ec66e2c57a96e9e237601248ee16683425641041ba500f634a1da8ac7af7/rubix_py-1.0.2.tar.gz", hash = "sha256:a8b48e8d925be74945dff11e63762f1c78a3e2ce77e7927ffc6cf348ac6e65fb", size = 20339, upload-time = "2026-04-30T19:27:28.083Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bc/57/cb1ebde1732fc0650e4b48d8a7c7b5ecd870de6ac859b8828764ad0707a6/rubix_py-1.1.1.tar.gz", hash = "sha256:c1b842b9aa6686a040d61b45ad2f82088c9f908c805eb51e7f384ca8fb4ae066", size = 20910, upload-time = "2026-05-19T08:41:56.816Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/43/b3/a4f0c5aa1d2603f5f84a23bd580f8fb4e6a950896cdfca9c4ccac7ed5983/rubix_py-1.0.2-py3-none-any.whl", hash = "sha256:adff8cd544e71de45689e0080d9b1e35ab265f0664a9318797a96f75d61be04d", size = 20145, upload-time = "2026-04-30T19:27:26.975Z" },
+    { url = "https://files.pythonhosted.org/packages/d0/97/cf78f44131867355956a287e97662ca5cf7e0894b2f0331ec0541fa7ac76/rubix_py-1.1.1-py3-none-any.whl", hash = "sha256:f2cee3d8b92d8e551749473d61a70241eafefed1f12cbe9c4df5a8b13d73d199", size = 20617, upload-time = "2026-05-19T08:41:55.315Z" },
 ]
 
 [[package]]

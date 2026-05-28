@@ -200,7 +200,11 @@ class RubixTrustService:
         if isinstance(host_block, dict):
             env = host_block.get("envelope", {})
             if isinstance(env, dict):
-                orig = env.get("original_message")
+                orig = (
+                    env.get("original_message")
+                    or (env.get("payload") or {}).get("original_message")
+                    or (env.get("payload") or {}).get("message")
+                )
                 if isinstance(orig, str):
                     result["original_message"] = orig
 
