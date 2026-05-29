@@ -24,16 +24,11 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
     ``metadata`` is a free-form dict supplied via ``metadata=`` at init
     (defaults to ``{}``).
     """
-    metadata = {
-        "email":           dna.metadata.get("email", ""),
-        "orgId":           dna.metadata.get("orgId", ""),
-        "agentAccessList": dna.metadata.get("agentAccessList", []),
-    }
-    metadata.update({k: v for k, v in dna.metadata.items() if k not in metadata})
+
     return {
         "type":     "user_nft",
         "user_did": dna.did,
-        "metadata": metadata,
+        "metadata": dna.metadata,
     }
 
 

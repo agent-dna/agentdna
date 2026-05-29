@@ -26,16 +26,11 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
     file is opaque to AgentDNA — projects choose their own format
     (markdown, JSON, plain text, etc.).
     """
-    agent_metadata = {
-        "orgId":      dna.metadata.get("orgId", ""),
-        "deployer":   dna.deployer_did or "",
-        "agent_name": dna.alias,
-    }
-    agent_metadata.update({k: v for k, v in dna.metadata.items() if k not in agent_metadata})
+  
     return {
         "type":           "agent_nft",
         "agent_did":      dna.did,
-        "agent_metadata": agent_metadata,
+        "agent_metadata": dna.metadata,
         "policy":         dna.policy,
     }
 
