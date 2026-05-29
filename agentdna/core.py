@@ -1191,6 +1191,7 @@ class AgentDNA:
             if token != "":
                 try:
                     nft_payload = self._build_nft_payload(remote_name)
+                    nft_payload["type"] = "intent_nft"
                     nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
                     print("🚀 NFT execution result:", nft_result)
                 except Exception as e:
