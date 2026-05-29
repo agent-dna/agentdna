@@ -123,7 +123,7 @@ def _self_issue_card(dna: AgentDNA, rendered_text: str) -> Tuple[str, Card]:
             f"self.did={dna.did!r}. Self-issued cards must match."
         )
     dna.policy = base64.b64encode(rendered_text.encode("utf-8")).decode("ascii")
-    nft_address = dna.deploy_card()
+    nft_address = dna.deploy_agent_card()
     dna.card_nft = nft_address
     return nft_address, card
 

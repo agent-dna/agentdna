@@ -254,7 +254,8 @@ class AgentDNA:
         if self.enable_nft:
             if self.kind == "user":
                 self.deploy_user_nft()
-            # Agents do NOT self-deploy — a user/admin calls deploy_agent_nft(agent, policy_file)
+            elif self.kind == "agent":
+                self.deploy_agent_card()
 
         # Intent NFT Ops
         self.current_nft_intent_id = ""
@@ -322,7 +323,7 @@ class AgentDNA:
 
     # ─── Identity NFT deployment (kind-specific helpers live in agent/user) ─
 
-    def deploy_card(self) -> str:
+    def deploy_agent_card(self) -> str:
         """Publish the agent's identity NFT. See ``agent.deploy_card``."""
         from .agent import deploy_card
         return deploy_card(self)
@@ -1241,7 +1242,7 @@ class AgentDNA:
             return None
         if self.kind == "user":
             return self.deploy_user_nft()
-        return self.deploy_card()
+        return self.deploy_agent_card()
 
     def _load_or_deploy_nft(self) -> str:
         # Identity NFT id = CIDv0(sha256(did.alias))
