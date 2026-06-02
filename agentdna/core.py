@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, cast
 
+from examples.trip_planner_v2 import agent
 from multiformats_cid.cid import CIDv0
 
 from .trust import RubixTrustService
@@ -224,16 +225,15 @@ class AgentDNA:
         #                      choose their own format (markdown, JSON,
         #                      plain text, custom DSL).
         self.metadata: Dict[str, Any] = dict(metadata) if metadata is not None else {}
-        self.policy: str = ""
         self.deployer_did: Optional[str] = deployer_did
 
-        if kind == "agent":
-            if policy_file is not None:
-                self.policy = base64.b64encode(
-                    Path(policy_file).read_bytes()
-                ).decode("ascii")
-            else:
-                raise ValueError("kind='agent' requires a policy_file to be provided")
+        # if kind == "agent":
+        #     if policy_file is not None:
+        #         self.policy = base64.b64encode(
+        #             Path(policy_file).read_bytes()
+        #         ).decode("ascii")
+        #     else:
+        #         raise ValueError("kind='agent' requires a policy_file to be provided")
         
         # NFT config + per-call audit state
         self.enable_nft = enable_nft
@@ -254,15 +254,13 @@ class AgentDNA:
         if self.enable_nft:
             if self.kind == "user":
                 self.deploy_user_nft()
-            elif self.kind == "agent":
-                self.deploy_agent_card()
 
         # Intent NFT Ops
         self.current_nft_intent_id = ""
         self.current_nft_intent_epoch = 0
         self._last_chain_depth: int = 0
 
-    def update_policy(self):
+    def update_agent_policy(self, agent_id, policy_content):
         """
         For kind='agent', update the on-chain identity NFT with the current
         policy file contents. Does nothing for kind='user' (users don't have
@@ -271,22 +269,28 @@ class AgentDNA:
         Raises RuntimeError if this AgentDNA is kind='user' or if the NFT
         hasn't been deployed yet.
         """
-        if self.kind != "agent":
-            raise RuntimeError("update_policy() is only for kind='agent' principals")
-        if not self.nft_token:
-            raise RuntimeError("NFT not deployed yet — cannot update policy")
 
-        # Update the on-chain NFT with the new policy value. The identity
-        # payload is fixed except for the policy field, so we can reuse all
-        # the existing values from the original mint.
-        payload = {
-            "type":           "agent_nft",
-            "agent_did":      self.did,
-            "agent_metadata": self.metadata,
-            "policy":         self.policy,
-        }
+        # Query agent policy history from provenance layer
+        agent_history = self.history_agent(agent_id, latest=True)
+        if not agent_history:
+            raise RuntimeError(f"No history found for agent NFT {agent_id}; cannot update policy")
+
+        if len(agent_history) != 1:
+            raise RuntimeError(
+                f"Expected exactly one state for agent NFT {agent_id}, but found {len(agent_history)}"
+            )
+
+        agent_info = agent_history[0]["data"]
+
+        if "policy" not in agent_info:
+            raise RuntimeError(f"Agent NFT {agent_id} history missing 'policy' field; cannot update policy, actual agent_info: {agent_info}")
+
+        # encode the policy to base64 and store it
+        agent_info["policy"] = base64.b64encode(policy_content.encode("utf-8")).decode("ascii")
+
         try: 
-            self._execute_nft(nft_address=self.nft_token, payload=payload)
+            self._execute_nft(nft_address=agent_id, payload=agent_info)
+            print("Policy updated for agent: ", agent_id)
         except Exception as e:
             raise RuntimeError(f"Failed to update policy on-chain: {e}")
 
@@ -336,8 +340,9 @@ class AgentDNA:
     def deploy_agent_nft(
         self,
         agent: "AgentDNA",
+        metadata: Dict[str, Any] = {},
         *,
-        policy_content: Optional[str] = None,
+        policy_content: str,
     ) -> str:
         """
         Deploy an agent's identity NFT using THIS principal's wallet (user or admin).
@@ -351,13 +356,16 @@ class AgentDNA:
         (substituted DIDs, dates etc.) before storing on chain — this is the common case
         when skill.md files contain ``${DID}`` / ``${DATE}`` placeholders.
         """
-        if policy_content is not None:
-            agent.policy = base64.b64encode(policy_content.encode("utf-8")).decode("ascii")
-        elif not agent.policy:
-            raise ValueError(
-                f"Agent {agent.alias} has no policy — create it with policy_file= "
-                "or pass policy_content= to deploy_agent_nft()"
+        if self.kind != "user":
+            raise RuntimeError(
+                f"deploy_agent_nft() must be called on a user principal; this is kind={self.kind!r}"
             )
+
+        if policy_content == "":
+            raise ValueError("policy_content cannot be empty, pass the file contents as a string")
+
+        policy = base64.b64encode(policy_content.encode("utf-8")).decode("ascii")
+        
         agent.deployer_did = self.did
 
         # Ensure token_path is set on the agent
@@ -368,10 +376,10 @@ class AgentDNA:
 
         # Build the agent NFT payload
         from .agent import identity_payload
-        nft_payload = identity_payload(agent)
+        nft_payload = identity_payload(self.did, metadata, policy)
 
         # Derive deterministic NFT id from agent's did.alias
-        digest = hashlib.sha256(f"{agent.signer.did}.{agent.alias}".encode()).digest()
+        digest = hashlib.sha256(f"{self.did}.{self.alias}".encode()).digest()
         multihash_bytes = bytes([0x12, len(digest)]) + digest
         agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
 
@@ -396,15 +404,15 @@ class AgentDNA:
             nft_data=json.dumps(nft_payload),
         )
         if resp.get("error"):
-            raise RuntimeError(f"Agent NFT deployment failed for {agent.alias}: {resp['error']}")
+            raise RuntimeError(f"Agent NFT deployment failed for {self.alias}: {resp['error']}")
         nft_address = resp.get("nft_address")
         if nft_address is None:
-            raise RuntimeError(f"Unexpected error deploying NFT for {agent.alias}: no address returned")
+            raise RuntimeError(f"Unexpected error deploying NFT for {self.alias}: no address returned")
 
         agent_info.append({
             "agent_id":   nft_address,
-            "agent_did":  agent.signer.did,
-            "agent_name": agent.alias,
+            "agent_did":  self.signer.did,
+            "agent_name": self.alias,
         })
         with open(agent.token_path, "w", encoding="utf-8") as f:
             json.dump(agent_info, f, indent=2)
@@ -680,6 +688,26 @@ class AgentDNA:
 
     def sign_response(self, payload, *, ctx, extra=None):
         return self.build(payload, ctx=ctx, extra=extra)
+
+    def history_agent(self, agent_id: str, latest: bool = False) -> List[Dict[str, Any]]:
+        """Decoded NFT chain log for the given NFT ID.
+
+        Returns ``[]`` if the NFT hasn't been deployed yet. JSON-string fields
+        (``NFTData``, ``data``, nested ``original_message``, …) are parsed
+        recursively so renderers like ``st.json()`` show a foldable tree
+        rather than one escaped blob.
+        """
+        if not agent_id:
+            return []
+
+        # Lazy import — keeps the chain-query dep optional at import time.
+        from rubix.client import RubixClient
+        from rubix.querier import Querier
+
+        client = RubixClient(node_url=self.trust.base_url, timeout=300)
+        history = Querier(client).get_nft_states(nft_address=agent_id, only_latest_state=latest)
+
+        return [_deep_json_decode(s) for s in history]
 
     def history(self, latest: bool = False) -> List[Dict[str, Any]]:
         """
@@ -1293,13 +1321,21 @@ class AgentDNA:
         print("Stored identity info in:", self.token_path)
         return nft_address
 
-    def _identity_nft_payload(self) -> Dict[str, Any]:
+    def _identity_nft_payload(self, policy: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Dispatch to the kind-specific payload builder in agent.py/user.py."""
         if self.kind == "user":
             from .user import identity_payload
+            return identity_payload(self)
         else:
             from .agent import identity_payload
-        return identity_payload(self)
+            agent_did = self.did
+            if metadata is None:
+                metadata = {}
+
+            if policy is None:
+                policy = ""
+
+            return identity_payload(agent_did=agent_did, policy_content=policy, agent_metadata=metadata)
 
     def _execute_nft(self, nft_address: str, payload: Any) -> Dict[str, Any]:
         nft_data = json.dumps(payload)

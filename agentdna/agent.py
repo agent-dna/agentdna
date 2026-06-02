@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from .core import AgentDNA
 
 
-def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
+def identity_payload(agent_did: str, agent_metadata: Dict[str, Any], policy_content: str) -> Dict[str, Any]:
     """
     Build the on-chain payload for an agent's identity NFT::
 
@@ -29,9 +29,9 @@ def identity_payload(dna: "AgentDNA") -> Dict[str, Any]:
   
     return {
         "type":           "agent_nft",
-        "agent_did":      dna.did,
-        "agent_metadata": dna.metadata,
-        "policy":         dna.policy,
+        "agent_did":      agent_did,
+        "agent_metadata": agent_metadata,
+        "policy":         policy_content,
     }
 
 
