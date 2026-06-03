@@ -274,7 +274,7 @@ class AgentDNA:
         if not agent_history:
             raise RuntimeError(f"No history found for agent NFT {agent_id}; cannot update policy")
 
-         if len(agent_history) == 0:
+        if len(agent_history) == 0:
             raise RuntimeError(
                 f"Agent NFT {agent_id} has no history; cannot update policy"
             )
