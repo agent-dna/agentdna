@@ -13,7 +13,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple, Union, cast
 
-from examples.trip_planner_v2 import agent
 from multiformats_cid.cid import CIDv0
 
 from .trust import RubixTrustService
