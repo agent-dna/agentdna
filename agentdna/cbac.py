@@ -42,8 +42,10 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -199,6 +201,139 @@ class CBAC:
         return card
 
     # ─── main entry point ─────────────────────────────────────────────────
+    async def _get_policy(self, agent_id: str) -> Optional[str]:
+        """
+        Fetch the agent's policy from the Provenance Layer.
+
+        Reads the latest agent-NFT state for ``agent_id``. The state's
+        ``data`` is a JSON string of the form::
+
+            {"type": "agent_nft", "agent_did": "...",
+             "agent_metadata": {...}, "policy": "<base64>"}
+
+        We parse it, pull the base64-encoded ``policy``, and decode it to the
+        raw policy text. :meth:`verify_async` is format-agnostic and scores
+        whatever text comes back. Returns ``None`` when no policy is present.
+        """
+        # Lazy import — chain query dep is optional at import time
+        from rubix.client import RubixClient
+        from rubix.querier import Querier
+
+        client = RubixClient(node_url=self.trust.base_url, timeout=300)
+        # get_nft_states is a blocking network call — offload it so it doesn't
+        # stall the event loop when verify_async is awaited from a server.
+        agent_log = await asyncio.to_thread(
+            Querier(client).get_nft_states,
+            nft_address=agent_id,
+            only_latest_state=True,
+        )
+
+        # only_latest_state can return a bare dict instead of a list.
+        if isinstance(agent_log, dict):
+            agent_log = [agent_log]
+        if not agent_log:
+            raise RuntimeError(f"No NFT state found for card {agent_id}")
+
+        latest_agent_log = agent_log[-1]["data"]
+
+        # `data` is a JSON string — parse it to a dict.
+        record = json.loads(latest_agent_log)
+
+        # `policy` is base64-encoded policy text.
+        policy_b64 = record.get("policy")
+        if not policy_b64:
+            return None
+
+        return base64.b64decode(policy_b64).decode("utf-8")
+
+    async def verify_async(self, agent_id: str, intended_action: Any) -> CBACResult:
+        """
+        Validate an agent's *intent* against the free-form content of its
+        policy, using deterministic lexical semantics (no LLM).
+
+        The policy is treated as an arbitrary blob — no fixed file format is
+        assumed. Whatever :meth:`_get_policy` returns (raw text, dict, or a
+        :class:`Card`) is flattened to text and scored. If the policy happens
+        to carry structured allow/forbid lists, those are used as an extra
+        signal; otherwise the whole-text overlap drives the decision.
+
+        Parameters
+        ----------
+        agent_id:
+            Used to fetch the agent's policy via :meth:`_get_policy`.
+        intended_action:
+            The action the agent wants to perform. A dict (or any object with
+            these attrs) is understood; recognised keys:
+              - ``action``      — the verb/identifier, e.g. ``"book_flight"``
+              - ``description`` / ``summary`` — free-text description
+              - ``params`` / ``args`` — a dict of arguments
+            A plain string is also accepted and treated as the description.
+
+        Returns
+        -------
+        CBACResult with ``decision`` in ``{"allow", "deny"}`` and a
+        human-readable ``reason`` listing the matched / missing policy terms.
+        The gate is fail-closed: any uncertainty (no policy, empty content,
+        weak overlap) resolves to ``deny``.
+        """
+        # Fail-closed: any error fetching/decoding the policy denies.
+        try:
+            policy = await self._get_policy(agent_id)
+        except Exception as e:
+            return CBACResult(
+                decision="deny",
+                reason=f"Policy lookup failed for agent {agent_id}: {e}",
+            )
+        if not policy:
+            return CBACResult(
+                decision="deny",
+                reason=f"No policy available for agent {agent_id}; cannot verify intent",
+            )
+
+        # 1. Flatten the policy — whatever its shape — into one vocabulary.
+        #    allowed/forbidden lists are best-effort: present only if the
+        #    policy carries that structure, never required.
+        allowed_vocab, forbidden_vocab = _policy_signal_vocabs(policy)
+        policy_vocab = _normalize_tokens(_collect_text(policy))
+
+        if not policy_vocab:
+            return CBACResult(
+                decision="deny",
+                reason=f"Policy for agent {agent_id} carries no analysable content",
+            )
+
+        # 2. Tokenize the intended action.
+        action_tokens = _normalize_tokens(_intended_action_text(intended_action))
+        if not action_tokens:
+            return CBACResult(
+                decision="deny",
+                reason="Intended action carries no analysable content",
+            )
+
+        # 3. Score: coverage = fraction of the intent's words the policy knows.
+        matched = action_tokens & policy_vocab
+        missing = action_tokens - policy_vocab
+        hit_forbidden = action_tokens & forbidden_vocab
+        coverage = len(matched) / len(action_tokens)
+        verb_hit = bool(action_tokens & allowed_vocab)
+
+        # 4. Map to a binary decision (fail-closed). A verb hit — the action's
+        #    own verb appears in the policy's allow-list — is a strong enough
+        #    signal to allow on its own; otherwise we require the intent to be
+        #    at least half grounded in the policy vocabulary.
+        if hit_forbidden:
+            return CBACResult(decision="deny", reason=(
+                f"Intent overlaps forbidden policy terms {sorted(hit_forbidden)}"
+            ))
+        if verb_hit or coverage >= 0.5:
+            return CBACResult(decision="allow", reason=(
+                f"Intent grounded in policy (coverage={coverage:.0%}, "
+                f"matched={sorted(matched)})"
+            ))
+        return CBACResult(decision="deny", reason=(
+            f"Intent not grounded in policy (coverage={coverage:.0%}, "
+            f"missing={sorted(missing)})"
+        ))
 
     async def verify(self, ctx) -> CBACResult:
         """
@@ -345,6 +480,144 @@ class CBAC:
 # ──────────────────────────────────────────────────────────────────────────────
 # helpers
 # ──────────────────────────────────────────────────────────────────────────────
+
+# Lexical-semantics helpers for verify_async (deterministic intent matching).
+
+# Small stopword set — these words carry no policy signal so we drop them
+# before scoring overlap.
+_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for", "from",
+    "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "that", "the",
+    "this", "to", "want", "wants", "with", "would", "you", "your", "please",
+})
+
+# Tiny hand-curated synonym map: each token is folded to a canonical form so
+# policy and intent vocabularies meet in the middle. Pure data, no model.
+_SYNONYMS = {
+    "buy": "purchase", "purchasing": "purchase", "purchases": "purchase",
+    "book": "reserve", "booking": "reserve", "reservation": "reserve",
+    "send": "transfer", "sending": "transfer", "pay": "transfer",
+    "payment": "transfer", "remit": "transfer",
+    "fetch": "read", "get": "read", "retrieve": "read", "query": "read",
+    "write": "update", "edit": "update", "modify": "update", "change": "update",
+    "remove": "delete", "drop": "delete",
+}
+
+
+def _stem(word: str) -> str:
+    """Very light suffix stripping so book/books/booking collapse together."""
+    for suffix in ("ing", "ed", "es", "s"):
+        if len(word) > len(suffix) + 2 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
+
+
+def _normalize_tokens(text: str) -> set:
+    """Lowercase, split on non-alphanumerics, drop stopwords, fold synonyms,
+    then stem — yielding a comparable bag of policy/intent terms."""
+    out: set = set()
+    for raw in re.split(r"[^a-z0-9]+", (text or "").lower()):
+        if not raw or raw in _STOPWORDS:
+            continue
+        token = _SYNONYMS.get(raw, raw)
+        out.add(_stem(token))
+    return out
+
+
+def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> str:
+    """Recursively gather every string found in an arbitrary blob.
+
+    Format-agnostic: handles raw text, dicts, lists, and dataclasses/objects
+    (e.g. :class:`Card`) alike.
+
+    ``include_keys`` controls whether mapping *keys* are gathered alongside
+    values. For a large policy blob, keys are useful searchable vocabulary
+    (default). For a short intent, structural keys like ``action``/``params``
+    are pure scaffolding that would dilute the coverage score, so the intent
+    side passes ``include_keys=False`` to flatten values only.
+    """
+    if _depth > 6 or obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, (int, float, bool)):
+        return str(obj)
+    if isinstance(obj, dict):
+        parts: List[str] = []
+        for k, v in obj.items():
+            if include_keys:
+                parts.append(str(k))
+            parts.append(_collect_text(v, include_keys=include_keys, _depth=_depth + 1))
+        return " ".join(parts)
+    if isinstance(obj, (list, tuple, set)):
+        return " ".join(
+            _collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj
+        )
+    # Dataclass / arbitrary object → walk its __dict__.
+    data = getattr(obj, "__dict__", None)
+    if isinstance(data, dict):
+        return _collect_text(data, include_keys=include_keys, _depth=_depth + 1)
+    return str(obj)
+
+
+# Keys under which a policy *might* expose structured allow / forbid lists.
+# Purely best-effort — absence is fine; whole-text overlap still drives the
+# decision. Matched case-insensitively as substrings of the key.
+_ALLOW_KEY_HINTS = ("allow", "permit", "grant", "can", "capabilit", "scope")
+_FORBID_KEY_HINTS = ("forbid", "deny", "prohibit", "disallow", "block", "restrict")
+
+
+def _policy_signal_vocabs(policy: Any) -> tuple:
+    """Best-effort extraction of (allowed_vocab, forbidden_vocab) from a policy
+    of unknown shape. Returns empty sets when no such structure is present."""
+    allowed: set = set()
+    forbidden: set = set()
+
+    # Parsed Card has dedicated fields.
+    if isinstance(policy, Card):
+        allowed |= _normalize_tokens(" ".join(policy.allowed_actions))
+        forbidden |= _normalize_tokens(" ".join(policy.forbidden_actions))
+        return allowed, forbidden
+
+    # JSON-string policy → parse then recurse.
+    if isinstance(policy, str):
+        stripped = policy.lstrip()
+        if stripped.startswith(("{", "[")):
+            try:
+                return _policy_signal_vocabs(json.loads(policy))
+            except (TypeError, json.JSONDecodeError):
+                return allowed, forbidden
+        return allowed, forbidden
+
+    # Dict-shaped policy → scan keys for allow/forbid hints, at any depth.
+    if isinstance(policy, dict):
+        for k, v in policy.items():
+            key = str(k).lower()
+            if any(h in key for h in _FORBID_KEY_HINTS):
+                forbidden |= _normalize_tokens(_collect_text(v))
+            elif any(h in key for h in _ALLOW_KEY_HINTS):
+                allowed |= _normalize_tokens(_collect_text(v))
+            elif isinstance(v, dict):
+                a, f = _policy_signal_vocabs(v)
+                allowed |= a
+                forbidden |= f
+
+    return allowed, forbidden
+
+
+def _intended_action_text(intended_action: Any) -> str:
+    """Flatten an intended-action of *any* shape (str / dict / list / object)
+    into one string for tokenizing.
+
+    Format-agnostic by design — it reuses the same recursive flattener as the
+    policy side (:func:`_collect_text`), so no fixed key schema is assumed.
+    Common keys like ``action``/``description``/``params`` are picked up
+    automatically because their string values are gathered. Field *names* are
+    skipped (``include_keys=False``) — for a short intent they are structural
+    scaffolding that would only dilute the coverage score.
+    """
+    return _collect_text(intended_action, include_keys=False)
+
 
 def _extract_action(original_message: Any) -> Optional[str]:
     """Pull the ``action`` field out of an envelope's original_message."""
