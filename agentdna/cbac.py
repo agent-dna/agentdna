@@ -49,7 +49,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
-
+import requests
 import yaml
 
 from .trust import RubixTrustService
@@ -171,6 +171,55 @@ class CBAC:
         self._card_cache: Dict[str, Card] = {}
 
     # ─── fetch + verify a card from Rubix ─────────────────────────────────
+    
+    def _message(self, resp: requests.Response) -> str:
+        try:
+            b = resp.json()
+            return (b.get("data") or {}).get("message") or b.get("message") or resp.text
+        except ValueError:
+            return resp.text
+    
+    def authorize_action(
+        self,
+        agent_id: str,
+        action_intent: str,
+        *,
+        url: str,
+        method: str = "POST",
+        headers: dict | None = None,
+        body: str | dict | None = None,
+        chain_url: str = "http://localhost:8080",
+        timeout: float = 35.0,
+    ) -> requests.Response:
+        if isinstance(body, dict):
+            body = json.dumps(body)
+            headers = {"Content-Type": "application/json", **(headers or {})}
+
+        payload = {
+            "agent_id": agent_id,
+            "action_intent": action_intent,
+            "app_request": {
+                "url": url,
+                "method": method,
+                "headers": headers or {},
+                "body": body or "",
+            },
+        }
+
+        resp = requests.post(
+            f"{chain_url.rstrip('/')}/authorize-action",
+            json=payload,
+            timeout=timeout,
+        )
+
+        decision = resp.headers.get("X-CBAC-Decision")
+
+        if decision == "deny":
+            raise PermissionError(self._message(resp))
+        if decision == "error":
+            raise RuntimeError(self._message(resp))
+
+        return resp
 
     def fetch_card(self, nft_address: str) -> Card:
         """Pull a card NFT from Rubix and parse it. Cached after first hit."""
