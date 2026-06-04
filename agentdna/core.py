@@ -375,10 +375,10 @@ class AgentDNA:
 
         # Build the agent NFT payload
         from .agent import identity_payload
-        nft_payload = identity_payload(self.did, metadata, policy)
+        nft_payload = identity_payload(agent.did, metadata, policy)
 
         # Derive deterministic NFT id from agent's did.alias
-        digest = hashlib.sha256(f"{self.did}.{self.alias}".encode()).digest()
+        digest = hashlib.sha256(f"{agent.did}.{agent.alias}".encode()).digest()
         multihash_bytes = bytes([0x12, len(digest)]) + digest
         agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
 
@@ -410,8 +410,8 @@ class AgentDNA:
 
         agent_info.append({
             "agent_id":   nft_address,
-            "agent_did":  self.signer.did,
-            "agent_name": self.alias,
+            "agent_did":  agent.did,
+            "agent_name": agent.alias,
         })
         with open(agent.token_path, "w", encoding="utf-8") as f:
             json.dump(agent_info, f, indent=2)
