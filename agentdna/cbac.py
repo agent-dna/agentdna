@@ -422,6 +422,7 @@ class CBAC:
         self,
         agent_id: str,
         action_intent: str,
+        envelope: dict,
         *,
         url: str,
         method: str = "POST",
@@ -437,6 +438,7 @@ class CBAC:
         payload = {
             "agent_id": agent_id,
             "action_intent": action_intent,
+            "envelope": envelope,
             "app_request": {
                 "url": url,
                 "method": method,
