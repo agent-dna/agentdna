@@ -443,6 +443,7 @@ class AgentDNA:
         original: Union[str, dict, list, SignedEnvelope],
         remote_name: Optional[str] = None,
         execute_nft: bool = True,
+        chain_data: Optional[Dict[str, Any]] = None,
     ) -> VerifyResult:
         # Resolve `original` back to the exact string the host signed
         if isinstance(original, SignedEnvelope):
@@ -470,6 +471,7 @@ class AgentDNA:
             original_task=original_str,
             remote_name=remote_name,
             execute_nft=execute_nft,
+            chain_data=chain_data,
         )
 
         messages = raw_result.get("messages") or []
@@ -645,12 +647,39 @@ class AgentDNA:
         policy NFT.  Subsequent ``verify_async`` calls will load from the
         cache (~1 ms) instead of re-running NLI classification on every request.
 
+        Updates the matching entry in agent_info.json with the cache filename
+        and policy hash so the cache is traceable without inspecting .pkl files.
+
         Returns the cached payload (allowed/forbidden chunks + vectors).
         """
         if self._cbac_engine is None:
             from .cbac import CBAC
             self._cbac_engine = CBAC(trust=self.trust, **self._cbac_config)
-        return await self._cbac_engine.precompute_policy(agent_id)
+
+        result = await self._cbac_engine.precompute_policy(agent_id)
+
+        # Record the cache filename and policy hash in agent_info.json.
+        token_path = self.token_path
+        if token_path is None:
+            token_dir = Path.home() / ".agentdna"
+            token_path = token_dir / self.token_filename
+
+        if token_path.exists():
+            try:
+                with token_path.open("r", encoding="utf-8") as f:
+                    agent_info = json.load(f)
+                for entry in agent_info:
+                    if entry.get("agent_id") == agent_id:
+                        entry["embedding_cache"] = self._cbac_engine._cache_key(agent_id).name
+                        entry["policy_hash"]     = result["policy_hash"]
+                        entry["cached_at"]       = result["cached_at"]
+                        break
+                with token_path.open("w", encoding="utf-8") as f:
+                    json.dump(agent_info, f, indent=2)
+            except Exception:
+                pass  # non-fatal — cache still works, just not indexed in agent_info.json
+
+        return result
 
     # ─── One-shot helpers ───────────────────────────────────────────────────
 
@@ -992,10 +1021,7 @@ class AgentDNA:
                 spec_payload["delegate_to"] = recipient_name
 
         host_envelope: Dict[str, Any] = {
-            "payload":     spec_payload,
-            "_task_id":    task_id,
-            "_context_id": context_id,
-            "_message_id": message_id,
+            "payload": spec_payload,
         }
         if self.card_nft is not None:
             host_envelope["agent_card_nft"] = self.card_nft
@@ -1103,6 +1129,7 @@ class AgentDNA:
         remote_name: Optional[str] = None,
         verify_mode: str = "light",
         execute_nft: bool = True,
+        chain_data: Optional[Dict[str, Any]] = None,
         **legacy,
     ) -> Union["VerifyResult", "RequestContext", Dict[str, Any]]:
         """
@@ -1152,6 +1179,7 @@ class AgentDNA:
                 original=original,
                 remote_name=remote_name,
                 execute_nft=execute_nft,
+                chain_data=chain_data,
             )
 
         if payload is None:
@@ -1170,6 +1198,7 @@ class AgentDNA:
         original_task: str,
         remote_name: str,
         execute_nft: bool = True,
+        chain_data: Optional[Dict[str, Any]] = None,
         **_extra,
     ) -> Dict[str, Any]:
         verified: List[Dict[str, Any]] = []
@@ -1249,7 +1278,7 @@ class AgentDNA:
             token = self.current_nft_intent_id
             if token != "":
                 try:
-                    nft_payload = self._build_nft_payload(remote_name)
+                    nft_payload = self._build_nft_payload(remote_name, chain_data=chain_data)
                     nft_payload["type"] = "intent_nft"
                     nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
                     print("🚀 NFT execution result:", nft_result)
@@ -1380,7 +1409,7 @@ class AgentDNA:
             raise RuntimeError(f"NFT Execution Failed: {response.get('message', '<no message>')}")
         return response
 
-    def _build_nft_payload(self, remote_name: str) -> Dict[str, Any]:
+    def _build_nft_payload(self, remote_name: str, *, chain_data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         trust_issues = list(self.last_trust_issues or [])
 
         # Collect the first valid outbound (host) and inbound (agent) blocks.
@@ -1465,6 +1494,7 @@ class AgentDNA:
             "comment":  comment,
             "executor": executor,
             "did":      self.did,
+            "data": chain_data or {},
             "verification": {
                 "status":       self.last_verification_status,
                 "chain_depth":  chain_depth,
