@@ -44,15 +44,37 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
+import pickle
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 import yaml
 
 from .trust import RubixTrustService
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Semantic pipeline defaults
+# ──────────────────────────────────────────────────────────────────────────────
+
+_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"       # bi-encoder for Tier 1 cosine
+_DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
+
+# Gap thresholds: allow when gap > +0.12, deny when gap < -0.08, else escalate.
+# These are model-agnostic (relative difference, not absolute scores).
+_ALLOW_GAP_DEFAULT: float = 0.12
+_DENY_GAP_DEFAULT: float = 0.08
+
+# NLI thresholds for Check 1 drift and Tier 2 entailment.
+_ENTAILMENT_THRESHOLD: float = 0.55
+_CONTRADICTION_THRESHOLD: float = 0.60
+
+# Embedding cache: one .pkl per agent, keyed by SHA-256 of agent_id.
+_CACHE_DIR = Path.home() / ".agentdna" / "embedding_cache"
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -166,9 +188,226 @@ class CBAC:
     instance.
     """
 
-    def __init__(self, trust: RubixTrustService) -> None:
+    def __init__(
+        self,
+        trust: RubixTrustService,
+        *,
+        encoder_name: str = _DEFAULT_ENCODER,
+        nli_model_name: str = _DEFAULT_NLI_MODEL,
+        llm_backend: Optional[Callable] = None,
+        allow_gap: float = _ALLOW_GAP_DEFAULT,
+        deny_gap: float = _DENY_GAP_DEFAULT,
+    ) -> None:
         self.trust = trust
         self._card_cache: Dict[str, Card] = {}
+        self._encoder_name = encoder_name
+        self._nli_model_name = nli_model_name
+        self._llm_backend = llm_backend
+        self._allow_gap = allow_gap
+        self._deny_gap = deny_gap
+        # Lazy-loaded: only initialised on first verify_async call.
+        self._encoder = None
+        self._nli = None
+        self._nli_labels: Dict[int, str] = {}
+
+    # ─── semantic model helpers ────────────────────────────────────────────
+
+    def _get_encoder(self):
+        if self._encoder is None:
+            from sentence_transformers import SentenceTransformer
+            self._encoder = SentenceTransformer(self._encoder_name)
+        return self._encoder
+
+    def _get_nli(self):
+        if self._nli is None:
+            from sentence_transformers.cross_encoder import CrossEncoder
+            self._nli = CrossEncoder(self._nli_model_name)
+            try:
+                id2label = self._nli.model.config.id2label
+                self._nli_labels = {i: lbl.lower() for i, lbl in id2label.items()}
+            except AttributeError:
+                # Fallback for deberta NLI label order (contradiction/entailment/neutral)
+                self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
+        return self._nli
+
+    def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
+        """Run NLI cross-encoder on a (premise, hypothesis) pair.
+
+        Returns a dict like {'entailment': 0.82, 'contradiction': 0.05, 'neutral': 0.13}.
+        Scores are softmax-normalised probabilities.
+        """
+        import numpy as np
+        from scipy.special import softmax as sp_softmax
+        nli = self._get_nli()
+        raw = nli.predict([(premise, hypothesis)], apply_softmax=False)
+        probs = sp_softmax(raw[0])
+        return {self._nli_labels.get(i, str(i)): float(probs[i]) for i in range(len(probs))}
+
+    def _flatten_policy_chunks(self, policy: Any) -> List[str]:
+        """Flatten a policy of any shape into a list of text chunks.
+
+        Each YAML frontmatter entry becomes "key: value" (one chunk per list item
+        for list-valued keys). Body lines are included as-is. This unified path
+        works for any skill.md schema — no hardcoded key names.
+        """
+        chunks: List[str] = []
+        if isinstance(policy, Card):
+            for key, value in policy.raw_frontmatter.items():
+                if isinstance(value, list):
+                    for item in value:
+                        chunks.append(f"{key}: {item}")
+                elif value is not None:
+                    chunks.append(f"{key}: {value}")
+            for line in policy.body.splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    chunks.append(line)
+            return chunks
+        if isinstance(policy, str):
+            stripped = policy.strip()
+            if stripped.startswith("---"):
+                try:
+                    return self._flatten_policy_chunks(parse_skill_md(policy))
+                except (ValueError, Exception):
+                    pass
+            return [l.strip() for l in policy.splitlines() if l.strip()]
+        if isinstance(policy, dict):
+            for key, value in policy.items():
+                if isinstance(value, list):
+                    for item in value:
+                        chunks.append(f"{key}: {item}")
+                elif isinstance(value, str):
+                    chunks.append(f"{key}: {value}")
+            return chunks
+        return []
+
+    def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
+        """NLI-classify each chunk as allowed or forbidden.
+
+        For every chunk we run two NLI queries:
+          premise = chunk, hypothesis = "This capability is permitted"
+          premise = chunk, hypothesis = "This capability is prohibited"
+        The chunk goes into the forbidden bucket only when the prohibition
+        entailment clearly beats the permission entailment.
+        """
+        allowed: List[str] = []
+        forbidden: List[str] = []
+        for chunk in chunks:
+            allow_s = self._nli_scores(chunk, "This capability is permitted and allowed")
+            forbid_s = self._nli_scores(chunk, "This capability is prohibited and forbidden")
+            allow_e = allow_s.get("entailment", 0.0)
+            forbid_e = forbid_s.get("entailment", 0.0)
+            if forbid_e > allow_e and forbid_e > 0.40:
+                forbidden.append(chunk)
+            else:
+                allowed.append(chunk)
+        return allowed, forbidden
+
+    def _max_cosine(self, query_vec, chunk_vecs) -> float:
+        """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
+        import numpy as np
+        if chunk_vecs.shape[0] == 0:
+            return 0.0
+        sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
+        return float(np.max(sims))
+
+    async def _check1_drift(
+        self,
+        user_intent: str,
+        agent_action: str,
+    ) -> Optional[Tuple[str, str]]:
+        """NLI drift check: does the agent's action contradict the user's intent?
+
+        Returns (decision, reason) if contradiction is strong enough, else None.
+        """
+        scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
+        contradiction = scores.get("contradiction", 0.0)
+        if contradiction >= _CONTRADICTION_THRESHOLD:
+            return (
+                "deny",
+                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+            )
+        return None
+
+    # ─── embedding cache ───────────────────────────────────────────────────
+
+    def _cache_key(self, agent_id: str) -> Path:
+        """Return the .pkl path for this agent's precomputed policy vectors."""
+        digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
+        return _CACHE_DIR / f"{digest}.pkl"
+
+    def _load_cache(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        path = self._cache_key(agent_id)
+        if not path.exists():
+            return None
+        try:
+            with path.open("rb") as f:
+                return pickle.load(f)
+        except Exception:
+            return None
+
+    def _save_cache(self, agent_id: str, data: Dict[str, Any]) -> None:
+        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        path = self._cache_key(agent_id)
+        with path.open("wb") as f:
+            pickle.dump(data, f)
+
+    # ─── admin-facing precompute ───────────────────────────────────────────
+
+    async def precompute_policy(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Precompute and cache policy vectors for an agent.  Call this once
+        after deploying or updating the agent's policy NFT — not on every
+        inbound request.
+
+        What it does
+        ------------
+        1. Fetches the policy from the Provenance Layer.
+        2. Flattens it to text chunks (unified key:value + body path).
+        3. NLI-classifies each chunk into allowed / forbidden buckets.
+        4. Encodes both buckets with the bi-encoder.
+        5. Persists everything to ``~/.agentdna/embedding_cache/<hash>.pkl``.
+
+        Returns the cached payload so callers can inspect it.
+        """
+        import numpy as np
+
+        policy = await self._get_policy(agent_id)
+        if not policy:
+            raise RuntimeError(f"No policy found for agent {agent_id}")
+
+        chunks = await asyncio.to_thread(self._flatten_policy_chunks, policy)
+        if not chunks:
+            raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
+
+        allowed_chunks, forbidden_chunks = await asyncio.to_thread(
+            self._classify_chunks, chunks
+        )
+
+        encoder = self._get_encoder()
+        to_encode = allowed_chunks + forbidden_chunks
+        vecs = await asyncio.to_thread(encoder.encode, to_encode, normalize_embeddings=True)
+
+        n_allowed = len(allowed_chunks)
+        allowed_vecs = vecs[:n_allowed]
+        forbidden_vecs = vecs[n_allowed:]
+
+        policy_text = "\n".join(chunks)
+        payload: Dict[str, Any] = {
+            "agent_id": agent_id,
+            "allowed_chunks": allowed_chunks,
+            "forbidden_chunks": forbidden_chunks,
+            "allowed_vecs": allowed_vecs,
+            "forbidden_vecs": forbidden_vecs,
+            "policy_text": policy_text,
+            "policy_hash": hashlib.sha256(policy.encode()).hexdigest(),
+            "cached_at": datetime.now(timezone.utc).isoformat(),
+            "encoder": self._encoder_name,
+            "nli_model": self._nli_model_name,
+        }
+        await asyncio.to_thread(self._save_cache, agent_id, payload)
+        return payload
 
     # ─── fetch + verify a card from Rubix ─────────────────────────────────
     
@@ -295,94 +534,168 @@ class CBAC:
 
         return base64.b64decode(policy_b64).decode("utf-8")
 
-    async def verify_async(self, agent_id: str, intended_action: Any) -> CBACResult:
+    async def verify_async(
+        self,
+        agent_id: str,
+        intended_action: Any,
+        user_intent: Optional[str] = None,
+    ) -> CBACResult:
         """
-        Validate an agent's *intent* against the free-form content of its
-        policy, using deterministic lexical semantics (no LLM).
+        Three-tier semantic intent verification against the agent's policy.
 
-        The policy is treated as an arbitrary blob — no fixed file format is
-        assumed. Whatever :meth:`_get_policy` returns (raw text, dict, or a
-        :class:`Card`) is flattened to text and scored. If the policy happens
-        to carry structured allow/forbid lists, those are used as an extra
-        signal; otherwise the whole-text overlap drives the decision.
+        The policy is fetched from the Provenance Layer and flattened to
+        text chunks via a unified path — YAML key:value pairs plus markdown
+        body lines — so any skill.md schema works without hardcoded key names.
+
+        Pipeline
+        --------
+        Check 1 (NLI drift)
+            If ``intended_action`` carries both a user-side field
+            (``user_intent`` / ``user_request``) and an agent-side field
+            (``action`` / ``description``), we run NLI to verify the agent
+            hasn't drifted from the user's original request.  A contradiction
+            score ≥ 0.60 → deny immediately.
+
+        Tier 1 (cosine gap)
+            All policy chunks are NLI-classified into allowed / forbidden
+            buckets at query time.  Both buckets are encoded with the
+            bi-encoder.  ``gap = max_allowed_cosine - max_forbidden_cosine``.
+            gap > +allow_gap → allow;  gap < -deny_gap → deny;  else → Tier 2.
+
+        Tier 2 (NLI entailment)
+            The intent is compared against the top-scoring allowed chunk via
+            NLI cross-encoder.  Entailment ≥ 0.55 → allow;
+            contradiction ≥ 0.60 → deny;  else → Tier 3.
+
+        Tier 3 (LLM judgment)
+            Delegated to ``llm_backend`` if configured.  If ``llm_backend``
+            is ``None`` the result is ``"advise"`` — the caller decides.
 
         Parameters
         ----------
         agent_id:
             Used to fetch the agent's policy via :meth:`_get_policy`.
         intended_action:
-            The action the agent wants to perform. A dict (or any object with
-            these attrs) is understood; recognised keys:
-              - ``action``      — the verb/identifier, e.g. ``"book_flight"``
-              - ``description`` / ``summary`` — free-text description
-              - ``params`` / ``args`` — a dict of arguments
-            A plain string is also accepted and treated as the description.
+            The action the agent wants to perform.  Any shape is accepted:
+            a plain string, a dict with ``action``/``description``/``params``,
+            or an object — the same recursive flattener used by the lexical
+            path gathers the text.
 
         Returns
         -------
-        CBACResult with ``decision`` in ``{"allow", "deny"}`` and a
-        human-readable ``reason`` listing the matched / missing policy terms.
-        The gate is fail-closed: any uncertainty (no policy, empty content,
-        weak overlap) resolves to ``deny``.
+        CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
+        Fail-closed: any unrecoverable error (no policy, empty content,
+        model failure) resolves to ``deny``.
         """
-        # Fail-closed: any error fetching/decoding the policy denies.
+        import numpy as np
+
+        intent_text = _intended_action_text(intended_action)
+        if not intent_text.strip():
+            return CBACResult(decision="deny", reason="Intended action carries no analysable content")
+
+        # Check 1: NLI drift — only runs when caller supplies the root user intent.
+        if user_intent and intent_text:
+            drift = await self._check1_drift(user_intent, intent_text)
+            if drift is not None:
+                decision, reason = drift
+                return CBACResult(decision=decision, reason=reason)
+
+        # Fetch current policy from chain — always, so we can detect updates.
         try:
-            policy = await self._get_policy(agent_id)
+            current_policy = await self._get_policy(agent_id)
         except Exception as e:
+            return CBACResult(decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}")
+        if not current_policy:
+            return CBACResult(decision="deny", reason=f"No policy available for agent {agent_id}")
+
+        current_hash = hashlib.sha256(current_policy.encode()).hexdigest()
+
+        # Load local cache and validate against current policy hash.
+        cached = await asyncio.to_thread(self._load_cache, agent_id)
+
+        if cached is None or cached.get("policy_hash") != current_hash:
+            # Cache miss or policy updated on chain — recompute and persist.
+            try:
+                cached = await self.precompute_policy(agent_id)
+            except Exception as e:
+                return CBACResult(decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}")
+
+        allowed_chunks: List[str] = cached["allowed_chunks"]
+        forbidden_chunks: List[str] = cached["forbidden_chunks"]
+        allowed_vecs: np.ndarray = cached["allowed_vecs"]
+        forbidden_vecs: np.ndarray = cached["forbidden_vecs"]
+        policy_text: str = cached["policy_text"]
+
+        if not allowed_chunks and not forbidden_chunks:
+            return CBACResult(decision="deny", reason="Policy carries no analysable content")
+
+        # Encode only the intent at runtime (~5 ms on CPU).
+        encoder = self._get_encoder()
+        intent_vec = await asyncio.to_thread(
+            lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
+        )
+
+        # Tier 1: cosine gap.
+        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
+        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
+        gap = allowed_score - forbidden_score
+
+        if gap > self._allow_gap:
+            return CBACResult(
+                decision="allow",
+                reason=f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
+                       f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+            )
+        if gap < -self._deny_gap:
             return CBACResult(
                 decision="deny",
-                reason=f"Policy lookup failed for agent {agent_id}: {e}",
+                reason=f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
+                       f"(intent closer to forbidden than allowed policy)",
             )
-        if not policy:
+
+        # Tier 2: NLI entailment vs top allowed chunk.
+        if not allowed_chunks:
+            return CBACResult(decision="deny", reason="Tier 2: no allowed policy chunks found")
+
+        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
+        top_chunk = allowed_chunks[top_idx]
+        t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
+        entailment = t2_scores.get("entailment", 0.0)
+        contradiction = t2_scores.get("contradiction", 0.0)
+
+        if entailment >= _ENTAILMENT_THRESHOLD:
+            return CBACResult(
+                decision="allow",
+                reason=f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}",
+            )
+        if contradiction >= _CONTRADICTION_THRESHOLD:
             return CBACResult(
                 decision="deny",
-                reason=f"No policy available for agent {agent_id}; cannot verify intent",
+                reason=f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
             )
 
-        # 1. Flatten the policy — whatever its shape — into one vocabulary.
-        #    allowed/forbidden lists are best-effort: present only if the
-        #    policy carries that structure, never required.
-        allowed_vocab, forbidden_vocab = _policy_signal_vocabs(policy)
-        policy_vocab = _normalize_tokens(_collect_text(policy))
-
-        if not policy_vocab:
+        # Tier 3: LLM judgment (optional).
+        if self._llm_backend is None:
             return CBACResult(
-                decision="deny",
-                reason=f"Policy for agent {agent_id} carries no analysable content",
+                decision="advise",
+                reason=(
+                    f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
+                    f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
+                    "no LLM backend configured — caller must decide"
+                ),
             )
 
-        # 2. Tokenize the intended action.
-        action_tokens = _normalize_tokens(_intended_action_text(intended_action))
-        if not action_tokens:
-            return CBACResult(
-                decision="deny",
-                reason="Intended action carries no analysable content",
-            )
+        try:
+            llm_decision = await self._llm_backend(intent_text, policy_text)
+        except Exception as e:
+            return CBACResult(decision="advise", reason=f"Tier 3 LLM error: {e}")
 
-        # 3. Score: coverage = fraction of the intent's words the policy knows.
-        matched = action_tokens & policy_vocab
-        missing = action_tokens - policy_vocab
-        hit_forbidden = action_tokens & forbidden_vocab
-        coverage = len(matched) / len(action_tokens)
-        verb_hit = bool(action_tokens & allowed_vocab)
-
-        # 4. Map to a binary decision (fail-closed). A verb hit — the action's
-        #    own verb appears in the policy's allow-list — is a strong enough
-        #    signal to allow on its own; otherwise we require the intent to be
-        #    at least half grounded in the policy vocabulary.
-        if hit_forbidden:
-            return CBACResult(decision="deny", reason=(
-                f"Intent overlaps forbidden policy terms {sorted(hit_forbidden)}"
-            ))
-        if verb_hit or coverage >= 0.5:
-            return CBACResult(decision="allow", reason=(
-                f"Intent grounded in policy (coverage={coverage:.0%}, "
-                f"matched={sorted(matched)})"
-            ))
-        return CBACResult(decision="deny", reason=(
-            f"Intent not grounded in policy (coverage={coverage:.0%}, "
-            f"missing={sorted(missing)})"
-        ))
+        verdict = str(llm_decision).lower()
+        if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
+            return CBACResult(decision="deny", reason=f"Tier 3 LLM: {llm_decision}")
+        if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
+            return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
+        return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
 
     async def verify(self, ctx) -> CBACResult:
         """

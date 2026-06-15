@@ -169,6 +169,11 @@ class AgentDNA:
         policy_file: Optional[Union[str, Path]] = None,
         metadata: Optional[Dict[str, Any]] = None,
         deployer_did: Optional[str] = None,
+        cbac_encoder: Optional[str] = None,
+        cbac_nli_model: Optional[str] = None,
+        cbac_llm_backend: Optional[Any] = None,
+        cbac_allow_gap: Optional[float] = None,
+        cbac_deny_gap: Optional[float] = None,
         **_legacy,
     ) -> None:
         # Back-compat: silently drop role= from older callers
@@ -215,6 +220,15 @@ class AgentDNA:
         self.cbac_enabled = bool(cbac)
         self.card_nft = card_nft
         self._cbac_engine = None        # lazily created when CBAC is invoked
+        self._cbac_config: Dict[str, Any] = {
+            k: v for k, v in {
+                "encoder_name": cbac_encoder,
+                "nli_model_name": cbac_nli_model,
+                "llm_backend": cbac_llm_backend,
+                "allow_gap": cbac_allow_gap,
+                "deny_gap": cbac_deny_gap,
+            }.items() if v is not None
+        }
 
         # Kind-specific identity-NFT payload inputs:
         #   user:  metadata        (free-form profile dict, defaults to {})
@@ -606,10 +620,14 @@ class AgentDNA:
         # signers.
         if self.cbac_enabled and ctx.verified:
             ctx.cbac_result = await self._cbac_verify(ctx)
-            if ctx.cbac_result is not None and ctx.cbac_result.decision == "deny":
-                ctx.trust_issues.append(
-                    f"CBAC denied: {ctx.cbac_result.reason}"
-                )
+            if ctx.cbac_result is not None:
+                decision = ctx.cbac_result.decision
+                if decision == "deny":
+                    ctx.trust_issues.append(f"CBAC denied: {ctx.cbac_result.reason}")
+                elif decision == "advise":
+                    # Gray zone — pipeline was inconclusive. Surface it in the context
+                    # so the resource handler can make the final call; don't block.
+                    ctx.trust_issues.append(f"CBAC advise: {ctx.cbac_result.reason}")
 
         return ctx
 
@@ -617,8 +635,22 @@ class AgentDNA:
         """Soft-imported CBAC engine, instantiated once per AgentDNA."""
         if self._cbac_engine is None:
             from .cbac import CBAC
-            self._cbac_engine = CBAC(trust=self.trust)
+            self._cbac_engine = CBAC(trust=self.trust, **self._cbac_config)
         return await self._cbac_engine.verify(ctx)
+
+    async def cbac_precompute(self, agent_id: str) -> Dict[str, Any]:
+        """
+        Admin helper — precompute and cache the semantic policy vectors for
+        ``agent_id``.  Call this once after deploying or updating an agent's
+        policy NFT.  Subsequent ``verify_async`` calls will load from the
+        cache (~1 ms) instead of re-running NLI classification on every request.
+
+        Returns the cached payload (allowed/forbidden chunks + vectors).
+        """
+        if self._cbac_engine is None:
+            from .cbac import CBAC
+            self._cbac_engine = CBAC(trust=self.trust, **self._cbac_config)
+        return await self._cbac_engine.precompute_policy(agent_id)
 
     # ─── One-shot helpers ───────────────────────────────────────────────────
 
