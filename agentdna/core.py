@@ -1636,20 +1636,4 @@ def deploy_card(
     if not nft_address:
         raise RuntimeError("Card NFT deployment returned no nft_address")
 
-    # Precompute and cache semantic policy vectors at deploy time so the first
-    # verify_async call loads from cache instead of re-running NLI classification.
-    # Non-fatal: lazy compute in verify_async handles a cache miss.
-    try:
-        from .cbac import CBAC
-        cbac = CBAC(trust=admin_dna.trust)
-        try:
-            loop = asyncio.get_running_loop()
-            # Already inside an async context — schedule as a fire-and-forget task.
-            loop.create_task(cbac.precompute_policy(nft_address))
-        except RuntimeError:
-            # No running loop — safe to use asyncio.run().
-            asyncio.run(cbac.precompute_policy(nft_address))
-    except Exception:
-        pass
-
     return nft_address

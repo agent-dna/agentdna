@@ -311,31 +311,22 @@ class CBAC:
         sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
         return float(np.max(sims))
 
-    async def _check1_drift(self, intended_action: Any) -> Optional[Tuple[str, str]]:
-        """NLI drift check between the user's original request and the agent's action.
+    async def _check1_drift(
+        self,
+        user_intent: str,
+        agent_action: str,
+    ) -> Optional[Tuple[str, str]]:
+        """NLI drift check: does the agent's action contradict the user's intent?
 
-        Only runs when `intended_action` is a dict containing both a user-side
-        field (``user_intent`` / ``user_request``) and an agent-side field
-        (``action`` / ``description``). Returns (decision, reason) if a hard
-        call is possible, else None.
+        Returns (decision, reason) if contradiction is strong enough, else None.
         """
-        if not isinstance(intended_action, dict):
-            return None
-        user_side = intended_action.get("user_intent") or intended_action.get("user_request")
-        agent_side = intended_action.get("action") or intended_action.get("description")
-        if not (user_side and agent_side):
-            return None
-
-        premise = str(user_side)
-        hypothesis = agent_side if isinstance(agent_side, str) else json.dumps(agent_side)
-
-        scores = await asyncio.to_thread(self._nli_scores, premise, hypothesis)
+        scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
         contradiction = scores.get("contradiction", 0.0)
         if contradiction >= _CONTRADICTION_THRESHOLD:
             return (
                 "deny",
-                f"Check 1 drift: user intent {premise!r} contradicts agent action "
-                f"{hypothesis!r} (NLI contradiction={contradiction:.2f})",
+                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
             )
         return None
 
@@ -402,13 +393,15 @@ class CBAC:
         allowed_vecs = vecs[:n_allowed]
         forbidden_vecs = vecs[n_allowed:]
 
+        policy_text = "\n".join(chunks)
         payload: Dict[str, Any] = {
             "agent_id": agent_id,
             "allowed_chunks": allowed_chunks,
             "forbidden_chunks": forbidden_chunks,
             "allowed_vecs": allowed_vecs,
             "forbidden_vecs": forbidden_vecs,
-            "policy_text": "\n".join(chunks),
+            "policy_text": policy_text,
+            "policy_hash": hashlib.sha256(policy.encode()).hexdigest(),
             "cached_at": datetime.now(timezone.utc).isoformat(),
             "encoder": self._encoder_name,
             "nli_model": self._nli_model_name,
@@ -541,7 +534,12 @@ class CBAC:
 
         return base64.b64decode(policy_b64).decode("utf-8")
 
-    async def verify_async(self, agent_id: str, intended_action: Any) -> CBACResult:
+    async def verify_async(
+        self,
+        agent_id: str,
+        intended_action: Any,
+        user_intent: Optional[str] = None,
+    ) -> CBACResult:
         """
         Three-tier semantic intent verification against the agent's policy.
 
@@ -595,20 +593,28 @@ class CBAC:
         if not intent_text.strip():
             return CBACResult(decision="deny", reason="Intended action carries no analysable content")
 
-        # Check 1: NLI drift between user's original request and agent action.
-        drift = await self._check1_drift(intended_action)
-        if drift is not None:
-            decision, reason = drift
-            return CBACResult(decision=decision, reason=reason)
+        # Check 1: NLI drift — only runs when caller supplies the root user intent.
+        if user_intent and intent_text:
+            drift = await self._check1_drift(user_intent, intent_text)
+            if drift is not None:
+                decision, reason = drift
+                return CBACResult(decision=decision, reason=reason)
 
-        # Load precomputed policy vectors from cache (the fast path — admin must
-        # have run precompute_policy() after deploying the NFT).
+        # Fetch current policy from chain — always, so we can detect updates.
+        try:
+            current_policy = await self._get_policy(agent_id)
+        except Exception as e:
+            return CBACResult(decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}")
+        if not current_policy:
+            return CBACResult(decision="deny", reason=f"No policy available for agent {agent_id}")
+
+        current_hash = hashlib.sha256(current_policy.encode()).hexdigest()
+
+        # Load local cache and validate against current policy hash.
         cached = await asyncio.to_thread(self._load_cache, agent_id)
 
-        if cached is None:
-            # Cache miss: compute on the fly and persist so subsequent calls are fast.
-            # This should only happen in dev / first-run; in prod the admin calls
-            # precompute_policy() at deploy time.
+        if cached is None or cached.get("policy_hash") != current_hash:
+            # Cache miss or policy updated on chain — recompute and persist.
             try:
                 cached = await self.precompute_policy(agent_id)
             except Exception as e:
