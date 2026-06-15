@@ -579,11 +579,7 @@ class AgentDNA:
             user_env = user_block.get("envelope") or {}
             user_verified = chain_ok
 
-            # New format: payload.message.  Legacy fallback: original_message flat.
-            raw_intent = (
-                (user_env.get("payload") or {}).get("message")
-                or user_env.get("original_message")
-            )
+            raw_intent = (user_env.get("payload") or {}).get("message")
             if isinstance(raw_intent, str):
                 try:
                     parsed = json.loads(raw_intent)
@@ -1004,11 +1000,8 @@ class AgentDNA:
 
         # Build the spec-compliant typed payload.
         spec_payload: Dict[str, Any] = {
-            "message":          original_message,
-            "ts":               ts,
-            # Internal echo used by the response-side verification check.
-            # Not shown in the NFT chain but covered by this block's signature.
-            "original_message": original_message,
+            "message": original_message,
+            "ts":      ts,
         }
         if block_type == "intent":
             if recipient_name:
