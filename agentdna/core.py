@@ -391,9 +391,8 @@ class AgentDNA:
         nft_payload = identity_payload(agent.did, metadata, policy)
 
         # Derive deterministic NFT id from agent's did.alias
-        digest = hashlib.sha256(f"{agent.did}.{agent.alias}".encode()).digest()
-        multihash_bytes = bytes([0x12, len(digest)]) + digest
-        agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
+        from .id import get_agent_card_id
+        agent_id = get_agent_card_id(agent.alias)
 
         # Check cache first
         agent_info: List[Dict[str, Any]] = []
@@ -1304,7 +1303,7 @@ class AgentDNA:
                 self.token_path = token_dir / self.token_filename
             print("Path:", self.token_path)
 
-        self.nft_token = self._load_or_deploy_nft()
+        self.nft_token = self._load_or_deploy_card()
         print(f"✅ Rubix identity NFT for {self.kind} '{self.alias}':", self.nft_token)
         return self.nft_token
 
@@ -1320,11 +1319,17 @@ class AgentDNA:
             return self.deploy_user_nft()
         return self.deploy_agent_card()
 
-    def _load_or_deploy_nft(self) -> str:
+    def _load_or_deploy_card(self) -> str:
         # Identity NFT id = CIDv0(sha256(did.alias))
-        digest = hashlib.sha256(f"{self.signer.did}.{self.alias}".encode("utf-8")).digest()
-        multihash_bytes = bytes([0x12, len(digest)]) + digest
-        agent_id = CIDv0(multihash_bytes).encode().decode("utf-8")
+        actor_id = ""
+        if self.kind == "user":
+            from .id import get_user_card_id
+            actor_id = get_user_card_id(self.alias)
+        elif self.kind == "agent":
+            from .id import get_agent_card_id
+            actor_id = get_agent_card_id(self.alias)
+        else:
+            raise ValueError(f"Unsupported actor: {self.kind}")
 
         if not self.token_path:
             raise RuntimeError("Agent info path not initialized")
@@ -1337,9 +1342,9 @@ class AgentDNA:
             except Exception as e:
                 raise RuntimeError(f"Failed to read agent info: {e}")
             for agent in agent_info:
-                if agent.get("agent_id") == agent_id:
+                if agent.get("agent_id") == actor_id:
                     print("Using existing Identity NFT from:", self.token_path)
-                    return agent_id
+                    return actor_id
             print(f"Identity NFT not found in {self.token_path}, deploying new {self.kind}")
         else:
             print(f"agent_info.json not found at {self.token_path}, deploying new {self.kind}")
@@ -1348,7 +1353,7 @@ class AgentDNA:
         nft_payload = self._identity_nft_payload()
 
         resp = self.trust.deploy_nft(
-            nft_id=agent_id,
+            nft_id=actor_id,
             nft_value=self.nft_cfg["value"] or 0.001,
             nft_data=json.dumps(nft_payload),
         )
