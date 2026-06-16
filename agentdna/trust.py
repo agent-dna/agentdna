@@ -97,7 +97,7 @@ class RubixTrustService:
         self,
         parent_nft_id: str,
         nft_data: str,
-    ) -> Dict[str, Any]:
+    ) -> str:
         response = self.signer.create_child_nft(
             parent_nft_address=parent_nft_id,
             nft_data=nft_data,
@@ -106,7 +106,14 @@ class RubixTrustService:
         if response.get("error") is not None:
             raise Exception(f"Child NFT creation failed: {response['error']}")
         else:
-            return response["child_nfts"][0]
+            if len(response["child_nfts"]) == 0:
+                raise Exception("Child NFT creation failed: No child NFTs returned in response.")
+            
+            childNFTId = response["child_nfts"][0].get("childNFTId")
+            if childNFTId is None:
+                raise Exception("Child NFT creation failed: childNFTId not found in response.")
+            
+            return childNFTId
 
     # ---------- signing ----------
 

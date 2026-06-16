@@ -269,8 +269,7 @@ class AgentDNA:
                 self.deploy_user_nft()
 
         # Intent NFT Ops
-        self.current_nft_intent_id = ""
-        self.current_nft_intent_epoch = 0
+        self.intent_card_id: str = ""
         self._last_chain_depth: int = 0
 
     def update_agent_policy(self, agent_id, policy_content):
@@ -435,7 +434,6 @@ class AgentDNA:
         return nft_address
 
     # ─── Internal verify helpers (used by handle() and the aliases) ──────────
-
     async def _verify_reply(
         self,
         raw_text: Union[str, dict, list],
@@ -714,11 +712,8 @@ class AgentDNA:
                 "NFT not deployed yet — initialise_intent requires the user's identity NFT to exist so it can write the first audit record."
             )
 
-        if self.current_nft_intent_id == "" or int(time.time()) - self.current_nft_intent_epoch > EPOCH_THRESHOLD_SECONDS:
-            child_nft_details = self.trust.deploy_child_nft(self.nft_token, "{}")
-            self.current_nft_intent_id = child_nft_details["childNFTId"]
-            self.current_nft_intent_epoch = int(time.time())
-
+        self.intent_card_id = self.trust.deploy_child_nft(self.nft_token, "{}")
+        
         # build(positional payload, no ctx) always returns SignedEnvelope;
         # handle(positional envelope, no original=) always returns
         # RequestContext. The dispatching unions on those signatures hide
@@ -1268,12 +1263,11 @@ class AgentDNA:
 
         # Write the audit record to chain
         if self.enable_nft and execute_nft and verified:
-            token = self.current_nft_intent_id
-            if token != "":
+            if self.intent_card_id != "":
                 try:
                     nft_payload = self._build_nft_payload(remote_name, chain_data=chain_data)
                     nft_payload["type"] = "intent_nft"
-                    nft_result = await asyncio.to_thread(self._execute_nft, token, nft_payload)
+                    nft_result = await asyncio.to_thread(self._execute_nft, self.intent_card_id, nft_payload)
                     print("🚀 NFT execution result:", nft_result)
                 except Exception as e:
                     print("⚠️ NFT execution failed:", e)
@@ -1392,8 +1386,6 @@ class AgentDNA:
 
     def _execute_nft(self, nft_address: str, payload: Any) -> Dict[str, Any]:
         nft_data = json.dumps(payload)
-        print("NFT address:", nft_address)
-        print("NFT data:", nft_data)
         try:
             response = self.signer.execute_nft(nft_address=nft_address, nft_data=nft_data)
         except Exception as e:
