@@ -392,7 +392,7 @@ class AgentDNA:
 
         # Derive deterministic NFT id from agent's did.alias
         from .id import get_agent_card_id
-        agent_id = get_agent_card_id(agent.alias)
+        agent_id = get_agent_card_id(agent.did)
 
         # Check cache first
         agent_info: List[Dict[str, Any]] = []
