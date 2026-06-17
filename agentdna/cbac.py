@@ -508,13 +508,15 @@ class CBAC:
         # Lazy import — chain query dep is optional at import time
         from rubix.client import RubixClient
         from rubix.querier import Querier
+        from .id import get_agent_card_id
 
+        agent_card_id = get_agent_card_id(agent_id)
         client = RubixClient(node_url=self.trust.base_url, timeout=300)
         # get_nft_states is a blocking network call — offload it so it doesn't
         # stall the event loop when verify_async is awaited from a server.
         agent_log = await asyncio.to_thread(
             Querier(client).get_nft_states,
-            nft_address=agent_id,
+            nft_address=agent_card_id,
             only_latest_state=True,
         )
 
