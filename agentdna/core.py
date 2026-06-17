@@ -1324,10 +1324,10 @@ class AgentDNA:
         actor_id = ""
         if self.kind == "user":
             from .id import get_user_card_id
-            actor_id = get_user_card_id(self.alias)
+            actor_id = get_user_card_id(self.did)
         elif self.kind == "agent":
             from .id import get_agent_card_id
-            actor_id = get_agent_card_id(self.alias)
+            actor_id = get_agent_card_id(self.did)
         else:
             raise ValueError(f"Unsupported actor: {self.kind}")
 
