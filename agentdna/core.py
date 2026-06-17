@@ -300,8 +300,10 @@ class AgentDNA:
         # encode the policy to base64 and store it
         agent_info["policy"] = base64.b64encode(policy_content.encode("utf-8")).decode("ascii")
 
-        try: 
-            self._execute_nft(nft_address=agent_id, payload=agent_info)
+        try:
+            from .id import get_agent_card_id
+            agent_card_id = get_agent_card_id(agent_id)
+            self._execute_nft(nft_address=agent_card_id, payload=agent_info)
             print("Policy updated for agent: ", agent_id)
         except Exception as e:
             raise RuntimeError(f"Failed to update policy on-chain: {e}")
