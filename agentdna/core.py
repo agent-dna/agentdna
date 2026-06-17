@@ -753,9 +753,11 @@ class AgentDNA:
         # Lazy import — keeps the chain-query dep optional at import time.
         from rubix.client import RubixClient
         from rubix.querier import Querier
+        from .id import get_agent_card_id
 
+        agent_card_id = get_agent_card_id(agent_id)
         client = RubixClient(node_url=self.trust.base_url, timeout=300)
-        history = Querier(client).get_nft_states(nft_address=agent_id, only_latest_state=latest)
+        history = Querier(client).get_nft_states(nft_address=agent_card_id, only_latest_state=latest)
 
         return [_deep_json_decode(s) for s in history]
 
