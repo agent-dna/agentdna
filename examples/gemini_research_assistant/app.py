@@ -1,55 +1,17 @@
-import json
 import os
 import streamlit as st
 from pathlib import Path
 from dotenv import load_dotenv
 from google import genai
+
+from agentdna import AgentDNA
 from pipeline import ResearchPipeline
 
 HERE = Path(__file__).parent
 load_dotenv(HERE / ".env")
 
-# ── singleton setup ───────────────────────────────────────────────────────────
-
-def _init_pipeline() -> ResearchPipeline:
-    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
-    agentdna_api_key = os.environ.get("AGENTDNA_API_KEY") or None
-    return ResearchPipeline(client, agentdna_api_key=agentdna_api_key)
-
-if "pipeline" not in st.session_state:
-    st.session_state.pipeline = _init_pipeline()
-
-pipeline: ResearchPipeline = st.session_state.pipeline
-
-# ── chain history helper ──────────────────────────────────────────────────────
-
-def _fetch_chain_history(nft_token: str) -> list:
-    try:
-        from agentdna import NodeClient
-        from rubix.client import RubixClient
-        from rubix.querier import Querier
-        node = NodeClient()
-        client = RubixClient(node_url=node.get_base_url(), timeout=300)
-        q = Querier(client)
-        states = q.get_nft_states(nft_address=nft_token, only_latest_state=False)
-        if isinstance(states, list):
-            return states
-        if isinstance(states, dict):
-            return [states]
-        return []
-    except Exception as exc:
-        return [{"error": str(exc)}]
-
-
-def _decode_nft_state(state: dict) -> dict:
-    state = dict(state)
-    nft_data = state.get("NFTData")
-    if isinstance(nft_data, str):
-        try:
-            state["NFTData"] = json.loads(nft_data)
-        except Exception:
-            pass
-    return state
+AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY") or None
+DEFAULT_USER_ALIAS = "Research_Head_Coordinator_USER"
 
 # ── page config ───────────────────────────────────────────────────────────────
 
@@ -63,6 +25,38 @@ if "history" not in st.session_state:
     st.session_state.history = []
 if "chain_history" not in st.session_state:
     st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
+
+# ── user identity (top of the trust chain) ────────────────────────────────────
+# Users own the audit-log NFT. Per signed-in alias we create one AgentDNA with
+# enable_nft=True (default) — its DID is the chain-side identity that holds
+# every audit record. The host & remotes are pure signers (enable_nft=False).
+
+st.sidebar.subheader("Signed in as")
+new_alias = st.sidebar.text_input(
+    "User alias",
+    value=st.session_state.user_alias,
+    help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+)
+
+# Re-init pipeline if user changes alias
+if new_alias != st.session_state.user_alias or "pipeline" not in st.session_state:
+    st.session_state.user_alias = new_alias
+    user_dna = (
+        AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY)
+        if AGENTDNA_API_KEY else None
+    )
+    client = genai.Client(api_key=os.environ["GOOGLE_API_KEY"])
+    st.session_state.pipeline = ResearchPipeline(
+        client,
+        agentdna_api_key=AGENTDNA_API_KEY,
+        user_dna=user_dna,
+    )
+
+pipeline: ResearchPipeline = st.session_state.pipeline
+
+st.sidebar.divider()
 
 # ── sidebar ───────────────────────────────────────────────────────────────────
 
@@ -99,13 +93,7 @@ st.sidebar.caption(f"NFT: `{nft_token}`" if nft_token else "NFT: (none yet — r
 
 if st.sidebar.button("History Records", use_container_width=True, disabled=not nft_token):
     with st.spinner("Fetching NFT data…"):
-        states = _fetch_chain_history(nft_token)
-    if isinstance(states, list):
-        st.session_state.chain_history = [_decode_nft_state(s) for s in states]
-    elif isinstance(states, dict):
-        st.session_state.chain_history = [_decode_nft_state(states)]
-    else:
-        st.session_state.chain_history = []
+        st.session_state.chain_history = pipeline.history()
     st.rerun()
 
 st.sidebar.divider()
@@ -123,10 +111,10 @@ if st.session_state.chain_history:
         f"Chain History — NFT `{nft_token}` — {len(st.session_state.chain_history)} record(s)",
         expanded=True,
     ):
-        st.code(
-            json.dumps(st.session_state.chain_history, indent=2, ensure_ascii=False),
-            language="json",
-        )
+        # st.json renders a foldable tree that wraps long values (DIDs, sigs,
+        # response_sha256, the 600-char signed response) instead of forcing
+        # horizontal scroll like st.code(language="json") did.
+        st.json(st.session_state.chain_history, expanded=2)
 
 # ── input ─────────────────────────────────────────────────────────────────────
 

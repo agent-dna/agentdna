@@ -4,7 +4,7 @@ from pathlib import Path
 import sys
 import os
 
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
@@ -24,9 +24,14 @@ from agentdna import AgentDNA
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-load_dotenv()
+load_dotenv(find_dotenv())  # walks up to find the shared MAS .env
 
-dna = AgentDNA(alias="kaitlynn", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
+# Pure-remote agent — never writes to chain; enable_nft=False skips deploy.
+dna = AgentDNA(
+    alias="kaitlynn",
+    api_key=os.environ.get("AGENTDNA_API_KEY"),
+    enable_nft=False,
+)
 print("✅ Kaitlyn Using DID:", dna.trust.did)
 print("✅ Kaitlyn Using base URL:", dna.trust.base_url)
 
@@ -55,27 +60,15 @@ class KaitlynAgentExecutor(AgentExecutor):
         raw = context.get_user_input()
         print("📨 Incoming from Host – raw user input:", raw)
 
-        verify_info = await dna.handle(
-            raw_text=raw,
-            verify_mode="light",   
-        )
+        ctx = await dna.handle(raw)
+        if not ctx.verified:
+            logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
 
-        verified      = verify_info["verified"]
-        trust_issues  = verify_info["trust_issues"]
-        original_msg  = verify_info["original_message"]
-        host_block    = verify_info["host_block"]
-        host_ok       = verify_info["host_ok"]
-
-        if verified is False:
-            logger.warning("Verification failed, trust issues: %s", trust_issues)
-        if host_ok is False:
-            logger.warning("Host signature invalid or missing: %s", trust_issues)
-
-        print("Host verified:", host_ok)
-        logger.info("🧾 Kaitlyn using original_message: %r", original_msg)
+        print("Host verified:", ctx.verified)
+        logger.info("🧾 Kaitlyn using original_message: %r", ctx.original_message)
 
         try:
-            async for item in self.agent.stream(original_msg, context.context_id):
+            async for item in self.agent.stream(ctx.original_message, context.context_id):
                 is_task_complete   = item["is_task_complete"]
                 require_user_input = item.get("require_user_input", False)
                 parts = [Part(root=TextPart(text=item["content"]))]
@@ -92,20 +85,8 @@ class KaitlynAgentExecutor(AgentExecutor):
                     )
                     break
                 else:
-                    agent_response = item["content"]
-
-                    built_resp = dna.build(
-                        original_message=original_msg,
-                        response=agent_response,
-                        host_block=host_block,
-                        extra={"host_trust_issues": trust_issues},
-                    )
-
-                    combined_json = built_resp["combined_json"]
-
-                    parts.append(
-                        Part(root=TextPart(text=combined_json))
-                    )
+                    combined_json = dna.build(item["content"], ctx=ctx)
+                    parts.append(Part(root=TextPart(text=combined_json)))
 
                     await updater.add_artifact(parts, name="scheduling_result")
                     await updater.complete()

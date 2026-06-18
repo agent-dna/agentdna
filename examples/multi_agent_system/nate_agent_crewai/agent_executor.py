@@ -1,9 +1,13 @@
 import json
 import logging
-from pathlib import Path
-import sys
-
 import os
+import sys
+from pathlib import Path
+
+from dotenv import load_dotenv, find_dotenv
+
+# Load shared MAS .env (walks up from this file until it finds one).
+load_dotenv(find_dotenv())
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -34,7 +38,12 @@ class SchedulingAgentExecutor(AgentExecutor):
         """Initializes the SchedulingAgentExecutor."""
         self.agent = SchedulingAgent()
 
-        self.dna = AgentDNA(alias="nate", role="remote", api_key=os.environ.get("AGENTDNA_API_KEY"))
+        # Pure-remote agent — never writes to chain; enable_nft=False skips deploy.
+        self.dna = AgentDNA(
+            alias="nate",
+            api_key=os.environ.get("AGENTDNA_API_KEY"),
+            enable_nft=False,
+        )
         logger.info("✅ Nate AgentDNA DID: %s", self.dna.trust.did)
         logger.info("✅ Nate Rubix base URL: %s", self.dna.trust.base_url)
 
@@ -60,49 +69,26 @@ class SchedulingAgentExecutor(AgentExecutor):
         raw = context.get_user_input()
         print("📨 Incoming from Host – raw user input   :", raw)
 
-        verify_info = await self.dna.handle(
-            raw_text=raw,
-            verify_mode="light",  
-        )
-
-        verified = verify_info["verified"]
-        trust_issues     = verify_info["trust_issues"]
-        if verified is False:
-            logger.warning("Verification failed, check trust issues: %s", trust_issues)
-
-        original_message = verify_info["original_message"]
-        host_block       = verify_info["host_block"]
-        host_ok          = verify_info["host_ok"]
-
-        if host_ok is False:
-            logger.warning("Host signature invalid: %s", trust_issues)
-            # You *could* bail here instead:
-            # raise ServerError(error=InternalError())
+        ctx = await self.dna.handle(raw)
+        if not ctx.verified:
+            logger.warning("Host verification failed, trust_issues: %s", ctx.trust_issues)
 
         logger.info(
-            "🎯 Message for SchedulingAgent after trust layer: %r", original_message
+            "🎯 Message for SchedulingAgent after trust layer: %r", ctx.original_message
         )
 
         try:
-            result = self.agent.invoke(original_message)
+            result = self.agent.invoke(ctx.original_message)
             print(f"Final Result ===> {result}")
         except Exception as e:
             print(f"Error invoking agent: {e}")
             raise ServerError(error=InternalError()) from e
 
-        built_resp = self.dna.build(
-            original_message=original_message,
-            response=result,
-            host_block=host_block,
-            extra={"host_trust_issues": trust_issues},  
-        )
-
-        # rubix_block = built_resp["rubix_block"]
-        combined_json = built_resp["combined_json"]
+        combined_json = self.dna.build(result, ctx=ctx)
 
         parts = [
-            Part(root=TextPart(text=result)),        
-            Part(root=TextPart(text=combined_json)), 
+            Part(root=TextPart(text=result)),
+            Part(root=TextPart(text=combined_json)),
         ]
 
         await updater.add_artifact(parts)

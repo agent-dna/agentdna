@@ -4,7 +4,7 @@ import uvicorn
 
 from agent import create_agent
 from agent_executor import KarleyAgentExecutor
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from google.adk.artifacts import InMemoryArtifactService
 from google.adk.memory.in_memory_memory_service import InMemoryMemoryService
 from google.adk.runners import Runner
@@ -18,7 +18,7 @@ from a2a.types import (
     AgentSkill,
 )
 
-load_dotenv()
+load_dotenv(find_dotenv())
 logging.basicConfig(
     level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",

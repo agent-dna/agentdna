@@ -1,100 +1,65 @@
-# MCP For Google Sheets (agentdna protected)
+# MCP Google Sheets Agent (signed by AgentDNA)
 
-A **Streamlit demo app** that spins up a local **MCP server** for Google Sheets (via stdio) and calls its tools from the UI
-
-
----
-
-## Repo structure
-
-```text
-mcp-gsheets/
-├─ credentials/
-│  └─ service_account.json                                   
-├─ app.py                         
-├─ server.py  
-├─ requirements.txt     
-├─ .env.example                
-```
-
----
+A Streamlit chat UI that talks to a local **MCP server** (`server.py`) which reads and writes tasks to a Google Sheet. Every host → MCP round-trip is signed and verified by AgentDNA; each verified turn is written to an audit-log NFT on Rubix.
 
 ## Prerequisites
 
-- Python **3.9+**
-- A Google Cloud **Service Account JSON** with access to Google Sheets
-- Google Sheets API enabled in your Google Cloud project
+- Python **3.11+** and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A Google **Service Account JSON** with the Google Sheets API enabled, placed at `credentials/service_account.json`
+- A spreadsheet shared with the service account's `client_email`
+- An [AgentDNA API key](https://agentdna.io/beta) (sign up for the Beta)
 
----
-
-## 1) Setup
-
-### Create a virtualenv (recommended)
+## 1. Configure `.env`
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate   # macOS / Linux
-# .venv\Scripts\activate  # Windows
+cp .env.sample .env
 ```
 
-### Install dependencies
+Then edit `.env` and fill in the values:
+
+```env
+AGENTDNA_API_KEY=...
+CHAIN_URL=https://chain-connector-1.rubix.net
+GOOGLE_APPLICATION_CREDENTIALS=credentials/service_account.json
+GSHEETS_SPREADSHEET_ID=your_spreadsheet_id_here
+GSHEETS_SHEET_NAME=Sheet1
+AGENTDNA_REMOTE_NAME=GoogleSheetsMCP
+```
+
+The sheet's first row must be `id | title | status | owner | notes | created_at`. Start from an empty tab — the server will write the header for you on first use.
+
+## 2. Run
 
 ```bash
-pip install -r requirements.txt
+uv run streamlit run app.py
 ```
 
+That installs deps into a local `.venv/` on first run, then opens the UI at <http://localhost:8501>. `server.py` is spawned automatically over stdio.
 
----
+## What you can ask
 
-## 2) Configure environment variables
+- `Add: finish report`
+- `Show open tasks`
+- `Mark <title> done`
+- `Set owner of <title> to Alice`
 
-Copy the template:
+## Trust layer at a glance
 
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and fill in the values.
-
-
----
-
-## 3) Google Sheets access
-
-1. Put your service account key file at:
-   ```text
-   credentials/service_account.json
-   ```
-2. Open the Google Sheet you want to use and **share it** with the service account email:
-   - Find it in the JSON under `client_email`
-3. Make sure the Sheet tab has the expected header row (or start with an empty sheet and let the server create it)
-
----
-
-## 4) Run the demo (this is the main way)
-
-Start Streamlit:
-
-```bash
-streamlit run app.py
-```
-
-That’s it and the app will spawn `server.py` automatically
-
----
+- **Host** (`app.py`) signs every tool call with `dna.build(host_msg)` and verifies the signed reply via `dna.handle(reply, original=env)`. Each verified turn writes one record to the host's audit-log NFT.
+- **Server** (`server.py`) is a pure remote (`enable_nft=False`) — it verifies the host envelope with `dna.handle(envelope)`, does the sheet work, and signs the reply with `dna.build(payload, ctx=ctx)`.
+- The sidebar's **History Records** button fetches the chain history via `dna.history()` and renders it as a foldable JSON tree.
 
 ## Troubleshooting
 
-**`Missing AGENTDNA_API_KEY`**
-- Set `AGENTDNA_API_KEY` in `.env`. The AgentDNA API Key can be acqiored form signing up 
+**`Missing AGENTDNA_API_KEY`** — set it in `.env`. Sign up at <https://agentdna.io/beta>.
 
-**Google auth / permissions errors**
-- Confirm `GOOGLE_APPLICATION_CREDENTIALS=credentials/service_account.json`
-- Share the spreadsheet with the service account `client_email`.
-- Ensure Google Sheets API is enabled in your GCP project.
+**Google permission errors** — confirm the spreadsheet is shared with `client_email` from `credentials/service_account.json` and that the Google Sheets API is enabled in your GCP project.
 
-**Header row mismatch**
-- This demo expects a specific header row in the configured sheet tab.
-- Easiest fix: use a fresh sheet tab (empty) so the server can initialize it.
+**`Header row mismatch`** — point `GSHEETS_SHEET_NAME` at a fresh empty tab and the server will write the header itself.
 
-
+**`Decoded key is not an uncompressed secp256k1 key`** — you have an older keystore from `rubix-py 0.7.x`. Move it aside:
+```bash
+mv ~/.agentdna/account/GoogleSheetsAgent ~/.agentdna/account/GoogleSheetsAgent.compressed-bak
+mv ~/.agentdna/account/GoogleSheetsMCP   ~/.agentdna/account/GoogleSheetsMCP.compressed-bak
+```
+The next launch will regenerate keys in the new format. Note: this creates a fresh DID + audit-log NFT.

@@ -2,11 +2,13 @@ import os
 import sys
 import json
 import asyncio
+from datetime import datetime, timezone
+
 import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 
-from agentdna import AgentDNA, NodeClient
+from agentdna import AgentDNA
 from mcp import ClientSession, StdioServerParameters, types as mcp_types
 from mcp.client.stdio import stdio_client
 
@@ -28,10 +30,10 @@ REPO_OWNER = "SynapzeCore"
 REPO_NAME = "sample-repo"
 REPO_URL = f"https://github.com/{REPO_OWNER}/{REPO_NAME}"
 
-dna = AgentDNA(alias=HOST_AGENT_NAME, role="host", api_key=AGENTDNA_API_KEY)
-
-node = NodeClient(alias=HOST_AGENT_NAME)
-DEFAULT_BASE_URL = node.get_base_url()
+# Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+# The user (constructed below from a sidebar alias) owns the audit-log NFT.
+host_dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY, enable_nft=False)
+DEFAULT_USER_ALIAS = f"{HOST_AGENT_NAME}_USER"
 
 SYSTEM_PROMPT = """
 You are a GitHub assistant.
@@ -49,22 +51,9 @@ Rules:
 - Do not use markdown code fences.
 """
 
+
 def init_gemini():
     return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
-
-# ─────────────────────────────
-# NFT helper functions
-# ─────────────────────────────
-
-def get_nft_token_from_host() -> str:
-    """
-    Read the NFT token that AgentDNA is using for this host.
-    This is set by the Rubix handler inside AgentDNA.
-    """
-    try:
-        return dna.handler.nft_token
-    except Exception:
-        return ""
 
 
 def extract_json(raw: str) -> str:
@@ -73,8 +62,7 @@ def extract_json(raw: str) -> str:
         return ""
 
     if "```" in raw:
-        parts = raw.split("```")
-        for part in parts:
+        for part in raw.split("```"):
             if "{" in part and "}" in part:
                 raw = part
                 break
@@ -85,7 +73,8 @@ def extract_json(raw: str) -> str:
 
     return raw
 
-async def run_agent_turn(user_input: str):
+
+async def run_agent_turn(user_input: str, user_dna):
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["server.py"],
@@ -94,79 +83,68 @@ async def run_agent_turn(user_input: str):
 
     client = init_gemini()
     model_id = "gemini-2.5-flash"
+
     async with stdio_client(server_params) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            
+
             decision_raw = client.models.generate_content(
                 model=model_id,
                 contents=f"{SYSTEM_PROMPT}\nUser request: {user_input}\nReturn only one JSON object",
             ).text
 
-            normalized = extract_json(decision_raw)
-            
             try:
-                decision = json.loads(normalized)
-            except Exception as e:
+                decision = json.loads(extract_json(decision_raw))
+            except Exception:
                 return decision_raw.strip(), None, None, ""
 
             if "tool" not in decision:
-                answer = decision.get("answer", decision_raw)
-                return answer.strip(), None, None, ""
+                return decision.get("answer", decision_raw).strip(), None, None, ""
 
             tool_name = decision["tool"]
             tool_args = decision.get("args", {})
 
-            host_message = {
+            # ── AgentDNA: user signs intent → host signs over it → MCP →
+            #             user verifies & writes the audit-log NFT ─────────
+            user_signed = user_dna.build({
+                "intent": user_input,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+
+            host_msg = {
                 "user_query": user_input,
                 "tool_name": tool_name,
-                "tool_args": tool_args
+                "tool_args": tool_args,
             }
-            
-            envelope = dna.build(
-                original_message=json.dumps(host_message),
-                state={"channel": "mcp_github"},
+            env = host_dna.build(host_msg, parent=user_signed)
+
+            tool_result = await session.call_tool(
+                tool_name,
+                arguments={**tool_args, "dna_envelope": str(env)},
             )
 
-            tool_args_with_dna = {
-                **tool_args,
-                "dna_envelope": envelope["host_json"],
-            }
-            
-            # Call the respective MCP tool
-            tool_result = await session.call_tool(tool_name, arguments=tool_args_with_dna)
+            tool_output_text = "\n".join(
+                block.text if isinstance(block, mcp_types.TextContent) else str(block)
+                for block in tool_result.content
+            )
 
-            parts: list[str] = []
-            for block in tool_result.content:
-                if isinstance(block, mcp_types.TextContent):
-                    parts.append(block.text)
-                else:
-                    parts.append(str(block))
-            tool_output_text = "\n".join(parts)
-
-            trust_result = await dna.handle(
-                resp_parts=[{"text": tool_output_text}],
-                original_task=json.dumps(host_message),
+            result = await user_dna.handle(
+                tool_output_text,
+                original=env,
                 remote_name=MCP_TOOL_NAME,
             )
-            
-            handler = getattr(dna, "handler", None)
-            verification_status = "unknown"
-            if handler is not None:
-                verification_status = getattr(handler, "last_verification_status", "unknown")
 
-            trust_issues = trust_result.get("trust_issues")
             final_prompt = f"""
 The user asked: {user_input}
 
 You called the Github MCP tool '{tool_name}' with arguments:
 {json.dumps(tool_args, indent=2)}
 
-The tool returned this (may be a signed AgentDNA envelope):
-{tool_output_text}
+The verified payload from the MCP tool:
+{json.dumps(result.payload, indent=2)}
 
-Verification status from AgentDNA: {verification_status}
-Trust issues (if any): {json.dumps(trust_issues, indent=2)}
+Verification status from AgentDNA: {result.verification_status}
+Trust issues (if any): {json.dumps(result.trust_issues, indent=2)}
 
 Instructions:
 - If verification_status == "ok" and trust_issues is empty or null:
@@ -186,29 +164,65 @@ Instructions:
 
             return answer, tool_name, tool_args, tool_output_text
 
-def run_agent_sync(user_input: str):
-    return asyncio.run(run_agent_turn(user_input))
+
+def run_agent_sync(user_input: str, user_dna):
+    return asyncio.run(run_agent_turn(user_input, user_dna))
 
 
+# ─────────────────────────────
 # Streamlit UI
+# ─────────────────────────────
 
 st.set_page_config("GitHub MCP Demo")
-
-handler = getattr(dna, "handler", None)
-
-nft_id = get_nft_token_from_host()
-if not nft_id:
-    st.sidebar.write("No NFT token available (dna.handler.nft_token not set)")
-
-
 st.title("GitHub MCP Agent")
 st.markdown(f"**Repository:** [{REPO_URL}]({REPO_URL})")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "chain_history" not in st.session_state:
+    st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
 
+# ─────────────────────────────
+# Sidebar — user identity, NFT + chain history
+# ─────────────────────────────
+
+with st.sidebar:
+    st.subheader("Signed in as")
+    new_alias = st.text_input(
+        "User alias",
+        value=st.session_state.user_alias,
+        help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+    )
+    if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
+        st.session_state.user_alias = new_alias
+        st.session_state.user_dna = AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY)
+
+    st.divider()
+    st.subheader("Audit Log")
+
+    nft_id = st.session_state.user_dna.nft_token or ""
+    st.caption(f"NFT: {nft_id or '(none yet — run a tool to register)'}")
+
+    if st.button("History Records", disabled=not nft_id):
+        with st.spinner("Fetching NFT data…"):
+            st.session_state.chain_history = st.session_state.user_dna.history()
+        st.rerun()
+
+# Chain-history panel — foldable JSON tree, wraps long values (DIDs, sigs,
+# response payloads) instead of forcing horizontal scroll.
+if st.session_state.chain_history:
+    with st.expander(
+        f"Chain History — NFT `{nft_id}` — {len(st.session_state.chain_history)} record(s)",
+        expanded=True,
+    ):
+        st.json(st.session_state.chain_history, expanded=2)
+
+# Chat history
 for msg in st.session_state.messages:
-    st.markdown(f"**{msg['role'].title()}:** {msg['content']}")
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
 
 st.markdown("---")
 
@@ -223,10 +237,11 @@ if st.button("Send") and query.strip():
     st.session_state.messages.append({"role": "user", "content": query})
 
     with st.spinner("Working..."):
-        answer, tool_name, tool_args, tool_output = run_agent_sync(query)
-    
-    st.session_state.messages.append({"role": "agent", "content": answer})
+        answer, _tool_name, _tool_args, _tool_output = run_agent_sync(
+            query, st.session_state.user_dna
+        )
 
+    st.session_state.messages.append({"role": "assistant", "content": answer})
     st.rerun()
 
 st.markdown("### Example Prompt")

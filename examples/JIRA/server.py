@@ -74,7 +74,7 @@ def _jira_auth() -> tuple[str, str]:
 # AgentDNA: Jira MCP server (remote role)
 # ─────────────────────────────
 
-dna = AgentDNA(alias="jira_server", role="remote", api_key=AGENTDNA_API_KEY)
+dna = AgentDNA(alias="jira_server", api_key=AGENTDNA_API_KEY, kind="agent", enable_nft=False)
 print("[SERVER] ✅ Jira MCP server DID:", dna.trust.did)
 print("[SERVER] ✅ Jira MCP server base URL:", dna.trust.base_url)
 
@@ -111,9 +111,13 @@ async def _verify_host_envelope(
 
     print("[SERVER] verify_host_envelope: info:", info)
 
-    original_message = info.get("original_message")
     host_block = info.get("host_block")
     trust_issues = info.get("trust_issues")
+    # Support new envelope format (payload.message) with legacy fallback.
+    original_message = (
+        info.get("original_message")
+        or (host_block or {}).get("envelope", {}).get("payload", {}).get("message")
+    )
 
     return original_message, host_block, trust_issues
 

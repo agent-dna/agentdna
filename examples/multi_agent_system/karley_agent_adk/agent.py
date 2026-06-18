@@ -104,7 +104,7 @@ def create_agent() -> LlmAgent:
     """Constructs the ADK agent for Karley."""
     logger.debug("create_agent() START")
     agent = LlmAgent(
-        model="gemini-2.0-flash",
+        model="gemini-2.5-flash",
         name="Karley_Agent",
         instruction="""
             **Role:** You are Karley's personal scheduling assistant. 

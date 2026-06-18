@@ -8,7 +8,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from google import genai
 
-from agentdna import AgentDNA, NodeClient
+from agentdna import AgentDNA, resolve_chain_url
 from rubix.client import RubixClient
 from rubix.querier import Querier
 
@@ -29,8 +29,7 @@ dna = AgentDNA(alias="jira_host", role="host", api_key=AGENTDNA_API_KEY)
 print("[HOST] ✅ AgentDNA DID:", dna.trust.did)
 print("[HOST] ✅ AgentDNA base URL:", dna.trust.base_url)
 
-node = NodeClient(alias="jira_host")
-DEFAULT_BASE_URL = node.get_base_url()
+DEFAULT_BASE_URL = resolve_chain_url()
 print("[HOST] ✅ Rubix node base URL:", DEFAULT_BASE_URL)
 
 

@@ -3,6 +3,7 @@ import json
 import os
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from dotenv import load_dotenv
@@ -16,14 +17,12 @@ from mcp import ClientSession, StdioServerParameters, types as mcp_types
 
 from pathlib import Path
 
-from agentdna import AgentDNA, NodeClient
+from agentdna import AgentDNA, resolve_chain_url
 from rubix.client import RubixClient
 from rubix.querier import Querier
 
 ROOT = Path(__file__).parent
 SERVER_PATH = str((ROOT / "server.py").resolve())
-
-SIMULATE_TAMPER = False
 
 AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
 if not AGENTDNA_API_KEY:
@@ -34,12 +33,19 @@ CHAIN_URL = os.environ.get("CHAIN_URL")
 if not CHAIN_URL:
     raise RuntimeError("Missing CHAIN_URL")
 
-# Host AgentDNA (assumes your AgentDNA handler is now using Path.home()/.agentdna)
-dna = AgentDNA(alias="GoogleSheetsAgent", role="host", api_key=AGENTDNA_API_KEY, chain_url=CHAIN_URL)
-node = NodeClient(alias="gsheets_GoogleSheetsAgenthost")
-DEFAULT_BASE_URL = node.get_base_url()
+# Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+# The user (constructed below from a sidebar alias) owns the audit-log NFT.
+host_dna = AgentDNA(
+    alias="GoogleSheetsAgent",
+    api_key=AGENTDNA_API_KEY,
+    chain_url=CHAIN_URL,
+    kind="agent",
+    enable_nft=False,
+)
+DEFAULT_BASE_URL = resolve_chain_url()
 
 REMOTE_NAME = os.environ.get("AGENTDNA_REMOTE_NAME", "GoogleSheetsMCP")
+DEFAULT_USER_ALIAS = "GoogleSheetsAgent_USER"
 
 
 def _server_params() -> StdioServerParameters:
@@ -74,48 +80,6 @@ def _tool_result_to_text(tool_result) -> str:
     return "\n".join(parts).strip()
 
 
-def _extract_signed_text(tool_output_text: str) -> str:
-    t = (tool_output_text or "").strip()
-    if not t:
-        return t
-    try:
-        obj = json.loads(t)
-        if isinstance(obj, dict) and "combined_json" in obj:
-            return obj["combined_json"]
-    except Exception:
-        pass
-    return t
-
-
-def extract_verified_response(trust_result: dict) -> dict | list | None:
-    if not isinstance(trust_result, dict):
-        return None
-
-    payload = trust_result.get("payload") or {}
-
-    resp = payload.get("response")
-    if isinstance(resp, str):
-        try:
-            return json.loads(resp)
-        except Exception:
-            return {"raw_response": resp}
-    if isinstance(resp, (dict, list)):
-        return resp
-
-    env = payload.get("envelope")
-    if isinstance(env, dict):
-        r = env.get("response")
-        if isinstance(r, str):
-            try:
-                return json.loads(r)
-            except Exception:
-                return {"raw_response": r}
-        if isinstance(r, (dict, list)):
-            return r
-
-    return None
-
-
 async def mcp_call_raw(tool_name: str, tool_args: Dict[str, Any]) -> str:
     async with stdio_client(_server_params()) as (read, write):
         async with ClientSession(read, write) as session:
@@ -134,68 +98,34 @@ async def mcp_list_tools() -> List[str]:
 
 def trusted_mcp_call(tool_name: str, tool_args: Dict[str, Any], user_query: str = "") -> Dict[str, Any]:
     """
-    Updated tamper simulation design:
-
-    - Host signs a canonical message (host_msg) that includes user_query_raw.
-    - Host ALSO sends a transport field 'user_query' to the server.
-    - If inject_fake is enabled, ONLY the transport field is tampered.
-    - Server should compare transport user_query vs signed user_query_raw and REFUSE to execute tool on mismatch.
-    - Host verifies the signed server response via dna.handle() and records it on-chain (execute_nft=True).
+    Full user → host → MCP delegation chain:
+      - user_dna.build(intent)               → signed user intent
+      - host_dna.build(host_msg, parent=…)   → host envelope wrapping the user's signed block
+      - user_dna.handle(reply, original=)    → typed VerifyResult + audit-log NFT
     """
-    user_query_raw = user_query or tool_name
+    user_dna = st.session_state.user_dna
 
-    # ✅ Signed canonical message (truth source)
+    user_signed = user_dna.build({
+        "intent": user_query or tool_name,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+
     host_msg = {
-        "user_query_raw": user_query_raw,   # <- raw / canonical user request
+        "user_query": user_query or tool_name,
         "tool_name": tool_name,
         "tool_args": tool_args,
     }
-
-    built = dna.build(
-        original_message=json.dumps(host_msg),
-        state={"channel": "mcp_gsheets"},
-    )
-    dna_envelope = built["host_json"]
-
-    # ✅ Transport args to MCP server
-    args_with_dna = {
-        **tool_args,
-        "dna_envelope": dna_envelope,
-
-        # IMPORTANT: This is what the server will compare against signed user_query_raw
-        "user_query": user_query_raw,
-    }
-
-    # ✅ Simulate in-transit tampering: change ONLY the transport field (NOT the signed envelope)
-    if SIMULATE_TAMPER:
-        args_with_dna["user_query"] = user_query_raw + " [TAMPERED_IN_TRANSIT]"
+    env = host_dna.build(host_msg, parent=user_signed)
+    args_with_dna = {**tool_args, "dna_envelope": str(env)}
 
     tool_output_text = run(mcp_call_raw(tool_name, args_with_dna))
-    signed_text = _extract_signed_text(tool_output_text)
-
-    trust_result = run(
-        dna.handle(
-            resp_parts=[{"text": signed_text}],
-            original_task=json.dumps(host_msg),
-            remote_name=REMOTE_NAME,
-            execute_nft=True,
-        )
-    )
-
-    verified = extract_verified_response(trust_result)
-    trust_issues = trust_result.get("trust_issues") if isinstance(trust_result, dict) else None
-
-    handler = getattr(dna, "handler", None)
-    verification_status = getattr(handler, "last_verification_status", "unknown") if handler else "unknown"
+    result = run(user_dna.handle(tool_output_text, original=env, remote_name=REMOTE_NAME))
 
     return {
-        "ok": True,
-        "tool_output_text": tool_output_text,
-        "signed_text": signed_text,
-        "trust_result": trust_result,
-        "verification_status": verification_status,
-        "trust_issues": trust_issues or [],
-        "verified_payload": verified,
+        "tool_output_text":    tool_output_text,
+        "verified_payload":    result.payload,
+        "verification_status": result.verification_status,
+        "trust_issues":        result.trust_issues,
     }
 
 
@@ -297,10 +227,8 @@ def fetch_tasks(status: str = ""):
 
 
 def get_nft_token_from_host() -> str:
-    try:
-        return dna.handler.nft_token
-    except Exception:
-        return ""
+    user_dna = st.session_state.get("user_dna")
+    return getattr(user_dna, "nft_token", None) or ""
 
 
 def fetch_nft_data(nft_id: str, latest: bool = False) -> Any:
@@ -320,8 +248,41 @@ if "tasks" not in st.session_state:
     st.session_state.tasks = []
 if "view" not in st.session_state:
     st.session_state.view = "open"
+if "chain_history" not in st.session_state:
+    st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
+
+
+def _decode_nft_state(state: dict) -> dict:
+    """Decode the NFTData JSON-string field into a dict for nicer rendering."""
+    state = dict(state)
+    nft_data = state.get("NFTData")
+    if isinstance(nft_data, str):
+        try:
+            state["NFTData"] = json.loads(nft_data)
+        except Exception:
+            pass
+    return state
 
 with st.sidebar:
+    st.subheader("Signed in as")
+    new_alias = st.text_input(
+        "User alias",
+        value=st.session_state.user_alias,
+        help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+    )
+    if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
+        st.session_state.user_alias = new_alias
+        st.session_state.user_dna = AgentDNA(
+            alias=new_alias,
+            api_key=AGENTDNA_API_KEY,
+            chain_url=CHAIN_URL,
+            kind="user",
+        )
+
+    st.divider()
+
     st.subheader("Controls")
 
     st.session_state.view = st.radio(
@@ -351,32 +312,16 @@ with st.sidebar:
 
     if st.button("History Records"):
         if not nft_id:
-            st.warning("No NFT token available (dna.handler.nft_token not set)")
+            st.warning("No NFT token available — run a tool first so the audit-log NFT is registered.")
         else:
             with st.spinner("Fetching NFT data…"):
                 nft_resp = fetch_nft_data(nft_id, latest=False)
-
-            def decode_nft_state(state: dict) -> dict:
-                state = dict(state)
-                nft_data = state.get("NFTData")
-                if isinstance(nft_data, str):
-                    try:
-                        state["NFTData"] = json.loads(nft_data)
-                    except Exception:
-                        pass
-                return state
-
             if isinstance(nft_resp, list):
-                decoded = [decode_nft_state(s) for s in nft_resp]
+                st.session_state.chain_history = [_decode_nft_state(s) for s in nft_resp]
             elif isinstance(nft_resp, dict):
-                decoded = decode_nft_state(nft_resp)
+                st.session_state.chain_history = [_decode_nft_state(nft_resp)]
             else:
-                decoded = nft_resp
-
-            pretty = json.dumps(decoded, indent=2)
-            st.session_state.messages.append(
-                {"role": "agent", "content": f"NFT history for {nft_id}:\n\n```json\n{pretty}\n```"}
-            )
+                st.session_state.chain_history = []
             st.rerun()
 
 if "last_update" in st.session_state:
@@ -392,6 +337,15 @@ if st.session_state.view == "open" and not st.session_state.open_tasks:
     fetch_open_tasks()
 if st.session_state.view in {"all", "done"} and not st.session_state.tasks:
     fetch_tasks(status="done" if st.session_state.view == "done" else "")
+
+# chain-history panel — foldable JSON tree, wraps long values (DIDs, sigs,
+# the signed response payload) instead of forcing horizontal scroll.
+if st.session_state.chain_history:
+    with st.expander(
+        f"Chain History — NFT `{nft_id}` — {len(st.session_state.chain_history)} record(s)",
+        expanded=True,
+    ):
+        st.json(st.session_state.chain_history, expanded=2)
 
 # chat history
 for m in st.session_state.messages:
@@ -460,14 +414,6 @@ if user_text:
             with st.spinner(f"Calling {tool}…"):
                 out = trusted_mcp_call(tool, args, user_query=user_text)
                 vp = out.get("verified_payload")
-
-            # If server refused due to tamper, vp typically contains tamper report
-            # (depends on your server.py implementation)
-            if isinstance(vp, dict) and vp.get("tampered"):
-                st.error("🚨 Tampering detected. No action executed.")
-                st.json(vp)
-                st.session_state.messages.append({"role": "assistant", "content": "Tampering detected; request refused."})
-                st.rerun()
 
             if tool == "append_task" and isinstance(vp, dict):
                 task = vp.get("task", {})

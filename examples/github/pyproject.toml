@@ -1,0 +1,16 @@
+[project]
+name = "github-mcp-agent"
+version = "0.1.0"
+description = "Streamlit + MCP GitHub agent, signed via AgentDNA"
+requires-python = ">=3.11"
+dependencies = [
+    "streamlit>=1.36",
+    "python-dotenv",
+    "requests",
+    "mcp>=1.0",
+    "google-genai>=1.0.0",
+    "agent-dna",
+]
+
+[tool.uv.sources]
+agent-dna = { path = "../../", editable = true }

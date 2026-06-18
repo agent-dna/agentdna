@@ -1,13 +1,42 @@
 import json
 import os
-from typing import Any, Dict, Optional, List
+from typing import Any, Dict, Optional, List, Union
 from pathlib import Path
 import requests
 from rubix.client import RubixClient
 from rubix.signer import Signer
 from rubix.did import online_signature_verify, signatureResponseError
 
-from .node_client import NodeClient
+
+def resolve_chain_url(
+    base_url: Optional[str] = None,
+    chain_url: Optional[str] = None,
+    config_path: Optional[Union[str, Path]] = None,
+) -> str:
+    """
+    Resolve the Rubix node URL from, in order:
+      1. base_url (explicit)
+      2. chain_url (explicit)
+      3. config_path (or agentdna/config.json)['chain_url']
+      4. CHAIN_URL env var
+    Raises ValueError if none of those produce a URL.
+    """
+    if config_path is None:
+        config_path = Path(__file__).resolve().parent / "config.json"
+
+    cfg_chain: Optional[str] = None
+    try:
+        with Path(config_path).open("r", encoding="utf-8") as f:
+            cfg_chain = json.load(f).get("chain_url")
+    except (FileNotFoundError, json.JSONDecodeError):
+        cfg_chain = None
+
+    final_url = base_url or chain_url or cfg_chain or os.getenv("CHAIN_URL")
+    if not final_url:
+        raise ValueError(
+            "No Rubix node URL found. Set chain_url, config.json['chain_url'], or CHAIN_URL."
+        )
+    return final_url.rstrip("/")
 
 
 class RubixTrustService:
@@ -24,12 +53,10 @@ class RubixTrustService:
             raise ValueError("API Key needs to be provided. Visit https://agentdna.io/ and join the" \
             "Beta programme to get an API Key.")
 
-        node = NodeClient(
-            alias=alias,
+        self.base_url = resolve_chain_url(
             chain_url=chain_url,
             config_path=node_config_path,
         )
-        self.base_url = node.get_base_url().rstrip("/")
         self.timeout = timeout
 
         if config_path == "":
@@ -44,6 +71,49 @@ class RubixTrustService:
 
         print("✅ RubixTrustService DID:", self.did)
         print("✅ RubixTrustService base URL:", self.base_url)
+
+    # ---------- NFT deployment ----------
+
+    def deploy_nft(
+        self,
+        nft_id: str,
+        nft_value: float,
+        nft_data: str,
+    ) -> Dict[str, Any]:
+        """
+        Deploy an NFT via the underlying rubix-py signer.
+
+        Thin wrapper that keeps NFT writes inside the trust layer — callers
+        (e.g. ``AgentDNA._load_or_deploy_nft``) build the payload and the
+        deterministic id, then hand the bytes here.
+        """
+        return self.signer.deploy_nft(
+            nft_id=nft_id,
+            nft_value=nft_value,
+            nft_data=nft_data,
+        )
+
+    def deploy_child_nft(
+        self,
+        parent_nft_id: str,
+        nft_data: str,
+    ) -> str:
+        response = self.signer.create_child_nft(
+            parent_nft_address=parent_nft_id,
+            nft_data=nft_data,
+        )
+
+        if response.get("error") is not None:
+            raise Exception(f"Child NFT creation failed: {response['error']}")
+        else:
+            if len(response["child_nfts"]) == 0:
+                raise Exception("Child NFT creation failed: No child NFTs returned in response.")
+            
+            childNFTId = response["child_nfts"][0].get("childNFTId")
+            if childNFTId is None:
+                raise Exception("Child NFT creation failed: childNFTId not found in response.")
+            
+            return childNFTId
 
     # ---------- signing ----------
 
@@ -137,7 +207,11 @@ class RubixTrustService:
         if isinstance(host_block, dict):
             env = host_block.get("envelope", {})
             if isinstance(env, dict):
-                orig = env.get("original_message")
+                orig = (
+                    env.get("original_message")
+                    or (env.get("payload") or {}).get("original_message")
+                    or (env.get("payload") or {}).get("message")
+                )
                 if isinstance(orig, str):
                     result["original_message"] = orig
 

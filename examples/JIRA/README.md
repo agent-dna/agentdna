@@ -1,126 +1,92 @@
-# Jira MCP Agent using AgentDNA 
+# Jira MCP Agent (signed by AgentDNA)
 
-This repository contains a fully integrated **Model Context Protocol (MCP)** server and client
-designed to work with **Jira Cloud**, enhanced by **AgentDNA** for end‑to‑end trust and 
-identity verification
+A Streamlit agent that talks to Jira Cloud through a local **MCP server** (`server.py`). Every host → MCP round-trip is signed and verified by AgentDNA; each verified turn is written to an audit-log NFT on Rubix.
 
-## Features
+> **Note:** This example still uses the legacy `dna.build()` / `dna.handle()` API. The newer ergonomic methods (`dna.envelope` / `dna.verify_reply` / `dna.verify_request` / `dna.sign_response`) are used by the other examples (`google_sheets`, `github`, `yahoo_finance`, `gemini_research_assistant`, `multi_agent_system`). Migrating this one is on the todo list.
 
-- **Secure Jira automation** using MCP tools  
-- **End‑to‑end signed messages** via AgentDNA  
-- **Trust verification** on every server → client round‑trip  
-- **Audit trail** for every Jira tool execution  
-- **Streamlit‑based** UI with:
-  - Conversation history  
-  - One‑click history viewer   
+## Tools exposed by the MCP server
 
-## Components
-
-### 1. MCP Server (`server.py`)
-Provides Jira tools:
-
-| Tool | Description |
+| Tool | What it does |
 |------|-------------|
 | `search_issues` | JQL search via Jira v3 `/search/jql` |
 | `get_issue` | Retrieve issue details |
 | `create_issue` | Create a new issue (ADF description support) |
-| `add_comment` | Add comment to issue |
-| `transition_issue` | Move issue across workflow |
+| `add_comment` | Add a comment to an issue |
+| `transition_issue` | Move an issue across the workflow |
 
-Each tool receives:
-- `dna_envelope` (signed host message)
-- Performs Jira call
-- Returns **signed agent response** using AgentDNA
+## Prerequisites
 
-### 2. MCP Client / UI (`app.py`)
-- Uses **Gemini 2.5 Flash** for natural language interpretation  
-- Wraps tool calls inside **AgentDNA host envelopes**  
-- Verifies server responses  
-- Writes results to **Rubix NFT** for immutable logs 
+- Python **3.11+** and [uv](https://docs.astral.sh/uv/getting-started/installation/)
+- A **Jira Cloud account** + [API token](https://id.atlassian.com/manage-profile/security/api-tokens)
+- A **Google AI Studio API key** ([get one](https://aistudio.google.com/app/apikey))
+- An [AgentDNA API key](https://agentdna.io/beta) (sign up for the Beta)
 
-
-## Environment Variables
-
-```
-GEMINI_API_KEY
-AGENTDNA_API_KEY
-JIRA_BASE_URL
-JIRA_EMAIL
-JIRA_API_TOKEN
-```
-
-## Running the UI
+## 1. Configure `.env`
 
 ```bash
-streamlit run app.py
+cp .env.sample .env
 ```
 
-The MCP server is automatically launched per request via Python stdio.
+Then edit `.env` and fill in the values:
 
-## Examples & Usage
-Ask your AI assistant to:
-- **Listing** Issues: list my open issues
-- **Creating** a New Jira Issue: Create a new task in KAN.
-Summary: Add login button
-Description: Implement UI button for login
-- **Adding a Comment** to an Issue: Add a comment to KAN-12 saying "Reviewed and approved"
-- **Transitioning an Issue**: Move KAN-12 to In Progress
-
-## Audit Viewer
-
-The UI includes **History Records** which fetches all states  
-
-### Sequence Diagram
-
-```mermaid
-sequenceDiagram
-    participant User
-    participant UI as Streamlit UI (Jira MCP Agent)
-    participant Host as Host App (run_agent_turn)
-    participant DNA_H as AgentDNA (Host)
-    participant MCP_C as MCP Client (stdio)
-    participant MCP_S as Jira MCP Server
-    participant DNA_R as AgentDNA (Remote)
-    participant Jira as Jira API
-    participant Rubix as Rubix Node / NFT
-
-    User->>UI: Enter Jira request
-    UI->>Host: Send text query
-    Host->>Host: Gemini LLM decides tool or answer
-    Host->>DNA_H: dna.build() creates signed host envelope
-    DNA_H-->>Host: host_json
-
-    Host->>MCP_C: call_tool(tool, args, dna_envelope)
-    MCP_C->>MCP_S: Send MCP request over stdio
-
-    MCP_S->>DNA_R: Verify host envelope (kind="remote")
-    DNA_R-->>MCP_S: original_message + host_block + trust_issues
-
-    MCP_S->>Jira: REST API call (search/create/update)
-    Jira-->>MCP_S: REST response (JSON)
-
-    MCP_S->>DNA_R: dna.build agent response envelope
-    DNA_R-->>MCP_S: combined_json (host + agent)
-
-    MCP_S-->>MCP_C: TextContent(combined_json)
-    MCP_C-->>Host: Return tool_output_text
-
-    Host->>DNA_H: dna.handle(kind="host", execute_nft=True)
-    note over DNA_H: If inject_fake=true → tamper + mark invalid
-
-    DNA_H->>Rubix: Execute NFT write
-    Rubix-->>DNA_H: NFT state stored
-
-    DNA_H-->>Host: verified messages + status
-
-    Host->>Host: Gemini generates final answer
-    Host-->>UI: Natural language reply
-    UI-->>User: Show verified/unverified result
-
-    User->>UI: Click "History Records"
-    UI->>Rubix: Read NFT states
-    Rubix-->>UI: Signed history log
+```env
+AGENTDNA_API_KEY=...
+GEMINI_API_KEY=...
+JIRA_BASE_URL=https://your-domain.atlassian.net
+JIRA_EMAIL=you@example.com
+JIRA_API_TOKEN=...
 ```
+
+## 2. Run
+
+```bash
+uv run streamlit run app.py
+```
+
+That installs deps into `.venv/` on first run and opens the UI at <http://localhost:8501>. `server.py` is spawned automatically over stdio.
+
+## What you can ask
+
+- `List my open issues`
+- `Create a new task in KAN. Summary: Add login button. Description: Implement UI button for login`
+- `Add a comment to KAN-12 saying "Reviewed and approved"`
+- `Move KAN-12 to In Progress`
+
+The host LLM (Gemini 2.5 Flash) decides which tool to call and fills in the args.
+
+## Trust layer flow
+
+```
+User → Streamlit UI → Gemini (decides tool)
+                       ↓
+                       dna.build(...)            ← signs host envelope
+                       ↓
+              MCP call_tool(args + dna_envelope)
+                       ↓
+              MCP Server: dna.handle(raw_text=…) ← verify host
+              MCP Server: Jira REST call
+              MCP Server: dna.build(response=…) ← signs reply
+                       ↓
+              Host: dna.handle(resp_parts=…)    ← verify + NFT write
+                       ↓
+                  Final Gemini answer → UI
+```
+
+The sidebar's **History Records** button reads back the chain history. Each turn is one immutable record signed by the host's DID.
+
+## Troubleshooting
+
+**`401 / 403` from Jira** — `JIRA_EMAIL` + `JIRA_API_TOKEN` combination wrong, or the token doesn't have access to the project you're referencing.
+
+**`API_KEY_INVALID`** — your Gemini key is dead. Regenerate at <https://aistudio.google.com/app/apikey>.
+
+**`Decoded key is not an uncompressed secp256k1 key`** — older `rubix-py 0.7.x` keystore. Move it aside:
+```bash
+mv ~/.agentdna/account/jira_host   ~/.agentdna/account/jira_host.compressed-bak
+mv ~/.agentdna/account/jira_server ~/.agentdna/account/jira_server.compressed-bak
+```
+Next launch regenerates the keys.
+
 ## License
-MIT License 
 
+MIT

@@ -14,9 +14,9 @@ from a2a.types import (
 )
 from app.agent import KaitlynAgent
 from app.agent_executor import KaitlynAgentExecutor
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

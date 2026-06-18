@@ -1,0 +1,25 @@
+import hashlib
+from multiformats_cid.cid import CIDv0
+
+def get_agent_card_id(agent_id: str) -> str:
+    """
+    Get a deterministic Agent Card ID based on the provided agent name.
+    """
+
+    return get_id(agent_id)
+
+def get_user_card_id(user_id: str) -> str:
+    """
+    Get a deterministic User Card ID based on the provided user name.
+    """
+
+    return get_id(user_id)
+
+def get_id(name: str) -> str:
+    """
+    Get a deterministic ID based on the provided name.
+    """
+
+    digest = hashlib.sha256(f"{name}".encode("utf-8")).digest()
+    multihash_bytes = bytes([0x12, len(digest)]) + digest
+    return CIDv0(multihash_bytes).encode().decode("utf-8")

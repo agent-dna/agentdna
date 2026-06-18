@@ -2,15 +2,17 @@ import os
 import sys
 import json
 import asyncio
+from datetime import datetime, timezone
+
 import streamlit as st
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from google import genai
 
 from agentdna import AgentDNA
 from mcp import ClientSession, StdioServerParameters, types as mcp_types
 from mcp.client.stdio import stdio_client
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 AGENTDNA_API_KEY = os.environ.get("AGENTDNA_API_KEY")
 HOST_AGENT_NAME = os.environ.get("HOST_AGENT_NAME")
@@ -23,7 +25,10 @@ if not HOST_AGENT_NAME:
 if not MCP_TOOL_NAME:
     raise RuntimeError("Missing MCP_TOOL_NAME")
 
-dna = AgentDNA(alias=HOST_AGENT_NAME, role="host", api_key=AGENTDNA_API_KEY)
+# Host AgentDNA — pure signer, never writes to chain (enable_nft=False).
+# The user (constructed below from a sidebar alias) owns the audit-log NFT.
+host_dna = AgentDNA(alias=HOST_AGENT_NAME, api_key=AGENTDNA_API_KEY, kind="agent", enable_nft=False)
+DEFAULT_USER_ALIAS = f"{HOST_AGENT_NAME}_USER"
 
 SYSTEM_PROMPT = """
 You are a Yahoo Finance assistant.
@@ -39,8 +44,13 @@ Rules:
 - Do not use markdown or code fences.
 """
 
+
 def init_gemini():
-    return genai.Client(api_key=os.environ["GEMINI_API_KEY"])
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        raise RuntimeError("Set GEMINI_API_KEY (or GOOGLE_API_KEY) in .env")
+    return genai.Client(api_key=api_key)
+
 
 def extract_json(raw: str) -> str:
     raw = (raw or "").strip()
@@ -58,7 +68,8 @@ def extract_json(raw: str) -> str:
 
     return raw
 
-async def run_agent_turn(user_input: str):
+
+async def run_agent_turn(user_input: str, user_dna):
     server_params = StdioServerParameters(
         command=sys.executable,
         args=["server.py"],
@@ -85,58 +96,44 @@ async def run_agent_turn(user_input: str):
             tool_name = decision["tool"]
             tool_args = decision.get("args", {})
 
+            # ── AgentDNA: user signs intent → host signs over it → MCP →
+            #             user verifies & writes the audit-log NFT ─────────
+            user_signed = user_dna.build({
+                "intent": user_input,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            })
+
             host_message = {
                 "user_query": user_input,
                 "tool_name": tool_name,
                 "tool_args": tool_args,
             }
-
-            envelope = dna.build(
-                original_message=json.dumps(host_message),
-                state={"channel": "mcp_yahoo"},
-            )
-
-            tool_args_with_dna = {
-                **tool_args,
-                "dna_envelope": envelope["host_json"],
-            }
-
-            # ───────── sidebar-controlled tampering ─────────
-            if st.session_state.get("inject_fake", False):
-                tool_args_with_dna["inject_fake"] = True
+            env = host_dna.build(host_message, parent=user_signed)
 
             tool_result = await session.call_tool(
                 tool_name,
-                arguments=tool_args_with_dna,
+                arguments={**tool_args, "dna_envelope": str(env)},
             )
 
-            parts = []
-            for block in tool_result.content:
-                if isinstance(block, mcp_types.TextContent):
-                    parts.append(block.text)
+            tool_output_text = "\n".join(
+                block.text for block in tool_result.content
+                if isinstance(block, mcp_types.TextContent)
+            )
 
-            tool_output_text = "\n".join(parts)
-
-            trust = await dna.handle(
-                resp_parts=[{"text": tool_output_text}],
-                original_task=json.dumps(host_message),
+            result = await user_dna.handle(
+                tool_output_text,
+                original=env,
                 remote_name=MCP_TOOL_NAME,
-            )
-
-            verification_status = getattr(
-                getattr(dna, "handler", None),
-                "last_verification_status",
-                "unknown",
             )
 
             final_prompt = f"""
 User asked: {user_input}
 
-Tool output:
-{tool_output_text}
+Verified tool output:
+{json.dumps(result.payload, indent=2)}
 
-Verification status: {verification_status}
-Trust issues: {json.dumps(trust.get("trust_issues"))}
+Verification status: {result.verification_status}
+Trust issues: {json.dumps(result.trust_issues)}
 
 Answer plainly.
 """
@@ -148,34 +145,18 @@ Answer plainly.
 
             return final.text.strip()
 
-def run_agent_sync(user_input: str):
-    return asyncio.run(run_agent_turn(user_input))
+
+def run_agent_sync(user_input: str, user_dna):
+    return asyncio.run(run_agent_turn(user_input, user_dna))
+
 
 # ─────────────────────────────
 # Streamlit UI
 # ─────────────────────────────
 
 st.set_page_config("Yahoo Finance MCP Demo")
-
-st.sidebar.subheader("Controls")
-
-if "inject_fake" not in st.session_state:
-    st.session_state.inject_fake = False
-
-st.sidebar.checkbox(
-    "Simulate tampering",
-    key="inject_fake",
-)
-
-handler = getattr(dna, "handler", None)
-if handler is not None:
-    handler.inject_fake = bool(st.session_state.inject_fake)
-
-# ───────── Main UI ─────────
-
 st.title("Yahoo Finance MCP Agent")
 
-# Disclaimer
 st.info(
     "⚠️ **Disclaimer**  \n"
     "This demo uses Yahoo Finance data accessed via automated web retrieval techniques. "
@@ -183,7 +164,6 @@ st.info(
     "data availability and response consistency are best-effort and may occasionally be incomplete or unavailable."
 )
 
-# Example prompts
 st.markdown("### Example Prompts")
 st.code("What is the current price of AAPL?", language="text")
 st.code("Show me the last 5 days of price history for TSLA.", language="text")
@@ -193,6 +173,40 @@ st.markdown("---")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+if "chain_history" not in st.session_state:
+    st.session_state.chain_history = []
+if "user_alias" not in st.session_state:
+    st.session_state.user_alias = DEFAULT_USER_ALIAS
+
+# ── Sidebar: user identity, NFT + chain history ──
+with st.sidebar:
+    st.subheader("Signed in as")
+    new_alias = st.text_input(
+        "User alias",
+        value=st.session_state.user_alias,
+        help="Your chain identity. Each unique alias gets its own DID + audit-log NFT.",
+    )
+    if new_alias != st.session_state.user_alias or "user_dna" not in st.session_state:
+        st.session_state.user_alias = new_alias
+        st.session_state.user_dna = AgentDNA(alias=new_alias, api_key=AGENTDNA_API_KEY, kind="user")
+
+    st.divider()
+    st.subheader("Audit Log")
+    nft_id = st.session_state.user_dna.nft_token or ""
+    st.caption(f"NFT: `{nft_id}`" if nft_id else "NFT: (none yet)")
+
+    if st.button("History Records", disabled=not nft_id):
+        with st.spinner("Fetching NFT data…"):
+            st.session_state.chain_history = st.session_state.user_dna.history()
+        st.rerun()
+
+# Chain history — foldable JSON tree
+if st.session_state.chain_history:
+    with st.expander(
+        f"Chain History — NFT `{nft_id}` — {len(st.session_state.chain_history)} record(s)",
+        expanded=True,
+    ):
+        st.json(st.session_state.chain_history, expanded=2)
 
 for msg in st.session_state.messages:
     st.markdown(f"**{msg['role'].title()}:** {msg['content']}")
@@ -202,6 +216,6 @@ query = st.text_area("Ask about a stock:")
 if st.button("Send") and query.strip():
     st.session_state.messages.append({"role": "user", "content": query})
     with st.spinner("Working..."):
-        answer = run_agent_sync(query)
+        answer = run_agent_sync(query, st.session_state.user_dna)
     st.session_state.messages.append({"role": "agent", "content": answer})
     st.rerun()

@@ -18,9 +18,9 @@ from a2a.types import (
 )
 from agent import SchedulingAgent
 from agent_executor import SchedulingAgentExecutor
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)

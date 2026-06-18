@@ -1,5 +1,5 @@
 {
-  "chain_url": "https://chain-connector-1-dev.rubix.net/",
+  "chain_url": "http://localhost:20001",
   "nft": {
     "artifact_file":"",
     "metadata_file":"",

@@ -13,7 +13,7 @@ resolution-markers = [
 [[package]]
 name = "agent-dna"
 version = "0.3.1"
-source = { directory = "../../" }
+source = { editable = "../../" }
 dependencies = [
     { name = "py-multiformats-cid" },
     { name = "python-dotenv" },
@@ -538,7 +538,7 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "agent-dna", directory = "../../" },
+    { name = "agent-dna", editable = "../../" },
     { name = "google-genai", specifier = ">=1.0.0" },
     { name = "langfuse", specifier = ">=4.0.0" },
     { name = "nest-asyncio", specifier = ">=1.6.0" },

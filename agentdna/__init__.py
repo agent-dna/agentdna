@@ -1,16 +1,24 @@
 """
-rubix.agent.dna
-Public interface for Rubix agent DNA utilities.
+agentdna
+Public interface for AgentDNA utilities.
 """
 
-from .trust import RubixTrustService
-from .handler import RubixMessageHandler
-from .node_client import NodeClient
-from .core import AgentDNA
+from .core import AgentDNA, SignedEnvelope, VerifyResult, RequestContext, deploy_card
+from .trust import RubixTrustService, resolve_chain_url
+from .cbac import CBAC, Card, CardCheck, CBACResult, parse_skill_md
 
 __all__ = [
+    "AgentDNA",
+    "SignedEnvelope",
+    "VerifyResult",
+    "RequestContext",
     "RubixTrustService",
-    "RubixMessageHandler",
-    "NodeClient",
-    "AgentDNA"
+    "resolve_chain_url",
+    # CBAC
+    "CBAC",
+    "Card",
+    "CardCheck",
+    "CBACResult",
+    "parse_skill_md",
+    "deploy_card",
 ]

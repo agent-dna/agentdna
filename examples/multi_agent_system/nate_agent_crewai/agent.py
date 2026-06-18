@@ -5,10 +5,10 @@ from typing import Type
 
 from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools import BaseTool
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel, Field
 
-load_dotenv()
+load_dotenv(find_dotenv())
 
 
 def generate_calendar() -> dict[str, list[str]]:
@@ -93,7 +93,7 @@ class SchedulingAgent:
         """Initializes the SchedulingAgent."""
         if os.getenv("GOOGLE_API_KEY"):
             self.llm = LLM(
-                model="gemini/gemini-2.0-flash",
+                model="gemini/gemini-2.5-flash",
                 api_key=os.getenv("GOOGLE_API_KEY"),
             )
         else:

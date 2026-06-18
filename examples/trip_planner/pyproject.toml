@@ -1,0 +1,13 @@
+[project]
+name = "trip-planner"
+version = "0.1.0"
+description = "Trip-planning multi-agent demo of AgentDNA's recursive Chain of Custody (depth ≥ 3)"
+requires-python = ">=3.11"
+dependencies = [
+    "agent-dna",
+    "python-dotenv",
+    "streamlit>=1.36",
+]
+
+[tool.uv.sources]
+agent-dna = { path = "../../", editable = true }

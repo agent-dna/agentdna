@@ -1,5 +1,5 @@
 version = 1
-revision = 2
+revision = 3
 requires-python = ">=3.11"
 resolution-markers = [
     "python_full_version >= '3.13'",
@@ -79,7 +79,7 @@ requires-dist = [
     { name = "py-multiformats-cid", specifier = ">=0.4.4" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "requests", specifier = ">=2.0.0" },
-    { name = "rubix-py", specifier = ">=0.7.0" },
+    { name = "rubix-py", specifier = ">=1.0.0" },
 ]
 
 [[package]]
@@ -741,7 +741,7 @@ name = "langgraph-checkpoint"
 version = "2.0.26"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "langchain-core", marker = "python_full_version < '4.0'" },
+    { name = "langchain-core", marker = "python_full_version < '4'" },
     { name = "ormsgpack" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c5/61/e2518ac9216a4e9f4efda3ac61595e3c9e9ac00833141c9688e8d56bd7eb/langgraph_checkpoint-2.0.26.tar.gz", hash = "sha256:2b800195532d5efb079db9754f037281225ae175f7a395523f4bf41223cbc9d6", size = 37874, upload-time = "2025-05-15T17:31:22.466Z" }
@@ -1254,7 +1254,7 @@ wheels = [
 
 [[package]]
 name = "rubix-py"
-version = "0.7.0"
+version = "1.0.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "bip32utils" },
@@ -1266,9 +1266,9 @@ dependencies = [
     { name = "py-cid" },
     { name = "requests" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/2c/bd/c1d61bd0e9b8d35dfb19e6ce6a4608ceae488ac4ffcad538e79dccebedfc/rubix_py-0.7.0.tar.gz", hash = "sha256:e660c5476839ae9c77718b4887534ba176fd599be42cf04d6ddfdcca5439a1f3", size = 20126, upload-time = "2025-12-01T14:38:46.073Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ba/38/ec66e2c57a96e9e237601248ee16683425641041ba500f634a1da8ac7af7/rubix_py-1.0.2.tar.gz", hash = "sha256:a8b48e8d925be74945dff11e63762f1c78a3e2ce77e7927ffc6cf348ac6e65fb", size = 20339, upload-time = "2026-04-30T19:27:28.083Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/6c/910e63e56cfd7f0132c2e91c38984faf9e9c26357c4b4fa6032e46fdb7a7/rubix_py-0.7.0-py3-none-any.whl", hash = "sha256:952ea8191a56d761df4897f985625f7dd8bdf448c460f83344f90ccfa336d576", size = 19630, upload-time = "2025-12-01T14:38:45.067Z" },
+    { url = "https://files.pythonhosted.org/packages/43/b3/a4f0c5aa1d2603f5f84a23bd580f8fb4e6a950896cdfca9c4ccac7ed5983/rubix_py-1.0.2-py3-none-any.whl", hash = "sha256:adff8cd544e71de45689e0080d9b1e35ab265f0664a9318797a96f75d61be04d", size = 20145, upload-time = "2026-04-30T19:27:26.975Z" },
 ]
 
 [[package]]
