@@ -2,7 +2,8 @@ import os
 import json
 import base64
 
-from typing import Optional, Union, Any
+from datetime import datetime, timezone
+from typing import Any
 from pathlib import Path
 from dataclasses import asdict
 
@@ -352,6 +353,7 @@ class AgentDNA:
             payload=payload,
             metadata=self.metadata or {},
             parent_envelope=parent_envelope,
+            epoch=int(datetime.now(timezone.utc).timestamp())
         )
 
         signature = self.provenance.sign_envelope(

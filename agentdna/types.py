@@ -50,6 +50,9 @@ class Envelope:
     # Message, decision, response, verification result, etc.
     payload: dict[str, Any]
 
+    # Epoch at which the envelop is formed
+    epoch: int
+
     # Additional information that may evolve over time.
     metadata: dict[str, Any] = field(default_factory=dict)
 
@@ -58,8 +61,6 @@ class Envelope:
 
     # Previous envelope in the provenance chain.
     parent_envelope: Envelope | None = None
-
-
 
 @dataclass
 class IntentWorkflow:
