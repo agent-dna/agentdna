@@ -406,3 +406,9 @@ class AgentDNA:
             envelope=workflow.envelope,
             verification=verification,
         )
+    
+    def __register_user():
+        pass
+
+    def __register_agent():
+        pass

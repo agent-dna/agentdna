@@ -13,13 +13,13 @@ from typing import (
     Any, List, Tuple
 )
 from pathlib import Path
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from .provenance import Provenance
-from .types import ActorCard, MODEL_EMBEDDINGS_DIR
+from .types import ActorCard, MODEL_EMBEDDINGS_DIR, Envelope
 
-import numpy as np
+
 from sentence_transformers import SentenceTransformer
 
 _DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5" # bi-encoder for Tier 1 cosine
@@ -189,7 +189,7 @@ class CBAC:
         self._nli_labels: Dict[int, str] = {}
 
         # Make embeddings config dir
-        self.embeddings_dir = os.path.join(self.provenance.config_path, MODEL_EMBEDDINGS_DIR)
+        self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
         os.makedirs(
             self.embeddings_dir,
             exist_ok=True
@@ -582,7 +582,7 @@ class CBAC:
         self,
         agent_id: str,
         action_intent: str,
-        envelope: dict,
+        envelope: Envelope,
         app_url: str,
         app_method: str = "POST",
         app_headers: dict | None = None,
@@ -593,10 +593,11 @@ class CBAC:
             app_body = json.dumps(app_body)
             app_headers = {"Content-Type": "application/json", **(app_headers or {})}
 
+        envelope_dict = asdict(envelope)
         payload = {
             "agent_id": agent_id,
             "action_intent": action_intent,
-            "envelope": envelope,
+            "envelope": envelope_dict,
             "app_request": {
                 "url": app_url,
                 "method": app_method,
