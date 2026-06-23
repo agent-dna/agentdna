@@ -321,7 +321,7 @@ class AgentDNA:
         recipient_actor_id: str,
         recipient_actor_name: str,
         recipient_actor_type: str,
-        payload: dict,
+        payload: str,
         workflow: IntentWorkflow | None = None,
         remarks: str = ""
     ) -> IntentWorkflow:

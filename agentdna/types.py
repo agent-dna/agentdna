@@ -48,7 +48,7 @@ class Envelope:
     to: Actor
 
     # Message, decision, response, verification result, etc.
-    payload: dict[str, Any]
+    payload: str
 
     # Epoch at which the envelop is formed
     epoch: int
