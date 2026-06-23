@@ -1,3 +1,4 @@
+import os
 import json
 
 from typing import Any
@@ -9,6 +10,7 @@ from rubix.did import online_signature_verify
 from .types import Envelope
 from .helpers import canonicalize_envelope
 from .id import get_agent_card_id
+from .config import get_default_config_dir
 
 class Provenance:
     def __init__(
@@ -33,10 +35,20 @@ class Provenance:
             api_key=api_key
         )
 
+        self.config_dir = (
+            config_path
+            if config_path
+            else get_default_config_dir()
+        )
+        os.makedirs(
+            self.config_dir,
+            exist_ok=True,
+        )
+
         self.provenance_executor = Signer(
             rubixClient=provenance_client,
             alias=name,
-            config_path=config_path
+            config_path=self.config_dir
         )
 
         self.provenance_querier = Querier(
@@ -44,7 +56,6 @@ class Provenance:
         )
         
         self.provenance_id = self.provenance_executor.did
-        self.config_path = config_path
 
     def create_new_provenance_card(
         self, 
