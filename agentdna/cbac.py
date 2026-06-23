@@ -1,67 +1,28 @@
-"""
-CBAC — Context-Based Access Control for AgentDNA.
-
-CBAC is the second pillar of the paper (§4.2). Where CoCA proves *who*
-acted, CBAC proves *what they were allowed to do*.
-
-Each agent carries a signed skill.md "card" — deployed as an NFT on
-Rubix by the IT admin — and attaches the card's NFT hash to every
-envelope it signs. When a request reaches a resource, the CBAC engine
-walks the chain (CoCA), fetches each layer's card, and runs
-deterministic policy checks:
-
-  - is the action in `allowed-actions`?
-  - is it in `forbidden-actions` (overrides allowed)?
-  - do the args fit `constraints`?
-  - for forwarding hops, is the next agent in `can-delegate-to`?
-  - are the `requires` preconditions satisfied?
-
-v1 is deterministic-only. V2: The gray-zone LLM check that reads the
-markdown body
-
-Usage
------
-
-    # Construction — set on the AgentDNA instance
-    dna = AgentDNA(
-        alias="FlightAgent",
-        api_key=API_KEY,
-        cbac=True,
-        card_nft="Qm...flight...",
-    )
-
-    # Admin — deploy a card from a skill.md file (standalone helper,
-    # outside the CBAC engine — same pattern as user enrollment).
-    nft_hash = deploy_card(admin_dna, "skills/flight.md")
-
-    # Inbound — CoCA + CBAC run inside handle() when cbac=True
-    ctx = await dna.handle(envelope)
-    ctx.cbac_result.decision    # "allow" | "deny" | "advise"
-    ctx.cbac_result.trace       # per-layer card checks
-"""
-
-from __future__ import annotations
-
 import asyncio
 import base64
 import hashlib
 import json
 import pickle
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
 import requests
 import yaml
+import os
 
-from .trust import RubixTrustService
+from typing import (
+    Optional, Callable, Dict, 
+    Any, List, Tuple
+)
+from pathlib import Path
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
-# ──────────────────────────────────────────────────────────────────────────────
-# Semantic pipeline defaults
-# ──────────────────────────────────────────────────────────────────────────────
+from .provenance import Provenance
+from .types import ActorCard, MODEL_EMBEDDINGS_DIR
 
-_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"       # bi-encoder for Tier 1 cosine
+import numpy as np
+from sentence_transformers import SentenceTransformer
+
+_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5" # bi-encoder for Tier 1 cosine
 _DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
 
 # Gap thresholds: allow when gap > +0.12, deny when gap < -0.08, else escalate.
@@ -73,16 +34,12 @@ _DENY_GAP_DEFAULT: float = 0.08
 _ENTAILMENT_THRESHOLD: float = 0.55
 _CONTRADICTION_THRESHOLD: float = 0.60
 
-# Embedding cache: one .pkl per agent, keyed by SHA-256 of agent_id.
-_CACHE_DIR = Path.home() / ".agentdna" / "embedding_cache"
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Dataclasses returned to adopters
-# ──────────────────────────────────────────────────────────────────────────────
+REQUIRED_FRONTMATTER_KEYS = (
+    "agent-did", "issued-by", "issued-at", "expires-at", "allowed-actions",
+)
 
 @dataclass
-class Card:
+class SkillsCard:
     """Parsed skill.md card. Frontmatter fields + the markdown body."""
     agent_did:         str
     agent_name:        str
@@ -95,7 +52,6 @@ class Card:
     can_delegate_to:   List[str] = field(default_factory=list)
     requires:          Dict[str, Any] = field(default_factory=dict)
     body:              str = ""
-    nft_address:       Optional[str] = None
     raw_frontmatter:   Dict[str, Any] = field(default_factory=dict)
 
 
@@ -103,12 +59,11 @@ class Card:
 class CardCheck:
     """Result of CBAC check for one layer in the chain."""
     layer_did:    str
-    card_nft:     Optional[str]
-    card:         Optional[Card]
+    card_id:     Optional[str]
+    card:         Optional[SkillsCard]
     action:       Optional[str]
     passed:       bool
     reasons:      List[str] = field(default_factory=list)
-
 
 @dataclass
 class CBACResult:
@@ -117,17 +72,7 @@ class CBACResult:
     reason:      str = ""
     trace:       List[CardCheck] = field(default_factory=list)
 
-
-# ──────────────────────────────────────────────────────────────────────────────
-# skill.md parsing
-# ──────────────────────────────────────────────────────────────────────────────
-
-REQUIRED_FRONTMATTER_KEYS = (
-    "agent-did", "issued-by", "issued-at", "expires-at", "allowed-actions",
-)
-
-
-def parse_skill_md(text: str) -> Card:
+def parse_skill_md(text: str) -> SkillsCard:
     """
     Parse a skill.md (YAML frontmatter + markdown body) into a Card.
 
@@ -149,7 +94,7 @@ def parse_skill_md(text: str) -> Card:
     if missing:
         raise ValueError(f"skill.md missing required field(s): {', '.join(missing)}")
 
-    return Card(
+    return SkillsCard(
         agent_did=fm["agent-did"],
         agent_name=fm.get("agent-name", ""),
         issued_by=fm["issued-by"],
@@ -164,7 +109,6 @@ def parse_skill_md(text: str) -> Card:
         raw_frontmatter=fm,
     )
 
-
 def _parse_dt(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -173,63 +117,107 @@ def _parse_dt(value: Any) -> datetime:
         return datetime.fromisoformat(s)
     raise ValueError(f"unparseable timestamp: {value!r}")
 
+def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> str:
+    """Recursively gather every string found in an arbitrary blob.
 
-# ──────────────────────────────────────────────────────────────────────────────
-# CBAC engine
-# ──────────────────────────────────────────────────────────────────────────────
+    Format-agnostic: handles raw text, dicts, lists, and dataclasses/objects
+    (e.g. :class:`Card`) alike.
+
+    ``include_keys`` controls whether mapping *keys* are gathered alongside
+    values. For a large policy blob, keys are useful searchable vocabulary
+    (default). For a short intent, structural keys like ``action``/``params``
+    are pure scaffolding that would dilute the coverage score, so the intent
+    side passes ``include_keys=False`` to flatten values only.
+    """
+    if _depth > 6 or obj is None:
+        return ""
+    if isinstance(obj, str):
+        return obj
+    if isinstance(obj, (int, float, bool)):
+        return str(obj)
+    if isinstance(obj, dict):
+        parts: List[str] = []
+        for k, v in obj.items():
+            if include_keys:
+                parts.append(str(k))
+            parts.append(_collect_text(v, include_keys=include_keys, _depth=_depth + 1))
+        return " ".join(parts)
+    if isinstance(obj, (list, tuple, set)):
+        return " ".join(
+            _collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj
+        )
+    # Dataclass / arbitrary object → walk its __dict__.
+    data = getattr(obj, "__dict__", None)
+    if isinstance(data, dict):
+        return _collect_text(data, include_keys=include_keys, _depth=_depth + 1)
+    return str(obj)
+
+def _intended_action_text(intended_action: Any) -> str:
+    """Flatten an intended-action of *any* shape (str / dict / list / object)
+    into one string for tokenizing.
+
+    Format-agnostic by design — it reuses the same recursive flattener as the
+    policy side (:func:`_collect_text`), so no fixed key schema is assumed.
+    Common keys like ``action``/``description``/``params`` are picked up
+    automatically because their string values are gathered. Field *names* are
+    skipped (``include_keys=False``) — for a short intent they are structural
+    scaffolding that would only dilute the coverage score.
+    """
+    return _collect_text(intended_action, include_keys=False)
 
 class CBAC:
-    """
-    CBAC engine — deploys cards, fetches them from Rubix, and verifies
-    chains against policy.
-
-    Lives separately from ``core.AgentDNA``: ``core.py`` soft-imports
-    this module only when ``cbac=True`` was set on the AgentDNA
-    instance.
-    """
-
     def __init__(
         self,
-        trust: RubixTrustService,
-        *,
+        provenance: Provenance,
+        cbac_url: str,
         encoder_name: str = _DEFAULT_ENCODER,
         nli_model_name: str = _DEFAULT_NLI_MODEL,
         llm_backend: Optional[Callable] = None,
         allow_gap: float = _ALLOW_GAP_DEFAULT,
         deny_gap: float = _DENY_GAP_DEFAULT,
-    ) -> None:
-        self.trust = trust
-        self._card_cache: Dict[str, Card] = {}
+    ):
+        self.provenance = provenance
+        self.cbac_url = cbac_url
         self._encoder_name = encoder_name
         self._nli_model_name = nli_model_name
         self._llm_backend = llm_backend
         self._allow_gap = allow_gap
         self._deny_gap = deny_gap
-        # Lazy-loaded: only initialised on first verify_async call.
+
         self._encoder = None
         self._nli = None
         self._nli_labels: Dict[int, str] = {}
 
-    # ─── semantic model helpers ────────────────────────────────────────────
+        # Make embeddings config dir
+        self.embeddings_dir = os.path.join(self.provenance.config_path, MODEL_EMBEDDINGS_DIR)
+        os.makedirs(
+            self.embeddings_dir,
+            exist_ok=True
+        )
 
     def _get_encoder(self):
         if self._encoder is None:
-            from sentence_transformers import SentenceTransformer
             self._encoder = SentenceTransformer(self._encoder_name)
         return self._encoder
-
+    
     def _get_nli(self):
         if self._nli is None:
             from sentence_transformers.cross_encoder import CrossEncoder
             self._nli = CrossEncoder(self._nli_model_name)
             try:
+                if not self._nli.model:
+                    raise ValueError("NLI model is not initialsed")
                 id2label = self._nli.model.config.id2label
+
+                if id2label is None:
+                    raise ValueError("id2label is not initialised")
+
                 self._nli_labels = {i: lbl.lower() for i, lbl in id2label.items()}
             except AttributeError:
                 # Fallback for deberta NLI label order (contradiction/entailment/neutral)
                 self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
         return self._nli
-
+    
     def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
 
@@ -251,7 +239,7 @@ class CBAC:
         works for any skill.md schema — no hardcoded key names.
         """
         chunks: List[str] = []
-        if isinstance(policy, Card):
+        if isinstance(policy, SkillsCard):
             for key, value in policy.raw_frontmatter.items():
                 if isinstance(value, list):
                     for item in value:
@@ -280,7 +268,7 @@ class CBAC:
                     chunks.append(f"{key}: {value}")
             return chunks
         return []
-
+    
     def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
         """NLI-classify each chunk as allowed or forbidden.
 
@@ -303,42 +291,43 @@ class CBAC:
                 allowed.append(chunk)
         return allowed, forbidden
 
-    def _max_cosine(self, query_vec, chunk_vecs) -> float:
-        """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
-        import numpy as np
-        if chunk_vecs.shape[0] == 0:
-            return 0.0
-        sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
-        return float(np.max(sims))
-
-    async def _check1_drift(
+    def __get_latest_agent_policy(
         self,
-        user_intent: str,
-        agent_action: str,
-    ) -> Optional[Tuple[str, str]]:
-        """NLI drift check: does the agent's action contradict the user's intent?
-
-        Returns (decision, reason) if contradiction is strong enough, else None.
+        agent_id: str,
+    ) -> str:
         """
-        scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
-        contradiction = scores.get("contradiction", 0.0)
-        if contradiction >= _CONTRADICTION_THRESHOLD:
-            return (
-                "deny",
-                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
-                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
-            )
-        return None
+        Returns the latest decoded policy
+        associated with an agent.
+        """
 
-    # ─── embedding cache ───────────────────────────────────────────────────
+        actor_card_dict = self.provenance.get_latest_provenance_record(
+            actor_id=agent_id
+        )
 
-    def _cache_key(self, agent_id: str) -> Path:
+        actor_card = ActorCard(
+            **actor_card_dict
+        )
+
+        try:
+            return base64.b64decode(actor_card.policy).decode("utf-8")
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to decode policy for "
+                f"agent {agent_id}: {exc}"
+            ) from exc
+
+    def __cache_key(self, agent_id: str) -> Path:
         """Return the .pkl path for this agent's precomputed policy vectors."""
         digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
-        return _CACHE_DIR / f"{digest}.pkl"
+        return Path(self.embeddings_dir) / f"{digest}.pkl"
+    
+    def __save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
+        path = self.__cache_key(agent_id)
+        with path.open("wb") as f:
+            pickle.dump(data, f)
 
-    def _load_cache(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        path = self._cache_key(agent_id)
+    def __load_from_embeddings_dir(self, agent_id: str) -> Optional[Dict[str, Any]]:
+        path = self.__cache_key(agent_id)
         if not path.exists():
             return None
         try:
@@ -347,18 +336,10 @@ class CBAC:
         except Exception:
             return None
 
-    def _save_cache(self, agent_id: str, data: Dict[str, Any]) -> None:
-        _CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        path = self._cache_key(agent_id)
-        with path.open("wb") as f:
-            pickle.dump(data, f)
-
-    # ─── admin-facing precompute ───────────────────────────────────────────
-
     async def precompute_policy(self, agent_id: str) -> Dict[str, Any]:
         """
         Precompute and cache policy vectors for an agent.  Call this once
-        after deploying or updating the agent's policy NFT — not on every
+        after deploying or updating the agent's policy card — not on every
         inbound request.
 
         What it does
@@ -371,23 +352,20 @@ class CBAC:
 
         Returns the cached payload so callers can inspect it.
         """
-        import numpy as np
 
-        policy = await self._get_policy(agent_id)
+        policy = self.__get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
-
-        chunks = await asyncio.to_thread(self._flatten_policy_chunks, policy)
+        
+        chunks = self._flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
 
-        allowed_chunks, forbidden_chunks = await asyncio.to_thread(
-            self._classify_chunks, chunks
-        )
-
+        allowed_chunks, forbidden_chunks = self._classify_chunks(chunks)
         encoder = self._get_encoder()
         to_encode = allowed_chunks + forbidden_chunks
-        vecs = await asyncio.to_thread(encoder.encode, to_encode, normalize_embeddings=True)
+
+        vecs = encoder.encode(to_encode, normalize_embeddings=True)
 
         n_allowed = len(allowed_chunks)
         allowed_vecs = vecs[:n_allowed]
@@ -406,139 +384,38 @@ class CBAC:
             "encoder": self._encoder_name,
             "nli_model": self._nli_model_name,
         }
-        await asyncio.to_thread(self._save_cache, agent_id, payload)
+
+        await asyncio.to_thread(self.__save_to_embeddings_dir, agent_id, payload)
         return payload
-
-    # ─── fetch + verify a card from Rubix ─────────────────────────────────
     
-    def _message(self, resp: requests.Response) -> str:
-        try:
-            b = resp.json()
-            return (b.get("data") or {}).get("message") or b.get("message") or resp.text
-        except ValueError:
-            return resp.text
-    
-    def authorize_action(
+    async def __check1_drift(
         self,
-        agent_id: str,
-        action_intent: str,
-        envelope: dict,
-        *,
-        url: str,
-        method: str = "POST",
-        headers: dict | None = None,
-        body: str | dict | None = None,
-        chain_url: str = "http://localhost:8080",
-        timeout: float = 35.0,
-    ) -> requests.Response:
-        if isinstance(body, dict):
-            body = json.dumps(body)
-            headers = {"Content-Type": "application/json", **(headers or {})}
+        user_intent: str,
+        agent_action: str,
+    ) -> Optional[Tuple[str, str]]:
+        """NLI drift check: does the agent's action contradict the user's intent?
 
-        payload = {
-            "agent_id": agent_id,
-            "action_intent": action_intent,
-            "envelope": envelope,
-            "app_request": {
-                "url": url,
-                "method": method,
-                "headers": headers or {},
-                "body": body or "",
-            },
-        }
-
-        resp = requests.post(
-            f"{chain_url.rstrip('/')}/authorize-action",
-            json=payload,
-            timeout=timeout,
-        )
-
-        decision = resp.headers.get("X-CBAC-Decision")
-
-        if decision == "deny":
-            raise PermissionError(self._message(resp))
-        if decision == "error":
-            raise RuntimeError(self._message(resp))
-
-        return resp
-
-    def fetch_card(self, nft_address: str) -> Card:
-        """Pull a card NFT from Rubix and parse it. Cached after first hit."""
-        if nft_address in self._card_cache:
-            return self._card_cache[nft_address]
-
-        # Lazy import — chain query dep is optional at import time
-        from rubix.client import RubixClient
-        from rubix.querier import Querier
-
-        client = RubixClient(node_url=self.trust.base_url, timeout=300)
-        states = Querier(client).get_nft_states(
-            nft_address=nft_address,
-            only_latest_state=True,
-        )
-        if isinstance(states, dict):
-            states = [states]
-        if not states:
-            raise RuntimeError(f"No NFT state found for card {nft_address}")
-
-        skill_md_text = _extract_skill_md(states[0])
-        if skill_md_text is None:
-            raise RuntimeError(f"Card NFT {nft_address} has no skill_md field")
-
-        card = parse_skill_md(skill_md_text)
-        card.nft_address = nft_address
-        self._card_cache[nft_address] = card
-        return card
-
-    # ─── main entry point ─────────────────────────────────────────────────
-    async def _get_policy(self, agent_id: str) -> Optional[str]:
+        Returns (decision, reason) if contradiction is strong enough, else None.
         """
-        Fetch the agent's policy from the Provenance Layer.
+        scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
+        contradiction = scores.get("contradiction", 0.0)
+        if contradiction >= _CONTRADICTION_THRESHOLD:
+            return (
+                "deny",
+                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+            )
+        return None
+    
+    def _max_cosine(self, query_vec, chunk_vecs) -> float:
+        """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
+        import numpy as np
+        if chunk_vecs.shape[0] == 0:
+            return 0.0
+        sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
+        return float(np.max(sims))
 
-        Reads the latest agent-NFT state for ``agent_id``. The state's
-        ``data`` is a JSON string of the form::
-
-            {"type": "agent_nft", "agent_did": "...",
-             "agent_metadata": {...}, "policy": "<base64>"}
-
-        We parse it, pull the base64-encoded ``policy``, and decode it to the
-        raw policy text. :meth:`verify_async` is format-agnostic and scores
-        whatever text comes back. Returns ``None`` when no policy is present.
-        """
-        # Lazy import — chain query dep is optional at import time
-        from rubix.client import RubixClient
-        from rubix.querier import Querier
-        from .id import get_agent_card_id
-
-        agent_card_id = get_agent_card_id(agent_id)
-        client = RubixClient(node_url=self.trust.base_url, timeout=300)
-        # get_nft_states is a blocking network call — offload it so it doesn't
-        # stall the event loop when verify_async is awaited from a server.
-        agent_log = await asyncio.to_thread(
-            Querier(client).get_nft_states,
-            nft_address=agent_card_id,
-            only_latest_state=True,
-        )
-
-        # only_latest_state can return a bare dict instead of a list.
-        if isinstance(agent_log, dict):
-            agent_log = [agent_log]
-        if not agent_log:
-            raise RuntimeError(f"No NFT state found for card {agent_id}")
-
-        latest_agent_log = agent_log[-1]["data"]
-
-        # `data` is a JSON string — parse it to a dict.
-        record = json.loads(latest_agent_log)
-
-        # `policy` is base64-encoded policy text.
-        policy_b64 = record.get("policy")
-        if not policy_b64:
-            return None
-
-        return base64.b64decode(policy_b64).decode("utf-8")
-
-    async def verify_async(
+    async def verify_agent_app_interaction(
         self,
         agent_id: str,
         intended_action: Any,
@@ -599,14 +476,14 @@ class CBAC:
 
         # Check 1: NLI drift — only runs when caller supplies the root user intent.
         if user_intent and intent_text:
-            drift = await self._check1_drift(user_intent, intent_text)
+            drift = await self.__check1_drift(user_intent, intent_text)
             if drift is not None:
                 decision, reason = drift
                 return CBACResult(decision=decision, reason=reason)
 
         # Fetch current policy from chain — always, so we can detect updates.
         try:
-            current_policy = await self._get_policy(agent_id)
+            current_policy = self.__get_latest_agent_policy(agent_id)
         except Exception as e:
             return CBACResult(decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}")
         if not current_policy:
@@ -615,7 +492,7 @@ class CBAC:
         current_hash = hashlib.sha256(current_policy.encode()).hexdigest()
 
         # Load local cache and validate against current policy hash.
-        cached = await asyncio.to_thread(self._load_cache, agent_id)
+        cached = await asyncio.to_thread(self.__load_from_embeddings_dir, agent_id)
 
         if cached is None or cached.get("policy_hash") != current_hash:
             # Cache miss or policy updated on chain — recompute and persist.
@@ -700,417 +577,45 @@ class CBAC:
         if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
             return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
         return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
-
-    async def verify(self, ctx) -> CBACResult:
-        """
-        Run CBAC checks against a verified inbound ``RequestContext``.
-
-        Walks the delegation chain inside ``ctx.host_block``, fetches
-        each layer's card NFT, and runs deterministic policy checks.
-        Returns a structured ``CBACResult`` with per-layer trace.
-        """
-        # Lazy import to avoid circular reference at module load.
-        from .core import AgentDNA
-
-        host_block = ctx.host_block if ctx is not None else None
-        if not isinstance(host_block, dict):
-            return CBACResult(decision="deny", reason="No host block in context")
-
-        chain = AgentDNA._walk_chain(host_block)
-        # chain[0]  = outermost sender; chain[-1] = root user
-        # Skip the root user — users have intents, not action cards.
-        layers_to_check = chain[:-1] if len(chain) > 1 else chain
-
-        trace: List[CardCheck] = []
-        any_deny = False
-
-        # For each layer we need the "next hop" — the layer above it — to
-        # check `can-delegate-to`. For the outermost layer the next hop is
-        # the resource itself (whoever owns this CBAC engine), so we
-        # synthesise a stand-in {agent: <resource DID>} for that check.
-        resource_did = getattr(self.trust, "did", None)
-        for i, block in enumerate(layers_to_check):
-            if i > 0:
-                next_block = layers_to_check[i - 1]
-            elif resource_did:
-                next_block = {"agent": resource_did}
-            else:
-                next_block = None
-            check = await self._check_layer(block, next_block, ctx=ctx)
-            trace.append(check)
-            if not check.passed:
-                any_deny = True
-
-        if any_deny:
-            failed = [c.layer_did for c in trace if not c.passed]
-            return CBACResult(
-                decision="deny",
-                reason=f"Policy violations at: {', '.join(failed)}",
-                trace=trace,
-            )
-
-        return CBACResult(decision="allow", reason="All cards permit the chain", trace=trace)
-
-    # ─── per-layer checks ─────────────────────────────────────────────────
-
-    async def _check_layer(
+    
+    def authorise_agent_app_interaction(
         self,
-        block: Dict[str, Any],
-        next_block: Optional[Dict[str, Any]],
-        *,
-        ctx,
-    ) -> CardCheck:
-        layer_did = block.get("agent")
-        env = block.get("envelope") or {}
-        card_nft = env.get("agent_card_nft")
+        agent_id: str,
+        action_intent: str,
+        envelope: dict,
+        app_url: str,
+        app_method: str = "POST",
+        app_headers: dict | None = None,
+        app_body: str | dict | None = None,
+        app_timeout: float = 100.0,
+    ) -> requests.Response:
+        if isinstance(app_body, dict):
+            app_body = json.dumps(app_body)
+            app_headers = {"Content-Type": "application/json", **(app_headers or {})}
 
-        reasons: List[str] = []
+        payload = {
+            "agent_id": agent_id,
+            "action_intent": action_intent,
+            "envelope": envelope,
+            "app_request": {
+                "url": app_url,
+                "method": app_method,
+                "headers": app_headers or {},
+                "body": app_body or "",
+            },
+        }
 
-        # No card attached → deny (configurable in future; v1 is strict).
-        if not card_nft:
-            return CardCheck(
-                layer_did=layer_did or "<unknown>",
-                card_nft=None,
-                card=None,
-                action=None,
-                passed=False,
-                reasons=["No agent_card_nft attached to envelope"],
-            )
-
-        # Fetch the card.
-        try:
-            card = self.fetch_card(card_nft)
-        except Exception as e:
-            return CardCheck(
-                layer_did=layer_did or "<unknown>",
-                card_nft=card_nft,
-                card=None,
-                action=None,
-                passed=False,
-                reasons=[f"Card fetch failed: {e}"],
-            )
-
-        # Extract the action this layer is performing.
-        orig_msg = (
-            (env.get("payload") or {}).get("original_message")
-            or (env.get("payload") or {}).get("message")
-            or env.get("original_message")
-        )
-        action = _extract_action(orig_msg)
-
-        # ─── deterministic checks ───
-        # 1. Card binds to this agent's DID.
-        if card.agent_did != layer_did:
-            reasons.append(
-                f"Card agent-did={card.agent_did} does not match envelope signer {layer_did}"
-            )
-        # 2. Card not expired.
-        now = datetime.now(timezone.utc)
-        if card.expires_at < now:
-            reasons.append(f"Card expired at {card.expires_at.isoformat()}")
-        # 3. Action is in allowed-actions.
-        if action is None:
-            reasons.append("No action field in envelope's original_message")
-        else:
-            if action in card.forbidden_actions:
-                reasons.append(f"Action {action!r} is in forbidden-actions")
-            elif action not in card.allowed_actions:
-                reasons.append(
-                    f"Action {action!r} is not in allowed-actions "
-                    f"{card.allowed_actions}"
-                )
-        # 4. Constraints (numeric / string-list).
-        constraint_failures = _check_constraints(orig_msg, card.constraints)
-        reasons.extend(constraint_failures)
-        # 5. Delegation: if there's a layer above us, our card must allow that DID.
-        if next_block is not None and card.can_delegate_to:
-            next_did = next_block.get("agent")
-            if next_did and next_did not in card.can_delegate_to:
-                reasons.append(
-                    f"Delegation to {next_did} not permitted by can-delegate-to {card.can_delegate_to}"
-                )
-        # 6. `requires` preconditions — currently only `user-intent-contains`.
-        req_failures = _check_requires(card.requires, ctx)
-        reasons.extend(req_failures)
-
-        return CardCheck(
-            layer_did=layer_did or "<unknown>",
-            card_nft=card_nft,
-            card=card,
-            action=action,
-            passed=not reasons,
-            reasons=reasons,
+        resp = requests.post(
+            f"{self.cbac_url.rstrip('/')}/authorize-action",
+            json=payload,
+            timeout=app_timeout,
         )
 
+        decision = resp.headers.get("X-CBAC-Decision")
 
-# ──────────────────────────────────────────────────────────────────────────────
-# helpers
-# ──────────────────────────────────────────────────────────────────────────────
+        if decision == "deny":
+            raise PermissionError(resp.text)
+        if decision == "error":
+            raise RuntimeError(resp.text)
 
-# Lexical-semantics helpers for verify_async (deterministic intent matching).
-
-# Small stopword set — these words carry no policy signal so we drop them
-# before scoring overlap.
-_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "by", "can", "do", "for", "from",
-    "i", "in", "is", "it", "its", "me", "my", "of", "on", "or", "that", "the",
-    "this", "to", "want", "wants", "with", "would", "you", "your", "please",
-})
-
-# Tiny hand-curated synonym map: each token is folded to a canonical form so
-# policy and intent vocabularies meet in the middle. Pure data, no model.
-_SYNONYMS = {
-    "buy": "purchase", "purchasing": "purchase", "purchases": "purchase",
-    "book": "reserve", "booking": "reserve", "reservation": "reserve",
-    "send": "transfer", "sending": "transfer", "pay": "transfer",
-    "payment": "transfer", "remit": "transfer",
-    "fetch": "read", "get": "read", "retrieve": "read", "query": "read",
-    "write": "update", "edit": "update", "modify": "update", "change": "update",
-    "remove": "delete", "drop": "delete",
-}
-
-
-def _stem(word: str) -> str:
-    """Very light suffix stripping so book/books/booking collapse together."""
-    for suffix in ("ing", "ed", "es", "s"):
-        if len(word) > len(suffix) + 2 and word.endswith(suffix):
-            return word[: -len(suffix)]
-    return word
-
-
-def _normalize_tokens(text: str) -> set:
-    """Lowercase, split on non-alphanumerics, drop stopwords, fold synonyms,
-    then stem — yielding a comparable bag of policy/intent terms."""
-    out: set = set()
-    for raw in re.split(r"[^a-z0-9]+", (text or "").lower()):
-        if not raw or raw in _STOPWORDS:
-            continue
-        token = _SYNONYMS.get(raw, raw)
-        out.add(_stem(token))
-    return out
-
-
-def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> str:
-    """Recursively gather every string found in an arbitrary blob.
-
-    Format-agnostic: handles raw text, dicts, lists, and dataclasses/objects
-    (e.g. :class:`Card`) alike.
-
-    ``include_keys`` controls whether mapping *keys* are gathered alongside
-    values. For a large policy blob, keys are useful searchable vocabulary
-    (default). For a short intent, structural keys like ``action``/``params``
-    are pure scaffolding that would dilute the coverage score, so the intent
-    side passes ``include_keys=False`` to flatten values only.
-    """
-    if _depth > 6 or obj is None:
-        return ""
-    if isinstance(obj, str):
-        return obj
-    if isinstance(obj, (int, float, bool)):
-        return str(obj)
-    if isinstance(obj, dict):
-        parts: List[str] = []
-        for k, v in obj.items():
-            if include_keys:
-                parts.append(str(k))
-            parts.append(_collect_text(v, include_keys=include_keys, _depth=_depth + 1))
-        return " ".join(parts)
-    if isinstance(obj, (list, tuple, set)):
-        return " ".join(
-            _collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj
-        )
-    # Dataclass / arbitrary object → walk its __dict__.
-    data = getattr(obj, "__dict__", None)
-    if isinstance(data, dict):
-        return _collect_text(data, include_keys=include_keys, _depth=_depth + 1)
-    return str(obj)
-
-
-# Keys under which a policy *might* expose structured allow / forbid lists.
-# Purely best-effort — absence is fine; whole-text overlap still drives the
-# decision. Matched case-insensitively as substrings of the key.
-_ALLOW_KEY_HINTS = ("allow", "permit", "grant", "can", "capabilit", "scope")
-_FORBID_KEY_HINTS = ("forbid", "deny", "prohibit", "disallow", "block", "restrict")
-
-
-def _policy_signal_vocabs(policy: Any) -> tuple:
-    """Best-effort extraction of (allowed_vocab, forbidden_vocab) from a policy
-    of unknown shape. Returns empty sets when no such structure is present."""
-    allowed: set = set()
-    forbidden: set = set()
-
-    # Parsed Card has dedicated fields.
-    if isinstance(policy, Card):
-        allowed |= _normalize_tokens(" ".join(policy.allowed_actions))
-        forbidden |= _normalize_tokens(" ".join(policy.forbidden_actions))
-        return allowed, forbidden
-
-    # JSON-string policy → parse then recurse.
-    if isinstance(policy, str):
-        stripped = policy.lstrip()
-        if stripped.startswith(("{", "[")):
-            try:
-                return _policy_signal_vocabs(json.loads(policy))
-            except (TypeError, json.JSONDecodeError):
-                return allowed, forbidden
-        return allowed, forbidden
-
-    # Dict-shaped policy → scan keys for allow/forbid hints, at any depth.
-    if isinstance(policy, dict):
-        for k, v in policy.items():
-            key = str(k).lower()
-            if any(h in key for h in _FORBID_KEY_HINTS):
-                forbidden |= _normalize_tokens(_collect_text(v))
-            elif any(h in key for h in _ALLOW_KEY_HINTS):
-                allowed |= _normalize_tokens(_collect_text(v))
-            elif isinstance(v, dict):
-                a, f = _policy_signal_vocabs(v)
-                allowed |= a
-                forbidden |= f
-
-    return allowed, forbidden
-
-
-def _intended_action_text(intended_action: Any) -> str:
-    """Flatten an intended-action of *any* shape (str / dict / list / object)
-    into one string for tokenizing.
-
-    Format-agnostic by design — it reuses the same recursive flattener as the
-    policy side (:func:`_collect_text`), so no fixed key schema is assumed.
-    Common keys like ``action``/``description``/``params`` are picked up
-    automatically because their string values are gathered. Field *names* are
-    skipped (``include_keys=False``) — for a short intent they are structural
-    scaffolding that would only dilute the coverage score.
-    """
-    return _collect_text(intended_action, include_keys=False)
-
-
-def _extract_action(original_message: Any) -> Optional[str]:
-    """Pull the ``action`` field out of an envelope's original_message."""
-    if isinstance(original_message, str):
-        try:
-            obj = json.loads(original_message)
-        except (TypeError, json.JSONDecodeError):
-            return None
-        if isinstance(obj, dict):
-            return obj.get("action")
-        return None
-    if isinstance(original_message, dict):
-        return original_message.get("action")
-    return None
-
-
-def _payload_dict(original_message: Any) -> Dict[str, Any]:
-    if isinstance(original_message, dict):
-        return original_message
-    if isinstance(original_message, str):
-        try:
-            obj = json.loads(original_message)
-        except (TypeError, json.JSONDecodeError):
-            return {}
-        return obj if isinstance(obj, dict) else {}
-    return {}
-
-
-def _check_constraints(original_message: Any, constraints: Dict[str, Any]) -> List[str]:
-    """
-    v1 constraint grammar:
-        max-<key>     : payload value must be <= constraint value
-        min-<key>     : payload value must be >= constraint value
-        allowed-<key> : payload value must be in the list (or '*' wildcard allows all)
-    """
-    failures: List[str] = []
-    payload = _payload_dict(original_message)
-
-    for key, limit in constraints.items():
-        if key.startswith("max-"):
-            target = key[len("max-"):]
-            val = payload.get(target)
-            if val is None:
-                continue
-            try:
-                if float(val) > float(limit):
-                    failures.append(f"{target}={val} exceeds max {limit}")
-            except (TypeError, ValueError):
-                failures.append(f"{target}={val!r} not numeric for max check")
-        elif key.startswith("min-"):
-            target = key[len("min-"):]
-            val = payload.get(target)
-            if val is None:
-                continue
-            try:
-                if float(val) < float(limit):
-                    failures.append(f"{target}={val} below min {limit}")
-            except (TypeError, ValueError):
-                failures.append(f"{target}={val!r} not numeric for min check")
-        elif key.startswith("allowed-"):
-            target = key[len("allowed-"):]
-            val = payload.get(target)
-            if val is None:
-                continue
-            allowed = limit if isinstance(limit, list) else [limit]
-            if "*" in allowed:
-                continue
-            if val not in allowed:
-                failures.append(f"{target}={val!r} not in allowed list {allowed}")
-        # Unknown prefix — silently ignore so admins can extend later
-        # without breaking older verifiers.
-
-    return failures
-
-
-def _check_requires(requires: Dict[str, Any], ctx) -> List[str]:
-    """
-    v1 `requires` grammar:
-        user-intent-contains: [word, ...] — root user's intent text must
-            contain at least one of these keywords (case-insensitive).
-    """
-    failures: List[str] = []
-
-    needles = requires.get("user-intent-contains")
-    if needles:
-        intent = (ctx.user_intent or "").lower() if ctx is not None else ""
-        needles_list = needles if isinstance(needles, list) else [needles]
-        if not any(str(n).lower() in intent for n in needles_list):
-            failures.append(
-                f"user-intent {intent!r} does not contain any of {needles_list}"
-            )
-
-    return failures
-
-
-def _extract_skill_md(state: Dict[str, Any]) -> Optional[str]:
-    """Recursively search an NFT state dict for the skill_md field.
-    Also handles identity NFT format where policy is base64-encoded skill.md."""
-    if isinstance(state, dict):
-        if "skill_md" in state and isinstance(state["skill_md"], str):
-            return state["skill_md"]
-        # Identity NFT format: policy is base64-encoded skill.md content.
-        if "policy" in state and isinstance(state["policy"], str) and state.get("type") == "agent_nft":
-            try:
-                decoded = base64.b64decode(state["policy"]).decode("utf-8")
-                if decoded.strip().startswith("---"):
-                    return decoded
-            except Exception:
-                pass
-        for v in state.values():
-            if isinstance(v, str):
-                stripped = v.lstrip()
-                if stripped.startswith(("{", "[")):
-                    try:
-                        parsed = json.loads(v)
-                        found = _extract_skill_md(parsed)
-                        if found:
-                            return found
-                    except (TypeError, json.JSONDecodeError):
-                        pass
-            elif isinstance(v, (dict, list)):
-                found = _extract_skill_md(v)
-                if found:
-                    return found
-    elif isinstance(state, list):
-        for item in state:
-            found = _extract_skill_md(item)
-            if found:
-                return found
-    return None
+        return resp
