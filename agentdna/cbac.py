@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from .provenance import Provenance
-from .types import ActorCard, MODEL_EMBEDDINGS_DIR, Envelope
+from .types import ActorCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 
 from sentence_transformers import SentenceTransformer
@@ -582,7 +582,7 @@ class CBAC:
         self,
         agent_id: str,
         action_intent: str,
-        envelope: Envelope,
+        envelope: IntentWorkflow,
         app_url: str,
         app_method: str = "POST",
         app_headers: dict | None = None,
