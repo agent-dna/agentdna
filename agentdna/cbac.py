@@ -316,18 +316,18 @@ class CBAC:
                 f"agent {agent_id}: {exc}"
             ) from exc
 
-    def __cache_key(self, agent_id: str) -> Path:
+    def __get_embedding_file_path(self, agent_id: str) -> Path:
         """Return the .pkl path for this agent's precomputed policy vectors."""
         digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
         return Path(self.embeddings_dir) / f"{digest}.pkl"
     
     def __save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
-        path = self.__cache_key(agent_id)
+        path = self.__get_embedding_file_path(agent_id)
         with path.open("wb") as f:
             pickle.dump(data, f)
 
     def __load_from_embeddings_dir(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        path = self.__cache_key(agent_id)
+        path = self.__get_embedding_file_path(agent_id)
         if not path.exists():
             return None
         try:
@@ -336,7 +336,16 @@ class CBAC:
         except Exception:
             return None
 
-    async def precompute_policy(self, agent_id: str) -> Dict[str, Any]:
+    def check_policy_embedding_exists(self, agent_id: str) -> Dict[str, Any] | None:
+        """
+        Checks if the embedding file for an agent is present or not
+
+        Returns None if its not present
+        """
+        embedding = self.__load_from_embeddings_dir(agent_id=agent_id)
+        return embedding
+
+    async def precompute_policy(self, agent_id: str, skip_compute=True) -> Dict[str, Any]:
         """
         Precompute and cache policy vectors for an agent.  Call this once
         after deploying or updating the agent's policy card — not on every
@@ -352,6 +361,12 @@ class CBAC:
 
         Returns the cached payload so callers can inspect it.
         """
+        # Checks if embedding is present for a model locally.
+        # If it exists, then check if skip_compute is True.
+        # If its true, proceed to fetch the embeddings from local
+        local_embedding = self.check_policy_embedding_exists(agent_id)
+        if local_embedding and skip_compute:
+            return local_embedding
 
         policy = self.__get_latest_agent_policy(agent_id=agent_id)
         if not policy:
