@@ -1,11 +1,13 @@
 import os
 import json
 import base64
+import requests
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Optional
 from pathlib import Path
 from dataclasses import asdict
+from urllib.parse import urljoin
 
 from .types import (
     supported_actors, 
@@ -37,7 +39,6 @@ from .config import (
 )
 from .id import get_user_card_id, get_agent_card_id
 from .card import build_user_card_payload, build_actor_card_payload
-from .cbac import CBAC
 
 class AgentDNA:
     def __init__(
@@ -49,6 +50,7 @@ class AgentDNA:
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
         verification_mode: str = VERIFY_LIGHT,
+        agent_policy_file: Optional[Path] = None
     ):
         if name == "":
             raise NameError("'name' attribute cannot be empty")
@@ -65,6 +67,8 @@ class AgentDNA:
             )
         self.verification_mode = verification_mode
         
+        self.api_key = api_key
+
         self.config_dir = (
             config_dir
             if config_dir
@@ -85,6 +89,7 @@ class AgentDNA:
         self.type = type
         self.name = name
         self.metadata = metadata or {}
+        self.__agent_policy_path = agent_policy_file
 
         # Check from local config dir, if the actor card
         # has already been created
@@ -100,7 +105,101 @@ class AgentDNA:
         else:
             self.card_id = ""
         
+        # Beta: Register creds corresponding to Actor ID
+        if self.type == ACTOR_TYPE_AGENT:
+            self.__register_agent()
+        
+        if self.type == ACTOR_TYPE_HUMAN:
+            self.__register_user()
+        
 
+    def __validate_api_key(self) -> None:
+        if self.api_key == "":
+            raise ValueError(
+                "api_key is required for actor registration"
+            )
+
+    def __register_user(self) -> None:
+        """
+        Registers the current user with
+        the provenance layer.
+        """
+
+        self.__validate_api_key()
+
+        response = requests.post(
+            urljoin(self.provenance.provenance_url, "/core/v1/register-user"),
+            json={
+                "user_id": self.get_actor_id(),
+            },
+            headers={
+                "X-API-Key": self.api_key,
+            },
+            timeout=300,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not data.get("status"):
+            raise RuntimeError(
+                f"user registration failed: "
+                f"{data.get('message', '')}"
+            )
+
+    def __register_agent(self) -> None:
+        """
+        Registers the current agent with
+        the provenance layer.
+        """
+
+        self.__validate_api_key()
+
+        policy_path = self.__agent_policy_path
+        if policy_path is None:
+            raise ValueError(
+                "agent policy path is not defined"
+            )
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file not found: "
+                f"{policy_path}"
+            )
+
+        with open(
+            policy_path,
+            "rb",
+        ) as fp:
+            response = requests.post(
+                urljoin(self.provenance.provenance_url, "/core/v1/register-agent"),
+                data={
+                    "agent_name": self.name,
+                    "agent_id": self.get_actor_id(),
+                },
+                files={
+                    "policy": (
+                        policy_path.name,
+                        fp,
+                    )
+                },
+                headers={
+                    "X-API-Key": self.api_key,
+                },
+                timeout=300,
+            )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not data.get("status"):
+            raise RuntimeError(
+                f"agent registration failed: "
+                f"{data.get('message', '')}"
+            )
+        
     def get_actor_id(self) -> str:
         return self.provenance.provenance_id
 
@@ -416,9 +515,3 @@ class AgentDNA:
             envelope=workflow.envelope,
             verification=verification,
         )
-    
-    def __register_user():
-        pass
-
-    def __register_agent():
-        pass
