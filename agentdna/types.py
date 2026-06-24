@@ -59,7 +59,7 @@ class Envelope:
     signature: str = ""
 
     # List of issues being observered via CoCA or CBAC layers
-    issues: List[Issue] = []
+    issues: List[Issue] = field(default_factory=list)
 
     # Previous envelope in the provenance chain.
     parent_envelope: Envelope | None = None
