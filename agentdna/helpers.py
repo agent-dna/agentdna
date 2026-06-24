@@ -42,6 +42,25 @@ def get_latest_envelope(
 
     return workflow.envelope
 
+def get_root_envelope(
+    workflow: IntentWorkflow,
+) -> Envelope:
+    """
+    Returns the root envelope from a workflow.
+    """
+
+    if workflow.envelope is None:
+        raise ValueError(
+            "workflow does not contain an envelope"
+        )
+
+    current = workflow.envelope
+
+    while current.parent_envelope is not None:
+        current = current.parent_envelope
+
+    return current
+
 def unwrap_workflow(
     workflow: IntentWorkflow,
 ) -> list[Envelope]:
