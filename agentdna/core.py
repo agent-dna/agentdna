@@ -16,8 +16,7 @@ from .types import (
     Envelope,
     IntentWorkflow,
     HandleResult,
-    VerificationResult,
-    ActorCard,
+    AgentCard,
 
     VERIFY_LIGHT,
     VERIFY_HEAVY,
@@ -225,21 +224,15 @@ class AgentDNA:
 
         return agent_card_id
 
-    def update_agent_policy(
-        self,
-        agent: "AgentDNA",
-        policy_file: str | Path,
+    def update_agent_policy_by_id(
+            self,
+            agent_id: str,
+            policy_file: str | Path
     ):
         if self.type != ACTOR_TYPE_HUMAN:
             raise ValueError(
                 "only human actors can update "
                 "agent policies"
-            )
-
-        if agent.type != ACTOR_TYPE_AGENT:
-            raise ValueError(
-                "provided AgentDNA instance "
-                "is not of type agent"
             )
         
         policy_path = Path(policy_file)
@@ -254,13 +247,12 @@ class AgentDNA:
             policy_b64 = base64.b64encode(fp.read()).decode("utf-8")
 
         history = self.provenance.provenance_card_history(
-            actor_id=agent.get_actor_id()
-        )
+            actor_id=agent_id
+        )        
 
         if len(history) == 0:
             raise ValueError(
-                f"agent card not found for "
-                f"{agent.get_actor_id()}"
+                f"agent card not found for {agent_id}"
             )
         
         latest_data = history[-1]["data"]
@@ -269,7 +261,7 @@ class AgentDNA:
             latest_data
         )
 
-        actor_card = ActorCard(
+        actor_card = AgentCard(
             **actor_card_dict
         )
         actor_card.policy = policy_b64
@@ -283,9 +275,25 @@ class AgentDNA:
             )
         except Exception as exc:
             raise RuntimeError(
-                f"failed to update agent {agent.get_actor_id()} policy: "
+                f"failed to update agent {agent_id} policy: "
                 f"{exc}"
             ) from exc
+
+    def update_agent_policy(
+        self,
+        agent: "AgentDNA",
+        policy_file: str | Path,
+    ):
+        if agent.type != ACTOR_TYPE_AGENT:
+            raise ValueError(
+                "provided AgentDNA instance "
+                "is not of type agent"
+            )
+        
+        self.update_agent_policy_by_id(
+            agent.get_actor_id(), 
+            policy_file=policy_file
+        )
 
     def create_workflow_provenance(
         self,

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from .provenance import Provenance
-from .types import ActorCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
+from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 
 from sentence_transformers import SentenceTransformer
@@ -304,7 +304,7 @@ class CBAC:
             actor_id=agent_id
         )
 
-        actor_card = ActorCard(
+        actor_card = AgentCard(
             **actor_card_dict
         )
 

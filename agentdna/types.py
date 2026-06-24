@@ -102,7 +102,7 @@ class HandleResult:
     verification: VerificationResult
 
 @dataclass
-class ActorCard:
+class AgentCard:
     type: str
     id: str
     metadata: dict[str, Any]
