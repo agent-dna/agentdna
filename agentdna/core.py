@@ -19,6 +19,7 @@ from .types import (
     IntentWorkflow,
     HandleResult,
     AgentCard,
+    VerificationResult,
 
     VERIFY_LIGHT,
     VERIFY_HEAVY,
@@ -429,6 +430,7 @@ class AgentDNA:
         recipient_actor_name: str,
         recipient_actor_type: str,
         payload: str,
+        verification_result: Optional[VerificationResult] = None,
         workflow: IntentWorkflow | None = None,
         remarks: str = ""
     ) -> IntentWorkflow:
@@ -462,6 +464,9 @@ class AgentDNA:
             parent_envelope=parent_envelope,
             epoch=int(datetime.now(timezone.utc).timestamp())
         )
+
+        if verification_result:
+            envelope.issues = verification_result.issues
 
         signature = self.provenance.sign_envelope(
             envelope

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
-from typing import Any
+from typing import Any, List
 
 ACTOR_TYPE_AGENT = "agent"
 ACTOR_TYPE_HUMAN = "human"
@@ -58,6 +57,9 @@ class Envelope:
 
     # Signature of the canonical envelope representation.
     signature: str = ""
+
+    # List of issues being observered via CoCA or CBAC layers
+    issues: List[Issue] = []
 
     # Previous envelope in the provenance chain.
     parent_envelope: Envelope | None = None
