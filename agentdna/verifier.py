@@ -23,7 +23,7 @@ def verify_light(
         workflow
     )
 
-    issues = []
+    issues: List[Issue] = []
 
     try:
         valid = provenance.verify_envelope(
@@ -32,12 +32,19 @@ def verify_light(
 
         if not valid:
             issues.append(
-                f"invalid signature for actor "
-                f"{envelope.from_.name}"
+                Issue(
+                    depth=0,
+                    reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})"
+                )
             )
 
     except Exception as ex:
-        issues.append(str(ex))
+        issues.append(
+            Issue(
+                depth=0,
+                reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}"
+            )
+        )
 
     return VerificationResult(
         valid=len(issues) == 0,
