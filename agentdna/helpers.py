@@ -61,6 +61,17 @@ def get_root_envelope(
 
     return current
 
+def get_envelope_depth(
+    envelope: Envelope | None,
+) -> int:
+    depth = 0
+
+    while envelope:
+        depth += 1
+        envelope = envelope.parent_envelope
+
+    return depth
+
 def unwrap_workflow(
     workflow: IntentWorkflow,
 ) -> list[Envelope]:
