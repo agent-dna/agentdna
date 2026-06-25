@@ -83,15 +83,7 @@ stop and explain what is missing.
 
 def _extract_workflow(messages: list) -> str:
     """
-    Extract workflow returned by the MCP tool.
-
-    Expected MCP payload shape:
-
-    {
-        "status": "...",
-        "workflow": "...",
-        ...
-    }
+    Extract the serialized IntentWorkflow returned by an MCP tool.
     """
 
     for msg in reversed(messages):
@@ -106,17 +98,32 @@ def _extract_workflow(messages: list) -> str:
 
         content = getattr(msg, "content", None)
 
-        try:
-            if isinstance(content, str):
+        if isinstance(content, str):
+            try:
                 data = json.loads(content)
-
                 workflow = data.get("workflow")
-
                 if workflow:
                     return workflow
+            except Exception:
+                pass
+        elif isinstance(content, list):
+            for part in content:
 
-        except Exception:
-            continue
+                if not isinstance(part, dict):
+                    continue
+
+                text = part.get("text")
+
+                if not isinstance(text, str):
+                    continue
+
+                try:
+                    data = json.loads(text)
+                    workflow = data.get("workflow")
+                    if workflow:
+                        return workflow
+                except Exception:
+                    continue
 
     return ""
 
