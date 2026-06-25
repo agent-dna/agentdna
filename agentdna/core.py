@@ -51,7 +51,8 @@ class AgentDNA:
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
         verification_mode: str = VERIFY_LIGHT,
-        agent_policy_file: Optional[Path] = None
+        agent_policy_file: Optional[Path] = None,
+        skip_actor_id_registration: bool = False
     ):
         if name == "":
             raise NameError("'name' attribute cannot be empty")
@@ -107,11 +108,12 @@ class AgentDNA:
             self.card_id = ""
         
         # Beta: Register creds corresponding to Actor ID
-        if self.type == ACTOR_TYPE_AGENT:
-            self.__register_agent()
-        
-        if self.type == ACTOR_TYPE_HUMAN:
-            self.__register_user()
+        if not skip_actor_id_registration:
+            if self.type == ACTOR_TYPE_AGENT:
+                self.__register_agent()
+            
+            if self.type == ACTOR_TYPE_HUMAN:
+                self.__register_user()
         
 
     def __validate_api_key(self) -> None:
