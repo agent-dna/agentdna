@@ -107,7 +107,7 @@ class HandleResult:
 class AgentCard:
     type: str
     id: str
-    metadata: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
     policy: str = ""
 
 
@@ -115,7 +115,7 @@ class AgentCard:
 class UserCard:
     type: str
     id: str
-    metadata: dict[str, Any]
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class ActorRegistryEntry:
