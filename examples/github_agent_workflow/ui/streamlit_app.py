@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+import secrets
+import string
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -39,6 +41,16 @@ st.caption(
     "Turn a plain-English request into a real GitHub action — handled by a team of "
     "AI agents, with a verified and auditable trail at every step."
 )
+
+def _random_agent_name(prefix: str) -> str:
+    alphabet = string.ascii_letters + string.digits
+
+    suffix = "".join(
+        secrets.choice(alphabet)
+        for _ in range(7)
+    )
+
+    return f"{prefix}_{suffix}"
 
 with st.sidebar:
     st.markdown("### What this does")
@@ -102,7 +114,7 @@ with user_col:
 with agent_col:
     st.subheader("Agents")
 
-    st.session_state.setdefault("coordinator_name_input", coordinator_name())
+    st.session_state.setdefault("coordinator_name_input", _random_agent_name("CoordinatorAgent"))
     coordinator_input = st.text_input(
         "Coordinator name",
         key="coordinator_name_input",
@@ -115,7 +127,7 @@ with agent_col:
             )
     _render_identity("Coordinator", st.session_state.get("coordinator_identity"))
 
-    st.session_state.setdefault("worker_name_input", worker_name())
+    st.session_state.setdefault("worker_name_input", _random_agent_name("WorkerAgent"))
     worker_input = st.text_input(
         "Worker name",
         key="worker_name_input",
@@ -137,6 +149,29 @@ user_input = st.text_area(
         "e.g. Create an issue in octocat/hello-world titled "
         "'Typo in README' with body 'Line 3 has a typo.'"
     ),
+)
+
+st.caption("Example prompts:")
+
+st.code(
+    'Create an issue titled "Fix login bug" in the repository '
+    'SynapzeCore/sample-repo with body '
+    '"Users receive a 500 Internal Server Error after login."',
+    language="text",
+)
+
+st.code(
+    'Create an issue titled "Update documentation" '
+    'in SynapzeCore/sample-repo.',
+    language="text",
+)
+
+st.code(
+    'Create a pull request in SynapzeCore/sample-repo '
+    'from branch feature/auth to main titled '
+    '"Add authentication flow" with body '
+    '"Implements JWT authentication and login endpoints."',
+    language="text",
 )
 
 if st.button("Run", type="primary"):
@@ -174,7 +209,7 @@ if st.button("Run", type="primary"):
                     initial_state["_agentdna_workflow"] = serialize_workflow(
                         session.workflow
                     )
-                    initial_state["_agentdna_user_id"] = session.user_did
+                    initial_state["_agentdna_user_id"] = session.user_id
 
                 result = await graph.ainvoke(initial_state)
 
@@ -185,10 +220,10 @@ if st.button("Run", type="primary"):
                         )
                     )
 
-                return result, (session.user_did if session else None)
+                return result, (session.user_id if session else None)
 
             try:
-                result, user_did = asyncio.run(_run())
+                result, user_id = asyncio.run(_run())
             except Exception as exc:
                 st.exception(exc)
                 st.stop()
@@ -203,8 +238,8 @@ if st.button("Run", type="primary"):
                     f"Workflow terminated: {reason}"
                 )
 
-        if user_did:
-            st.info(f"Your verified ID: `{user_did}`")
+        if user_id:
+            st.info(f"Your User ID: `{user_id}`")
 
         col1, col2 = st.columns(2)
 

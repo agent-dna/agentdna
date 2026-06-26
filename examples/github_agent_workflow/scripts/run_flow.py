@@ -80,11 +80,11 @@ async def main(user_input: str) -> None:
             user_session.workflow
         )
         initial_state["_agentdna_user_id"] = (
-            user_session.user_did
+            user_session.user_id
         )
 
         print(
-            f"[agentdna] user_did={user_session.user_did}\n"
+            f"[agentdna] user_did={user_session.user_id}\n"
         )
 
     result = await graph.ainvoke(initial_state)

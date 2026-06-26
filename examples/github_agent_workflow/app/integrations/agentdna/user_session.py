@@ -101,7 +101,7 @@ class UserSession:
         self.handle_result = handle_result
 
     @property
-    def user_did(self) -> str:
+    def user_id(self) -> str:
         return self.user.get_actor_id()
 
     @classmethod
