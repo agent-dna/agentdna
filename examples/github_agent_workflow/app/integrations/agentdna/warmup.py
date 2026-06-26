@@ -1,12 +1,5 @@
 """
 Eager AgentDNA initialization helpers.
-
-By default, agent and user AgentDNA instances are constructed lazily on first
-use. These helpers let entry points (UI, CLI, MCP server) warm up the
-registries at startup so the first user request doesn't pay the cold-start
-NFT-load cost for every identity.
-
-All functions soft-fail to a no-op when AgentDNA is disabled.
 """
 
 from __future__ import annotations
@@ -32,9 +25,9 @@ _AGENTS_BASE = Path(__file__).resolve().parents[2] / "agents"
 _COORDINATOR_SKILLS = str(_AGENTS_BASE / "coordinator" / "skills.md")
 _WORKER_SKILLS      = str(_AGENTS_BASE / "worker"      / "skills.md")
 
-# Persisted agent-DID map (project root). Overwritten on every warmup.
+# Persisted Actor name -> ID map (project root). Overwritten on every warmup.
 _PROJECT_ROOT   = Path(__file__).resolve().parents[3]
-AGENT_DIDS_FILE = _PROJECT_ROOT / "agent_dids.json"
+AGENT_IDS_FILE = _PROJECT_ROOT / "agent_actor_ids.json"
 
 
 def _known_agents() -> tuple:
@@ -54,7 +47,7 @@ def warmup_coordinator() -> None:
     try:
         dna = agentdna_registry.get(coordinator_name(), policy_file=_COORDINATOR_SKILLS)
         if dna:
-            logger.info("agentdna_warmup_coordinator", did=getattr(dna, "did", None))
+            logger.info("agentdna_warmup_coordinator", actor_id=dna.get_actor_id())
     except Exception as exc:
         logger.warning("agentdna_warmup_coordinator_failed", error=str(exc))
 
@@ -66,21 +59,21 @@ def warmup_worker() -> None:
     try:
         dna = agentdna_registry.get(worker_name(), policy_file=_WORKER_SKILLS)
         if dna:
-            logger.info("agentdna_warmup_worker", did=getattr(dna, "did", None))
+            logger.info("agentdna_warmup_worker", actor_id=dna.get_actor_id())
     except Exception as exc:
         logger.warning("agentdna_warmup_worker_failed", error=str(exc))
 
 
 def warmup_agents() -> None:
-    """Construct both Coordinator and Worker agent AgentDNAs and persist their DIDs."""
+    """Construct both Coordinator and Worker AgentDNA instances and persist their Actor IDs."""
     warmup_coordinator()
     warmup_worker()
-    dump_agent_dids()
+    dump_agent_actor_ids()
 
 
 # ── DID persistence ───────────────────────────────────────────────────────────
 
-def dump_agent_dids(path: Optional[Path] = None) -> None:
+def dump_agent_actor_ids(path: Optional[Path] = None) -> None:
     """
     Write the registered agent name → DID map to a JSON file (overwrite mode).
 
@@ -97,26 +90,26 @@ def dump_agent_dids(path: Optional[Path] = None) -> None:
     if not is_agentdna_enabled():
         return
 
-    target = Path(path) if path else AGENT_DIDS_FILE
+    target = Path(path) if path else AGENT_IDS_FILE
 
-    dids: dict[str, str] = {}
+    actor_ids: dict[str, str] = {}
     for name, skills in _known_agents():
         try:
             dna = agentdna_registry.get(name, policy_file=skills)
             if dna:
-                did = getattr(dna, "did", None)
-                if did:
-                    dids[name] = did
+                actor_id = dna.get_actor_id()
+                if actor_id:
+                    actor_ids[name] = actor_id
         except Exception as exc:
-            logger.warning("agentdna_did_lookup_failed", agent=name, error=str(exc))
+            logger.warning("agentdna_actor_lookup_failed", agent=name, error=str(exc))
 
-    if not dids:
+    if not actor_ids:
         return
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(dids, indent=2) + "\n", encoding="utf-8")
-        logger.info("agent_dids_written", path=str(target), count=len(dids))
+        target.write_text(json.dumps(actor_ids, indent=2) + "\n", encoding="utf-8")
+        logger.info("agent_actor_ids_written", path=str(target), count=len(actor_ids))
     except Exception as exc:
         logger.warning("agent_dids_write_failed", path=str(target), error=str(exc))
 
@@ -127,7 +120,7 @@ def warmup_user(email: Optional[str] = None) -> None:
     """
     Construct (and cache) a kind="user" AgentDNA for the given email.
 
-    Only the identity NFT is loaded here — the per-request intent envelope
+    Only the user identity is loaded here — the per-request intent envelope
     is still produced by ``UserSession.open()`` at submission time.
     """
     if not is_agentdna_enabled():
@@ -144,7 +137,7 @@ def warmup_user(email: Optional[str] = None) -> None:
     try:
         user = _get_or_make_user(email, metadata=metadata)
         if user:
-            logger.info("agentdna_warmup_user", email=email, did=user.did)
+            logger.info("agentdna_warmup_user", email=email, actor_id=user.get_actor_id())
     except Exception as exc:
         logger.warning("agentdna_warmup_user_failed", email=email, error=str(exc))
 
@@ -168,9 +161,6 @@ def deploy_agent(role: str, name: str) -> dict:
     ``name`` is the chosen alias. The name is persisted to ``agent_names.json``
     first, so the MCP server and graph nodes resolve the same identity (same
     alias → same DID). Idempotent.
-
-    Returns ``{"ok": True, "kind", "role", "alias", "did", "nft_token"}`` on
-    success, else ``{"ok": False, "reason": "..."}``.
     """
     if not is_agentdna_enabled():
         return {"ok": False, "reason": "AgentDNA disabled — set AGENTDNA_API_KEY"}
@@ -193,14 +183,14 @@ def deploy_agent(role: str, name: str) -> dict:
         dna = agentdna_registry.get(name, policy_file=skills)
         if dna is None:
             return {"ok": False, "reason": "registry returned None"}
-        dump_agent_dids()  # keep agent_dids.json in sync
+        dump_agent_actor_ids()  # keep agent_dids.json in sync
         return {
             "ok": True,
             "kind": "agent",
             "role": role,
             "alias": name,
-            "did": getattr(dna, "did", None),
-            "nft_token": getattr(dna, "nft_token", None),
+            "actor_id": dna.get_actor_id(),
+            "card_id": dna.card_id,
         }
     except Exception as exc:
         logger.warning("agentdna_deploy_agent_failed", role=role, name=name, error=str(exc))
@@ -211,9 +201,6 @@ def deploy_user(email: str) -> dict:
     """
     Construct (and cache) the kind="user" AgentDNA for ``email`` (taken from UI
     input, not env) and return a status dict for the UI.
-
-    Returns ``{"ok": True, "kind", "alias", "did", "nft_token"}`` on success,
-    else ``{"ok": False, "reason": "..."}``.
     """
     if not is_agentdna_enabled():
         return {"ok": False, "reason": "AgentDNA disabled — set AGENTDNA_API_KEY"}
@@ -234,8 +221,8 @@ def deploy_user(email: str) -> dict:
             "ok": True,
             "kind": "user",
             "alias": email,
-            "did": getattr(user, "did", None),
-            "nft_token": getattr(user, "nft_token", None),
+            "actor_id": user.get_actor_id(),
+            "card_id": user.card_id,
         }
     except Exception as exc:
         logger.warning("agentdna_deploy_user_failed", email=email, error=str(exc))

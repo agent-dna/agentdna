@@ -49,7 +49,7 @@ from app.agents.state import GithubAgentState
 
 async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
     """LangGraph node — verifies inbound envelope, produces task_spec, signs forward."""
-    user_did = state.get("_agentdna_user_did")
+    user_did = state.get("_agentdna_user_id")
     dna = get_dna(coordinator_name(), COORDINATOR_SKILLS_FILE)
     next_agent_dna = get_dna(worker_name())
     
@@ -80,7 +80,7 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
         )
 
         return {
-            "_agentdna_user_did": state.get("_agentdna_user_did", ""),
+            "_agentdna_user_id": state.get("_agentdna_user_id", ""),
             "_agentdna_terminal": True,
             "_agentdna_terminal_reason": "verification_failed",
             "_agentdna_workflow": serialize_workflow(rejected_workflow),
@@ -115,7 +115,7 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
 
     update: GithubAgentState = {
         "task_spec": task_spec,
-        "_agentdna_user_did": state.get("_agentdna_user_did", "")
+        "_agentdna_user_id": state.get("_agentdna_user_id", "")
     }
     if coordinator_workflow_str != "":
         update["_agentdna_workflow"] = coordinator_workflow_str

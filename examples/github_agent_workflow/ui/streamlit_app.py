@@ -67,11 +67,14 @@ def _render_identity(label: str, result: dict | None) -> None:
     if result.get("ok"):
         card_label = "User Card ID" if result.get("kind") == "user" else "Agent Card ID"
         lines = [
-            f"Name : {result.get('alias')}",
-            f"ID   : {result.get('did')}",
+            f"Name      : {result.get('alias')}",
+            f"Actor ID  : {result.get('actor_id')}",
         ]
-        if result.get("nft_token"):
-            lines.append(f"{card_label} : {result.get('nft_token')}")
+
+        if result.get("card_id"):
+            lines.append(
+                f"{card_label} : {result.get('card_id')}"
+            )
         st.success(f"{label} ready")
         st.code("\n".join(lines), language="text")
     else:
@@ -171,7 +174,7 @@ if st.button("Run", type="primary"):
                     initial_state["_agentdna_workflow"] = serialize_workflow(
                         session.workflow
                     )
-                    initial_state["_agentdna_user_did"] = session.user_did
+                    initial_state["_agentdna_user_id"] = session.user_did
 
                 result = await graph.ainvoke(initial_state)
 

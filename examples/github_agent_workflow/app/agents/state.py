@@ -9,7 +9,7 @@ class GithubAgentState(TypedDict, total=False):
     final_response: str
     error: Optional[str]
 
-    _agentdna_user_did: str
+    _agentdna_user_id: str
     _agentdna_workflow: str
 
     _agentdna_terminal: bool

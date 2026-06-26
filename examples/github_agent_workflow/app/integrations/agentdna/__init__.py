@@ -1,12 +1,12 @@
-"""AgentDNA integration layer for GithubAgent (mirrors FinanceOps-MAS)."""
+"""AgentDNA integration layer for GithubAgent"""
 
 from .registry import AgentDNARegistry, agentdna_registry, is_agentdna_enabled
 from .user_session import UserSession
 from .warmup import (
-    AGENT_DIDS_FILE,
+    AGENT_IDS_FILE,
     deploy_agent,
     deploy_user,
-    dump_agent_dids,
+    dump_agent_actor_ids,
     warmup_agents,
     warmup_all,
     warmup_coordinator,
@@ -19,10 +19,10 @@ __all__ = [
     "agentdna_registry",
     "is_agentdna_enabled",
     "UserSession",
-    "AGENT_DIDS_FILE",
+    "AGENT_IDS_FILE",
     "deploy_agent",
     "deploy_user",
-    "dump_agent_dids",
+    "dump_agent_actor_ids",
     "warmup_agents",
     "warmup_all",
     "warmup_coordinator",

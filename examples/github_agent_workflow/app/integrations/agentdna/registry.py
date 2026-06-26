@@ -1,17 +1,15 @@
 """
 Singleton registry of AgentDNA identities for GithubAgent.
 
-Mirrors the FinanceOps-MAS registry pattern. Each agent_name maps to a single
-AgentDNA constructed lazily and reused per process. Because identity NFTs are
-cached on disk (via AgentDNA's agent_info.json), the same alias resolves to
-the same DID across processes — so the MCP server can look up the Worker's
-identity independently of the LangGraph process.
+Each agent alias maps to a single AgentDNA instance constructed lazily and
+cached for the lifetime of the process.
 
-If AGENTDNA_API_KEY is not set, ``get()`` returns ``None`` for every agent —
-the LangGraph nodes and MCP tools see that and skip the trust layer, so the
-underlying flow runs unchanged.
+Agent identities are persisted by AgentDNA, so resolving the same alias across
+multiple processes (Streamlit, LangGraph, MCP server, CLI, etc.) always yields
+the same Actor ID and Agent Card. This allows every component of the system to
+independently recover an agent's identity while participating in the same
+verified workflow.
 """
-
 from __future__ import annotations
 
 import os

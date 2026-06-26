@@ -3,21 +3,17 @@ GitHub MCP server — exposes two tools the Worker agent can call:
   - create_issue
   - create_pr
 
-Phase 2: each GitHub HTTP call is wrapped with ``cbac.authorize_action(...)``
+Phase 2: each GitHub HTTP call is wrapped with ``cbac.authorize_agent_app_interaction(...)``
 so the CBAC layer evaluates the Worker's authorization before the request
-leaves the MCP server. Mirrors the Slack integration in FinanceOps-MAS.
-
-When AgentDNA is disabled (no ``AGENTDNA_API_KEY``), the tools fall back to
-direct httpx calls so the demo still works without the trust layer.
+leaves the MCP server.
 """
 
 from __future__ import annotations
 
-import inspect
 import json
 import os
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import httpx
 from fastmcp import FastMCP
@@ -52,13 +48,9 @@ def _worker_skills_file() -> str:
 def _worker_did() -> Optional[str]:
     """
     Look up the Worker agent's DID from this process's AgentDNA registry.
-
-    Because identity NFTs are cached on disk via agent_info.json, the same
-    alias here resolves to the same DID as in the LangGraph (Worker) process.
-    Returns None when AgentDNA is disabled.
     """
     dna = agentdna_registry.get(worker_name(), policy_file=_worker_skills_file())
-    return getattr(dna, "did", None) if dna else None
+    return dna.get_actor_id() if dna else None
 
 def _worker_dna():
     return agentdna_registry.get(
@@ -69,7 +61,7 @@ def _worker_dna():
 def _post_via_cbac(
     url: str,
     body: dict,
-    agent_did: str,
+    agent_id: str,
     action_intent: str,
     workflow: IntentWorkflow,
 ):
@@ -107,7 +99,7 @@ def _post_via_cbac(
 
     try:
         response = cbac.authorise_agent_app_interaction(
-            agent_id=agent_did,
+            agent_id=agent_id,
             action_intent=action_intent,
             envelope=workflow,
             app_url=url,
@@ -234,18 +226,18 @@ async def create_issue(
             workflow=intent_workflow,
         )
 
-    agent_did = _worker_did()
-    if agent_did == "":
+    agent_id = _worker_did()
+    if agent_id == "":
         raise ValueError(
             "AgentDNA is enabled but Worker agent has no DID"
         )
 
     try:
-        if agent_did and is_agentdna_enabled() and intent_workflow:
+        if agent_id and is_agentdna_enabled() and intent_workflow:
             decision, response, detail = _post_via_cbac(
                 url=url,
                 body=request_payload,
-                agent_did=agent_did,
+                agent_id=agent_id,
                 action_intent=f"github:create_issue:{repo}",
                 workflow=intent_workflow,
             )
@@ -471,21 +463,21 @@ async def create_pr(
             workflow=intent_workflow,
         )
 
-    agent_did = _worker_did()
+    agent_id = _worker_did()
 
-    if agent_did == "":
+    if agent_id == "":
         raise ValueError(
             "AgentDNA is enabled but Worker agent has no DID"
         )
 
     try:
 
-        if agent_did and is_agentdna_enabled() and intent_workflow:
+        if agent_id and is_agentdna_enabled() and intent_workflow:
 
             decision, response, detail = _post_via_cbac(
                 url=url,
                 body=request_payload,
-                agent_did=agent_did,
+                agent_id=agent_id,
                 action_intent=f"github:create_pr:{repo}",
                 workflow=intent_workflow,
             )

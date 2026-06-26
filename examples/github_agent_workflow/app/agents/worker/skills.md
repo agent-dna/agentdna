@@ -27,6 +27,6 @@ never talks to the user directly — it only acts on the task spec it receives.
 - Must not fabricate repository names, branches, or other identifiers — if the
   spec is missing a required field, stop and report.
 - All GitHub interactions go through the MCP server, which routes every HTTP
-  call through `cbac.authorize_action()`. The Worker may not bypass the MCP
+  call through `cbac.authorize_agent_app_interaction()`. The Worker may not bypass the MCP
   boundary.
 - On failure, must report the error transparently — never invent success.

@@ -79,7 +79,7 @@ async def main(user_input: str) -> None:
         initial_state["_agentdna_workflow"] = serialize_workflow(
             user_session.workflow
         )
-        initial_state["_agentdna_user_did"] = (
+        initial_state["_agentdna_user_id"] = (
             user_session.user_did
         )
 
