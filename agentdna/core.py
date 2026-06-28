@@ -434,14 +434,15 @@ class AgentDNA:
         payload: str,
         verification_result: Optional[VerificationResult] = None,
         workflow: IntentWorkflow | None = None,
-        remarks: str = ""
+        remarks: str = "",
+        from_actor: Optional[Actor] = None
     ) -> IntentWorkflow:
         """
         Creates and signs a new envelope and
         returns the IntentWorklow
         """
 
-        from_ = Actor(
+        from_ = from_actor or Actor(
             id=self.get_actor_id(),
             name=self.name,
             type=self.type,
