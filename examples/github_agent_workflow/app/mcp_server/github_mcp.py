@@ -24,7 +24,7 @@ from app.integrations.agentdna import agentdna_registry, is_agentdna_enabled
 from app.utils import deserialize_workflow, serialize_workflow
 from agentdna.types import VerificationResult, Issue
 from agentdna.helpers import get_envelope_depth
-from agentdna.types import IntentWorkflow
+from agentdna.types import IntentWorkflow, Actor
 
 mcp = FastMCP("github-mcp")
 
@@ -224,6 +224,11 @@ async def create_issue(
                 "body_preview": body[:200],
             }),
             workflow=intent_workflow,
+            from_actor=Actor(
+                id="",
+                name="github",
+                type="app"
+            )
         )
 
     agent_id = _worker_did()
@@ -266,6 +271,11 @@ async def create_issue(
                             )]
                         ),
                         workflow=intent_workflow,
+                        from_actor=Actor(
+                            id="",
+                            name="github",
+                            type="app"
+                        )
                     )
 
                 status = (
@@ -332,6 +342,11 @@ async def create_issue(
                     ]
                 ),
                 workflow=intent_workflow,
+                from_actor=Actor(
+                    id="",
+                    name="github",
+                    type="app"
+                )
             )
 
         return {
@@ -369,6 +384,11 @@ async def create_issue(
                     ]
                 ),
                 workflow=intent_workflow,
+                from_actor=Actor(
+                    id="",
+                    name="github",
+                    type="app"
+                )
             )
 
         return {
@@ -395,6 +415,11 @@ async def create_issue(
                 "title": data.get("title"),
             }),
             workflow=intent_workflow,
+            from_actor=Actor(
+                id="",
+                name="github",
+                type="app"
+            )
         )
 
     return {
