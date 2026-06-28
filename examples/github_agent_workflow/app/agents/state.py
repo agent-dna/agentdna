@@ -14,3 +14,4 @@ class GithubAgentState(TypedDict, total=False):
 
     _agentdna_terminal: bool
     _agentdna_terminal_reason: str
+    _agentdna_phase: str

@@ -365,4 +365,5 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
             serialize_workflow(
                 worker_to_coordinator_workflow
             ),
+        "_agentdna_phase": "finalize",
     }

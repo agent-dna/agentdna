@@ -12,14 +12,18 @@ from app.agents.state import GithubAgentState
 
 
 def route_after_coordinator(state: GithubAgentState) -> str:
-    if state.get("_agentdna_terminal", False):
+    if state.get("_agentdna_terminal"):
         return "end"
 
-    return "worker"
+    if state.get("_agentdna_phase") == "execute":
+        return "worker"
+
+    return "end"
 
 
 def build_graph():
     graph = StateGraph(GithubAgentState)
+
     graph.add_node("coordinator", coordinator_node)
     graph.add_node("worker", worker_node)
 
@@ -32,6 +36,6 @@ def build_graph():
             "end": END,
         },
     )
-    graph.add_edge("worker", END)
+    graph.add_edge("worker", "coordinator")
 
     return graph.compile()

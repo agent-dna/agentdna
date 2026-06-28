@@ -64,6 +64,52 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
             "coordinator_node: failed to deserialize or verify workflow"
         )
 
+    latest_envelope = get_latest_envelope(
+        handle_result.workflow
+    )
+    if (
+        latest_envelope.from_.type == next_agent_dna.type
+        and latest_envelope.from_.id == next_agent_dna.get_actor_id()
+    ):
+        root = latest_envelope
+        while root.parent_envelope is not None:
+            root = root.parent_envelope
+
+        final_workflow = dna.build(
+            recipient_actor_id=root.from_.id,
+            recipient_actor_name=root.from_.name,
+            recipient_actor_type=root.from_.type,
+            payload=json.dumps(
+                {
+                    "agent": coordinator_name(),
+                    "status": "completed",
+                    "final_response_preview": state.get(
+                        "final_response",
+                        "",
+                    )[:500],
+                }
+            ),
+            workflow=handle_result.workflow,
+        )
+
+        return {
+            "final_response": state.get(
+                "final_response",
+                "",
+            ),
+            "worker_messages": state.get(
+                "worker_messages",
+                [],
+            ),
+            "_agentdna_user_id": state.get(
+                "_agentdna_user_id",
+                "",
+            ),
+            "_agentdna_workflow": serialize_workflow(
+                final_workflow
+            ),
+        }
+
     if not handle_result.verification.valid:
         latest_envelope = get_latest_envelope(handle_result.workflow)
 
@@ -115,6 +161,7 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
 
     update: GithubAgentState = {
         "task_spec": task_spec,
+        "_agentdna_phase": "execute",
         "_agentdna_user_id": state.get("_agentdna_user_id", "")
     }
     if coordinator_workflow_str != "":
