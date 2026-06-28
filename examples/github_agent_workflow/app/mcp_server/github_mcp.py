@@ -224,11 +224,6 @@ async def create_issue(
                 "body_preview": body[:200],
             }),
             workflow=intent_workflow,
-            from_actor=Actor(
-                id="",
-                name="github",
-                type="app"
-            )
         )
 
     agent_id = _worker_did()
