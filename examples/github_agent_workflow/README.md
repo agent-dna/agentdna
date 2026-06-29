@@ -321,39 +321,261 @@ streamlit run streamlit_app.py
 | `AGENT_COORDINATOR`    | Coordinator agent name        |
 | `AGENT_WORKER`         | Worker agent name             |
 
+# AgentDNA Integration
+
+This demo keeps the AgentDNA integration intentionally lightweight. Rather than introducing a separate orchestration layer, AgentDNA is integrated into the existing LangGraph workflow. Every participant verifies the incoming workflow, performs its work, appends a signed `Envelope` and forwards the updated workflow to the next participant.
+
+
+## 1. Entry Point
+
+Start with:
+
+```text
+streamlit_app.py
+```
+
+When a user submits a request, the application creates a `UserSession` by calling:
+
+```python
+session = await UserSession.open(...)
+```
+
+This is the only place where the Human starts a new workflow.
+
+Internally, `UserSession.open()`:
+
+* Creates (or retrieves) the Human identity.
+* Creates the initial `IntentWorkflow`.
+* Signs the first `Envelope`.
+* Returns the workflow that will be passed into LangGraph.
+
+The resulting workflow is stored inside the graph state:
+
+```python
+initial_state = {
+    "user_input": user_input,
+    "_agentdna_workflow": serialize_workflow(...),
+}
+```
+
 ---
 
-# Current Features
+## 2. Human Integration
 
-* Multi-agent GitHub automation
-* LangGraph orchestration
-* MCP tool integration
-* AgentDNA identity verification
-* Workflow signing
-* Context-Based Access Control (CBAC)
-* GitHub Issue creation
-* GitHub Pull Request creation
-* Workflow provenance generation
-* Streamlit UI
-* CLI execution
+The Human integration lives under:
+
+```text
+app/
+└── integrations/
+    └── agentdna/
+        └── user_session.py
+```
+
+This file is responsible for the complete Human lifecycle.
+
+When a workflow starts:
+
+```python
+UserSession.open(...)
+```
+
+When the workflow finishes:
+
+```python
+UserSession.complete(...)
+```
+
+Internally, `complete()` verifies the returned workflow before publishing it to the Provenance Layer using:
+
+```python
+AgentDNA.create_workflow_provenance(...)
+```
+
+The Human is therefore responsible for both creating the first `Envelope` and publishing the final provenance record.
 
 ---
 
-# Future Work
+## 3. Agent Helpers
 
-Potential extensions include:
+Before looking at the Agents themselves, open:
 
-* Additional GitHub operations
-* Multi-worker execution
-* Parallel workflows
-* Human approval steps
-* Rich workflow visualization
-* Policy-based agent routing
-* Support for additional MCP servers
-* Multi-application workflows
+```text
+app/
+└── agents/
+    └── agentdna_helpers.py
+```
+
+This file contains the common AgentDNA helper functions used throughout the project.
+
+These helpers are responsible for:
+
+* Loading Agent identities
+* Deserializing workflows
+* Verifying inbound workflows
+* Returning the verification result to the Agent
+
+Keeping these operations here allows the Coordinator and Worker implementations to remain focused on business logic.
 
 ---
 
-# License
+## 4. Coordinator Integration
 
-This project is provided for demonstration and evaluation purposes.
+Next, open:
+
+```text
+app/
+└── agents/
+    └── coordinator/
+        └── agent.py
+```
+
+The Coordinator is the first Agent in the workflow.
+
+The first operation it performs is:
+
+```python
+verify_inbound(...)
+```
+
+which internally invokes:
+
+```python
+AgentDNA.handle(...)
+```
+
+Only after the workflow has been successfully verified does the Coordinator invoke the language model to produce the task specification.
+
+Finally, it appends its own signed `Envelope` using:
+
+```python
+AgentDNA.build(...)
+```
+
+before forwarding the updated workflow to the Worker.
+
+---
+
+## 5. Worker Integration
+
+Continue with:
+
+```text
+app/
+└── agents/
+    └── worker/
+        └── agent.py
+```
+
+The Worker follows exactly the same pattern.
+
+It begins by verifying the incoming workflow:
+
+```python
+AgentDNA.handle(...)
+```
+
+If verification succeeds, it performs the requested GitHub operation through the MCP client.
+
+After execution completes, the Worker appends its own signed `Envelope` using:
+
+```python
+AgentDNA.build(...)
+```
+
+before returning the updated workflow.
+
+This repeated `handle()` → work → `build()` pattern is the foundation of Chain of Custody Authentication (CoCA).
+
+---
+
+## 6. MCP Integration
+
+The Worker never communicates directly with GitHub.
+
+Instead, it uses the MCP client located under:
+
+```text
+app/
+└── mcp_client/
+```
+
+which communicates with the GitHub MCP server located under:
+
+```text
+app/
+└── mcp_server/
+```
+
+Every MCP tool receives the current `IntentWorkflow`.
+
+Before calling the GitHub REST API, the MCP server performs Context-Based Access Control (CBAC).
+
+After execution, it appends an application `Envelope` representing GitHub's participation in the workflow before returning the updated workflow to the Worker.
+
+This allows external applications to participate in the same verifiable chain of custody as Human users and AI Agents.
+
+---
+
+## 7. LangGraph Orchestration
+
+Finally, open:
+
+```text
+app/
+└── agents/
+    └── graph.py
+```
+
+This file contains the LangGraph workflow definition.
+
+Notice that AgentDNA does not change how LangGraph is wired together.
+
+Instead, it augments each node with verification and signing, allowing the orchestration logic to remain unchanged while every transition becomes cryptographically verifiable.
+
+---
+
+## Putting it all together
+
+The complete execution flow becomes:
+
+```text
+streamlit_app.py
+        │
+        ▼
+UserSession.open()
+        │
+        ▼
+coordinator/agent.py
+        │
+        ▼
+worker/agent.py
+        │
+        ▼
+mcp_server/
+        │
+        ▼
+worker/agent.py
+        │
+        ▼
+UserSession.complete()
+```
+
+Throughout this flow, every participant follows the same lifecycle:
+
+```text
+Receive Workflow
+        │
+        ▼
+ AgentDNA.handle()
+        │
+Verify Workflow
+        │
+Perform Work
+        │
+        ▼
+ AgentDNA.build()
+        │
+Forward Workflow
+```
+
+The Human starts the workflow by creating the initial `IntentWorkflow` and ends it by publishing the completed workflow to the Provenance Layer. Every participant in between simply verifies, performs its work and appends another signed `Envelope`, allowing the complete execution history to be reconstructed from the final `IntentWorkflow`.
