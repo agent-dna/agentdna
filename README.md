@@ -276,11 +276,13 @@ from agentdna import AgentDNA
 human = AgentDNA(
     name="Alice",
     type="human",
+    api_key="<Optional, only required for Beta (Explained later)>"
 )
 
 assistant = AgentDNA(
     name="Assistant",
     type="agent",
+    api_key="<Optional, only required for Beta (Explained later)>"
 )
 ```
 
