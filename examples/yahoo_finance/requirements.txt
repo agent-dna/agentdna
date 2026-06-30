@@ -1,6 +1,0 @@
-fastmcp
-python-dotenv
-google-genai
-streamlit
-agent-dna
-yfinance

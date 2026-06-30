@@ -1,123 +1,582 @@
-from __future__ import annotations
-from typing import Any, Dict, Optional
+import os
+import json
+import base64
+import requests
 
-from .trust import RubixTrustService
-from .handler import RubixMessageHandler
+from datetime import datetime, timezone
+from typing import Any, Optional
+from pathlib import Path
+from dataclasses import asdict
+from urllib.parse import urljoin
 
+from .types import (
+    supported_actors, 
+    ACTOR_TYPE_AGENT, 
+    ACTOR_TYPE_HUMAN,
+
+    Actor,
+    Envelope,
+    IntentWorkflow,
+    HandleResult,
+    AgentCard,
+    VerificationResult,
+
+    VERIFY_LIGHT,
+    VERIFY_HEAVY,
+    supported_verification_modes,
+
+    CURRENT_VERSION
+)
+from .provenance import Provenance
+from .verifier import (
+    verify_light,
+    verify_heavy,
+)
+from .config import (
+    get_default_config_dir,
+    get_actor_registry_entry,
+    upsert_actor_registry_entry,
+    ActorRegistryEntry
+)
+from .id import get_user_card_id, get_agent_card_id
+from .card import build_user_card_payload, build_actor_card_payload
 
 class AgentDNA:
-    """
-    Single entry point for agent developers.
-
-    They only call:
-        dna.build(...)          # outbound message (request or response)
-        await dna.handle(...)   # inbound message (request or response)
-
-    Behavior is decided purely by `role`:
-
-      role="host":
-        - build  -> host_request      (host → remote)
-        - handle -> host              (remote → host, verify + NFT)
-
-      role="remote":
-        - build  -> agent_response    (remote → host)
-        - handle -> remote            (host → remote, verify host)
-    """
-
     def __init__(
         self,
-        alias: str,
-        api_key: str,
-        role: str = "remote",
-        chain_url: Optional[str] = None,
-        token_filename: str = "agent_info.json",
-    ) -> None:
-        if role not in ("host", "remote"):
-            raise ValueError("AgentDNA.role must be 'host' or 'remote'")
+        name: str,
+        type: str,
+        provenance_layer_url: str = "https://chain-connector-2.rubix.net",
+        api_key: str = "",
+        config_dir: str = "",
+        metadata: dict[str, Any] | None = None,
+        verification_mode: str = VERIFY_LIGHT,
+        agent_policy_file: Optional[Path] = None,
+        skip_actor_id_registration: bool = False
+    ):
+        if name == "":
+            raise NameError("'name' attribute cannot be empty")
+        
+        if type not in supported_actors:
+            raise ValueError(f"provided actor type {type} is not supported. Supported actors are {supported_actors}")
 
-        self.role = role
-        self.trust = RubixTrustService(alias=alias,api_key=api_key, chain_url=chain_url)
+        if verification_mode not in supported_verification_modes:
+            raise ValueError(
+                f"unsupported verification mode: "
+                f"{verification_mode}. "
+                f"Supported modes: "
+                f"{supported_verification_modes}"
+            )
+        self.verification_mode = verification_mode
+        
+        self.api_key = api_key
 
-        self.handler = RubixMessageHandler(
-            alias=alias,
+        self.config_dir = (
+            config_dir
+            if config_dir
+            else get_default_config_dir()
+        )
+        os.makedirs(
+            self.config_dir,
+            exist_ok=True,
+        )
+
+        self.provenance = Provenance(
+            name=name,
+            provenance_url=provenance_layer_url,
             api_key=api_key,
-            token_filename=token_filename,
-            trust_service=self.trust,
-            enable_nft=(role == "host"),
+            config_path=self.config_dir
         )
 
-    # ------------------------------------------------------------------
-    # BUILD: outbound messages
-    # ------------------------------------------------------------------
-    def build(self, **kwargs) -> Dict[str, Any]:
-        """
-        Host:
-            dna.build(
-                original_message=task,
-                state=tool_context.state or {},
-            )
+        self.type = type
+        self.name = name
+        self.metadata = metadata or {}
+        self.__agent_policy_path = agent_policy_file
 
-        Remote:
-            dna.build(
-                original_message=original_message,
-                response=agent_reply_text,
-                host_block=host_block,
-                extra={...},
-            )
-        """
-        if self.role == "host":
-            if "original_message" not in kwargs:
-                raise ValueError("Host.build() requires original_message")
-            return self.handler.build(
-                kind="host_request",
-                **kwargs,
-            )
-
-        # remote
-        if "original_message" not in kwargs or "response" not in kwargs:
-            raise ValueError("Remote.build() requires original_message and response")
-        return self.handler.build(
-            kind="agent_response",
-            **kwargs,
+        # Check from local config dir, if the actor card
+        # has already been created
+        entry = get_actor_registry_entry(
+            self.config_dir,
+            self.get_actor_id(),
         )
 
-    # ------------------------------------------------------------------
-    # HANDLE: inbound messages
-    # ------------------------------------------------------------------
-    async def handle(self, **kwargs) -> Dict[str, Any]:
+        if entry is not None:
+            self.card_id = entry.actor_card_id
+        elif self.type == ACTOR_TYPE_HUMAN:
+            self.card_id = self.create_user_card()
+        else:
+            self.card_id = ""
+        
+        # Beta: Register creds corresponding to Actor ID
+        if not skip_actor_id_registration:
+            if self.type == ACTOR_TYPE_AGENT:
+                self.__register_agent()
+            
+            if self.type == ACTOR_TYPE_HUMAN:
+                self.__register_user()
+        
+
+    def __validate_api_key(self) -> None:
+        if self.api_key == "":
+            raise ValueError(
+                "api_key is required for actor registration"
+            )
+
+    def __register_user(self) -> None:
         """
-        Host:
-            result = await dna.handle(
-                resp_parts=resp_parts,
-                original_task=task,
-                remote_name=agent_name,
-                execute_nft=True,
-            )
-
-        Remote:
-            verify_info = await dna.handle(
-                raw_text=raw,
-                verify_mode="light",
-            )
+        Registers the current user with
+        the provenance layer.
         """
-        if self.role == "remote":
-            # Remote handling inbound from host
-            raw_text = kwargs.get("raw_text")
-            if raw_text is None:
-                raise ValueError("Remote.handle() requires raw_text")
 
-            mode = kwargs.get("verify_mode", "light")
-            # trust.verify_message_payload is sync, but it's fine to call
-            return self.trust.verify_message_payload(
-                raw_text=raw_text,
-                mode=mode,
+        self.__validate_api_key()
+
+        response = requests.post(
+            urljoin(self.provenance.provenance_url, "/core/v1/register-user"),
+            json={
+                "user_id": self.get_actor_id(),
+            },
+            headers={
+                "X-API-Key": self.api_key,
+            },
+            timeout=300,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not data.get("status"):
+            raise RuntimeError(
+                f"user registration failed: "
+                f"{data.get('message', '')}"
             )
 
-        # Host handling inbound from remotes
-        for required in ("resp_parts", "original_task", "remote_name"):
-            if required not in kwargs:
-                raise ValueError(f"Host.handle() requires {required}")
-        return await self.handler.handle(
-            kind="host",
-            **kwargs,
+    def __register_agent(self) -> None:
+        """
+        Registers the current agent with
+        the provenance layer.
+        """
+
+        self.__validate_api_key()
+
+        policy_path = self.__agent_policy_path
+        if policy_path is None:
+            raise ValueError(
+                "agent policy path is not defined"
+            )
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file not found: "
+                f"{policy_path}"
+            )
+
+        with open(
+            policy_path,
+            "rb",
+        ) as fp:
+            response = requests.post(
+                urljoin(self.provenance.provenance_url, "/core/v1/register-agent"),
+                data={
+                    "agent_name": self.name,
+                    "agent_id": self.get_actor_id(),
+                },
+                files={
+                    "policy": (
+                        policy_path.name,
+                        fp,
+                    )
+                },
+                headers={
+                    "X-API-Key": self.api_key,
+                },
+                timeout=300,
+            )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        if not data.get("status"):
+            raise RuntimeError(
+                f"agent registration failed: "
+                f"{data.get('message', '')}"
+            )
+        
+    def get_actor_id(self) -> str:
+        return self.provenance.provenance_id
+
+    def create_user_card(self) -> str:
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise ValueError(
+                "only human actors can create "
+                "user cards"
+            )
+
+        user_card_id = get_user_card_id(
+            self.get_actor_id()
+        )
+
+        entry = get_actor_registry_entry(
+            self.config_dir,
+            self.get_actor_id(),
+        )
+
+        if entry is not None:
+            return entry.actor_card_id
+
+        payload = build_user_card_payload(
+            user_id=self.get_actor_id(),
+        )
+
+        self.provenance.create_new_provenance_card(
+            card_id=user_card_id,
+            card_info=json.dumps(payload),
+        )
+
+        upsert_actor_registry_entry(
+            self.config_dir,
+            ActorRegistryEntry(
+                actor_id=self.get_actor_id(),
+                actor_name=self.name,
+                actor_card_id=user_card_id,
+            ),
+        )
+
+        return user_card_id
+    
+    def create_agent_card_by_id(
+        self,
+        agent_id: str,
+        policy_file: str | Path
+    ) -> str:
+        """
+        Creates an Agent Card by passing its DID
+
+        Only human actors are allowed to create
+        agent cards.
+
+        It skips actor_info.json config update
+        """
+
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise ValueError(
+                "only human actors can create "
+                "agent cards"
+            )
+
+        policy_path = Path(policy_file)
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file does not exist: "
+                f"{policy_path}"
+            )
+
+        with open(
+            policy_path,
+            "rb",
+        ) as fp:
+            policy_b64 = (
+                base64.b64encode(
+                    fp.read()
+                ).decode("utf-8")
+            )
+        
+        agent_card_id = get_agent_card_id(
+            agent_id=agent_id
+        )
+
+        payload = build_actor_card_payload(
+            actor_id=agent_id,
+            policy=policy_b64,
+        )
+
+        try:
+            self.provenance.create_new_provenance_card(
+                card_id=agent_card_id,
+                card_info=json.dumps(payload),
+            )
+        except Exception as exc:
+            raise Exception(f"failed to create agent card, err: {exc}")
+
+        return agent_card_id
+
+    def create_agent_card(
+        self,
+        agent: "AgentDNA",
+        policy_file: str | Path,
+    ) -> str:
+        """
+        Creates an Agent Card for the supplied agent.
+
+        Only human actors are allowed to create
+        agent cards.
+        """
+
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise ValueError(
+                "only human actors can create "
+                "agent cards"
+            )
+
+        if agent.type != ACTOR_TYPE_AGENT:
+            raise ValueError(
+                "provided AgentDNA instance "
+                "is not of type agent"
+            )
+
+        policy_path = Path(policy_file)
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file does not exist: "
+                f"{policy_path}"
+            )
+
+        with open(
+            policy_path,
+            "rb",
+        ) as fp:
+            policy_b64 = (
+                base64.b64encode(
+                    fp.read()
+                ).decode("utf-8")
+            )
+
+        agent_card_id = get_agent_card_id(
+            agent.get_actor_id()
+        )
+
+        entry = get_actor_registry_entry(
+            self.config_dir,
+            agent.get_actor_id(),
+        )
+
+        if entry is not None:
+            agent.card_id = entry.actor_card_id
+            return agent.card_id
+
+        payload = build_actor_card_payload(
+            actor_id=agent.get_actor_id(),
+            policy=policy_b64,
+        )
+
+        try:
+            self.provenance.create_new_provenance_card(
+                card_id=agent_card_id,
+                card_info=json.dumps(payload),
+            )
+        except Exception as exc:
+            raise Exception(f"failed to create agent card, err: {exc}")
+
+        agent.card_id = agent_card_id
+
+        upsert_actor_registry_entry(
+            self.config_dir,
+            ActorRegistryEntry(
+                actor_id=agent.get_actor_id(),
+                actor_name=agent.name,
+                actor_card_id=agent_card_id,
+            ),
+        )
+
+        return agent_card_id
+
+    def update_agent_policy_by_id(
+            self,
+            agent_id: str,
+            policy_file: str | Path
+    ):
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise ValueError(
+                "only human actors can update "
+                "agent policies"
+            )
+        
+        policy_path = Path(policy_file)
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file does not exist: "
+                f"{policy_path}"
+            )
+
+        with open(policy_path, "rb") as fp:
+            policy_b64 = base64.b64encode(fp.read()).decode("utf-8")
+
+        history = self.provenance.provenance_card_history(
+            actor_id=agent_id
+        )        
+
+        if len(history) == 0:
+            raise ValueError(
+                f"agent card not found for {agent_id}"
+            )
+        
+        latest_data = history[-1]["data"]
+
+        actor_card_dict = json.loads(
+            latest_data
+        )
+
+        actor_card = AgentCard(
+            **actor_card_dict
+        )
+        actor_card.policy = policy_b64
+
+        try:
+            self.provenance.append_to_provenance_card(
+                card_id=actor_card.id,
+                card_info=json.dumps(
+                    asdict(actor_card)
+                ),
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to update agent {agent_id} policy: "
+                f"{exc}"
+            ) from exc
+
+    def update_agent_policy(
+        self,
+        agent: "AgentDNA",
+        policy_file: str | Path,
+    ):
+        if agent.type != ACTOR_TYPE_AGENT:
+            raise ValueError(
+                "provided AgentDNA instance "
+                "is not of type agent"
+            )
+        
+        self.update_agent_policy_by_id(
+            agent.get_actor_id(), 
+            policy_file=policy_file
+        )
+
+    def create_workflow_provenance(
+        self,
+        workflow: IntentWorkflow,
+    ) -> str:
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise RuntimeError(
+                "only users can create workflow provenance"
+            )
+        
+        if self.card_id == "":
+            raise ValueError(
+                "failed to create workflow provenance as user Card is not created"
+            )
+
+        if workflow.envelope is None:
+            raise ValueError(
+                "workflow does not contain an envelope"
+            )
+        
+        try:
+            workflow_card_id = self.provenance.create_new_child_provenance_card(
+                parent_card_id=self.card_id,
+                card_info=json.dumps(asdict(workflow)),
+            )
+
+            return workflow_card_id
+        except Exception as exc:
+            raise RuntimeError(f"failed create workflow provenance, err: {exc}")
+
+    def build(
+        self,
+        recipient_actor_id: str,
+        recipient_actor_name: str,
+        recipient_actor_type: str,
+        payload: str,
+        verification_result: Optional[VerificationResult] = None,
+        workflow: IntentWorkflow | None = None,
+        remarks: str = "",
+        from_actor: Optional[Actor] = None
+    ) -> IntentWorkflow:
+        """
+        Creates and signs a new envelope and
+        returns the IntentWorklow
+        """
+
+        from_ = from_actor or Actor(
+            id=self.get_actor_id(),
+            name=self.name,
+            type=self.type,
+        )
+
+        to = Actor(
+            id=recipient_actor_id,
+            name=recipient_actor_name,
+            type=recipient_actor_type,
+        )
+
+        parent_envelope = None
+
+        if workflow:
+            parent_envelope = workflow.envelope
+
+        envelope = Envelope(
+            from_=from_,
+            to=to,
+            payload=payload,
+            metadata=self.metadata or {},
+            parent_envelope=parent_envelope,
+            epoch=int(datetime.now(timezone.utc).timestamp())
+        )
+
+        if verification_result:
+            envelope.issues = verification_result.issues
+
+        signature = self.provenance.sign_envelope(
+            envelope
+        )
+
+        envelope.signature = signature
+
+        if workflow is None:
+            workflow = IntentWorkflow(
+                type="intent_workflow",
+                version=CURRENT_VERSION,
+                remarks=remarks,
+                envelope=envelope,
+            )
+        else:
+            workflow.envelope = envelope
+
+        return workflow
+
+    def handle(
+        self,
+        workflow: IntentWorkflow,
+    ) -> HandleResult:
+        """
+        Verifies an incoming workflow and returns
+        the latest envelope.
+        """
+        if workflow.envelope is None:
+            raise ValueError(
+                "workflow does not contain an envelope"
+            )
+
+        if self.verification_mode == VERIFY_LIGHT:
+            verification = verify_light(
+                self.provenance,
+                workflow,
+            )
+        elif self.verification_mode == VERIFY_HEAVY:
+            verification = verify_heavy(
+                self.provenance,
+                workflow,
+            )
+        else:
+            raise ValueError(
+                f"unsupported verification mode "
+                f"{self.verification_mode}"
+            )
+
+        return HandleResult(
+            workflow=workflow,
+            envelope=workflow.envelope,
+            verification=verification,
         )

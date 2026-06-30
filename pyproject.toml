@@ -4,14 +4,15 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-dna"
-version = "0.3.1"
-description = "AgentDNA: Verifiable and Auditable AI Agents"
+version = "0.4.0"
+description = "Security, Governance and Audit framework for AI Agents"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-license = { text = "MIT" }
+license = "Apache-2.0"
 
 authors = [
-  { name = "Aparna Ullas"}
+  { name = "Aparna Ullas"},
+  { name = "Arnab Ghose"},
 ]
 
 dependencies = [
@@ -19,11 +20,18 @@ dependencies = [
   "python-dotenv>=1.0.0",
   "rubix-py>=1.0.0",
   "py-multiformats-cid>=0.4.4",
+  "pyyaml>=6.0",
 ]
 
-[tool.setuptools.package-data]
-"agentdna" = ["token.txt", "config.json"]
+[project.optional-dependencies]
+# Required for the three-tier semantic CBAC pipeline
+# Install with: pip install agent-dna[semantic]
+semantic = [
+  "sentence-transformers>=3.0.0",
+  "scipy>=1.10.0",
+  "numpy>=1.24.0",
+]
 
 [project.urls]
-Homepage = "https://github.com/rubixchain/agentdna"
-Repository = "https://github.com/rubixchain/agentdna"
+Homepage = "https://github.com/agent-dna/agentdna"
+Repository = "https://github.com/agent-dna/agentdna"
