@@ -245,6 +245,63 @@ class AgentDNA:
 
         return user_card_id
     
+    def create_agent_card_by_id(
+        self,
+        agent_id: str,
+        policy_file: str | Path
+    ) -> str:
+        """
+        Creates an Agent Card by passing its DID
+
+        Only human actors are allowed to create
+        agent cards.
+
+        It skips actor_info.json config update
+        """
+
+        if self.type != ACTOR_TYPE_HUMAN:
+            raise ValueError(
+                "only human actors can create "
+                "agent cards"
+            )
+
+        policy_path = Path(policy_file)
+
+        if not policy_path.exists():
+            raise FileNotFoundError(
+                f"policy file does not exist: "
+                f"{policy_path}"
+            )
+
+        with open(
+            policy_path,
+            "rb",
+        ) as fp:
+            policy_b64 = (
+                base64.b64encode(
+                    fp.read()
+                ).decode("utf-8")
+            )
+        
+        agent_card_id = get_agent_card_id(
+            agent_id=agent_id
+        )
+
+        payload = build_actor_card_payload(
+            actor_id=agent_id,
+            policy=policy_b64,
+        )
+
+        try:
+            self.provenance.create_new_provenance_card(
+                card_id=agent_card_id,
+                card_info=json.dumps(payload),
+            )
+        except Exception as exc:
+            raise Exception(f"failed to create agent card, err: {exc}")
+
+        return agent_card_id
+
     def create_agent_card(
         self,
         agent: "AgentDNA",
