@@ -3,6 +3,8 @@ import json
 from .types import (
     Envelope,
     IntentWorkflow,
+    Actor,
+    Issue
 )
 
 def canonicalize_envelope(
@@ -44,7 +46,7 @@ def get_latest_envelope(
 
 def get_root_envelope(
     workflow: IntentWorkflow,
-) -> Envelope:
+) -> Envelope | None:
     """
     Returns the root envelope from a workflow.
     """
@@ -54,10 +56,10 @@ def get_root_envelope(
             "workflow does not contain an envelope"
         )
 
-    current = workflow.envelope
+    current = parse_envelope(workflow.envelope)
 
     while current.parent_envelope is not None:
-        current = current.parent_envelope
+        current = parse_envelope(current.parent_envelope)
 
     return current
 
@@ -72,9 +74,7 @@ def get_envelope_depth(
 
     return depth
 
-def unwrap_workflow(
-    workflow: IntentWorkflow,
-) -> list[Envelope]:
+def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
     """
     Unwraps a workflow into a list of envelopes.
 
@@ -87,21 +87,14 @@ def unwrap_workflow(
     becomes:
         [E4, E3, E2, E1]
     """
-
-    current = get_latest_envelope(
-        workflow
-    )
-
-    envelopes = []
+    current = get_latest_envelope(workflow)
+    envelopes: list[Envelope] = []
 
     while current is not None:
-        envelopes.append(
-            current
-        )
-
-        current = (
-            current.parent_envelope
-        )
+        if isinstance(current, dict):
+            current = parse_envelope(current)
+        envelopes.append(current)
+        current = current.parent_envelope
 
     return envelopes
 
@@ -152,3 +145,39 @@ def _envelope_to_dict(
         )
 
     return result
+
+def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
+    if isinstance(data, IntentWorkflow):
+        return data
+    data = dict(data)
+    data["envelope"] = parse_envelope(data.get("envelope"))
+    return IntentWorkflow(**data)
+
+def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
+    """Recursively turns a raw dict (and any nested dicts) into a
+    proper Envelope, including the parent_envelope chain."""
+    if data is None or isinstance(data, Envelope):
+        return data
+
+    data = dict(data)  # don't mutate caller's dict
+
+    # handle "from" alias
+    if "from" in data and "from_" not in data:
+        data["from_"] = data.pop("from")
+
+    data["from_"] = parse_actor(data.get("from_"))
+    data["to"] = parse_actor(data.get("to"))
+    data["issues"] = [parse_issue(i) for i in data.get("issues", [])]
+    data["parent_envelope"] = parse_envelope(data.get("parent_envelope"))
+
+    return Envelope(**data)
+
+def parse_actor(data: dict | Actor | None) -> Actor | None:
+    if data is None or isinstance(data, Actor):
+        return data
+    return Actor(**data)
+
+def parse_issue(data: dict | Issue) -> Issue:
+    if isinstance(data, Issue):
+        return data
+    return Issue(**data)
