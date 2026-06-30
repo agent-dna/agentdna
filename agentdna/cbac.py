@@ -169,7 +169,7 @@ class CBAC:
     def __init__(
         self,
         provenance: Provenance,
-        cbac_url: str,
+        cbac_url: str = "https://cbac-admin.agentdna.io",
         encoder_name: str = _DEFAULT_ENCODER,
         nli_model_name: str = _DEFAULT_NLI_MODEL,
         llm_backend: Optional[Callable] = None,
