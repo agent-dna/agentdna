@@ -426,8 +426,11 @@ class AgentDNA:
         actor_card.policy = policy_b64
 
         try:
+            agent_card_id = get_agent_card_id(
+                agent_id=agent_id
+            )
             self.provenance.append_to_provenance_card(
-                card_id=actor_card.id,
+                card_id=agent_card_id,
                 card_info=json.dumps(
                     asdict(actor_card)
                 ),
@@ -450,7 +453,7 @@ class AgentDNA:
             )
         
         self.update_agent_policy_by_id(
-            agent.get_actor_id(), 
+            agent.get_actor_id(),
             policy_file=policy_file
         )
 
