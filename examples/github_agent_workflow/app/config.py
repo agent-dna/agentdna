@@ -20,12 +20,15 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ────────────────────────────────────────────────────────────────
-    llm_provider: str = Field(default="gemini")          # "gemini" | "ollama"
+    llm_provider: str = Field(default="gemini")  # "gemini" | "ollama" | "openai"
     gemini_api_key: str = Field(default="")
     gemini_model: str = Field(default="gemini-2.0-flash")
     gemini_temperature: float = Field(default=0.1)
     ollama_base_url: str = Field(default="http://localhost:11434")
     ollama_model: str = Field(default="")
+    openai_api_key: str = Field(default="")
+    openai_model: str = Field(default="")
+    openai_base_url: str = Field(default="")
 
     # ── GitHub ─────────────────────────────────────────────────────────────
     github_token: str = Field(default="")
@@ -37,8 +40,6 @@ class Settings(BaseSettings):
 
     # ── AgentDNA ───────────────────────────────────────────────────────────
     agentdna_api_key: Optional[str] = Field(default=None)
-    agentdna_chain_url: Optional[str] = Field(default=None)
-    organisation_id: Optional[str] = Field(default=None)
 
     @property
     def mcp_server_url(self) -> str:
