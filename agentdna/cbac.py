@@ -622,7 +622,7 @@ class CBAC:
         }
 
         resp = requests.post(
-            f"{self.cbac_url.rstrip('/')}/authorize-action",
+            f"{self.cbac_url.rstrip('/')}/agent-admin/v1/authorize-action",
             json=payload,
             timeout=app_timeout,
         )
