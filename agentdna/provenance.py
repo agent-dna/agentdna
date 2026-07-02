@@ -16,7 +16,7 @@ class Provenance:
     def __init__(
         self,
         name: str,
-        provenance_url: str,
+        provenance_url: str = "https://chain-connector-2.rubix.net",
         api_key: str = "",
         config_path: str = "",
         timeout_in_seconds: int = 10000
