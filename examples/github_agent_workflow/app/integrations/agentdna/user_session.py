@@ -44,16 +44,12 @@ def _alias_for(
     submitted_by: Optional[str],
     submitter_email: Optional[str],
 ) -> str:
-    return (
-        submitter_email
-        or submitted_by
-        or "anonymous_submitter"
-    ).strip()
+    return submitter_email or "sample@example.com"
+
 
 
 def _get_or_make_user(
     alias: str,
-    metadata: Optional[Dict[str, Any]] = None,
 ) -> AgentDNA:
 
     if alias in _USER_CACHE:
@@ -69,10 +65,6 @@ def _get_or_make_user(
             type=ACTOR_TYPE_HUMAN,
             api_key=os.environ.get(
                 "AGENTDNA_API_KEY",
-                "",
-            ),
-            provenance_layer_url=os.environ.get(
-                "AGENTDNA_CHAIN_URL",
                 "",
             ),
         )
@@ -123,21 +115,9 @@ class UserSession:
             submitter_email,
         )
 
-        user_metadata = {
-            "email": submitter_email or "",
-            "orgId": os.environ.get(
-                "ORGANISATION_ID",
-                "",
-            ),
-        }
-
-        if metadata:
-            user_metadata.update(metadata)
-
         try:
             user = _get_or_make_user(
                 alias,
-                user_metadata,
             )
 
             if first_agent is None:

@@ -42,8 +42,7 @@ class AgentDNARegistry:
 
     def _init(self) -> None:
         self._cache: Dict[str, AgentDNA] = {}
-        self._api_key = os.environ.get("AGENTDNA_API_KEY") or ""
-        self._chain_url = os.environ.get("AGENTDNA_CHAIN_URL")
+        self._api_key = os.environ.get("AGENTDNA_API_KEY")
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -73,6 +72,23 @@ class AgentDNARegistry:
             self._cache[agent_name] = instance
             return instance
 
+    def find(
+        self,
+        agent_name: str,
+    ) -> AgentDNA | None:
+        """
+        Lookup an AgentDNA instance without constructing it.
+
+        Returns:
+            Cached AgentDNA instance if present.
+
+            None otherwise.
+        """
+        if not is_agentdna_enabled():
+            return None
+
+        return self._cache.get(agent_name)
+
     # ── Internals ─────────────────────────────────────────────────────────
 
     def _construct(
@@ -92,7 +108,6 @@ class AgentDNARegistry:
             name=agent_name,
             type="agent",
             api_key=os.environ.get("AGENTDNA_API_KEY", ""),
-            provenance_layer_url=os.environ.get("AGENTDNA_CHAIN_URL", ""),
             agent_policy_file=Path(policy_file)
         )
 

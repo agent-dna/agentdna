@@ -22,7 +22,7 @@ async def get_github_tools():
     # client timeouts to match the CBAC timeout so the worker→MCP call doesn't
     # give up first. ``sse_read_timeout`` (default ~5 min) is the one that
     # governs how long we wait for the tool result.
-    timeout_s = float(os.environ.get("CBAC_TIMEOUT_SECONDS", "3600"))
+    timeout_s = float("103600")
     client = MultiServerMCPClient(
         {
             "github": {

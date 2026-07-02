@@ -77,9 +77,8 @@ def dump_agent_actor_ids(path: Optional[Path] = None) -> None:
     """
     Write the registered agent name → DID map to a JSON file (overwrite mode).
 
-    Called automatically at the end of ``warmup_agents()``. Safe to call
-    multiple times — each call rewrites the file. No-op when AgentDNA is
-    disabled.
+    Only AgentDNA instances already present in the registry cache are written.
+    This function never constructs new AgentDNA instances.
 
     File format:
         {
@@ -93,27 +92,48 @@ def dump_agent_actor_ids(path: Optional[Path] = None) -> None:
     target = Path(path) if path else AGENT_IDS_FILE
 
     actor_ids: dict[str, str] = {}
-    for name, skills in _known_agents():
+
+    for name, _ in _known_agents():
         try:
-            dna = agentdna_registry.get(name, policy_file=skills)
-            if dna:
-                actor_id = dna.get_actor_id()
-                if actor_id:
-                    actor_ids[name] = actor_id
+            dna = agentdna_registry.find(name)
+
+            if dna is None:
+                continue
+
+            actor_id = dna.get_actor_id()
+
+            if actor_id:
+                actor_ids[name] = actor_id
+
         except Exception as exc:
-            logger.warning("agentdna_actor_lookup_failed", agent=name, error=str(exc))
+            logger.warning(
+                "agentdna_actor_lookup_failed",
+                agent=name,
+                error=str(exc),
+            )
 
     if not actor_ids:
         return
 
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(json.dumps(actor_ids, indent=2) + "\n", encoding="utf-8")
-        logger.info("agent_actor_ids_written", path=str(target), count=len(actor_ids))
+        target.write_text(
+            json.dumps(actor_ids, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        logger.info(
+            "agent_actor_ids_written",
+            path=str(target),
+            count=len(actor_ids),
+        )
+
     except Exception as exc:
-        logger.warning("agent_dids_write_failed", path=str(target), error=str(exc))
-
-
+        logger.warning(
+            "agent_dids_write_failed",
+            path=str(target),
+            error=str(exc),
+        )
 # ── User kind ─────────────────────────────────────────────────────────────────
 
 def warmup_user(email: Optional[str] = None) -> None:
@@ -125,17 +145,13 @@ def warmup_user(email: Optional[str] = None) -> None:
     """
     if not is_agentdna_enabled():
         return
-    email = (
-        email
-        or os.environ.get("GITHUB_AGENT_USER_EMAIL")
-        or ANONYMOUS_USER_EMAIL
-    )
-    metadata = {
-        "email": email,
-        "orgId": os.environ.get("ORGANISATION_ID", ""),
-    }
+
+    if email is None:
+        logger.error("agentdna_warmup_user_no_email", reason="no email provided")
+        return
+
     try:
-        user = _get_or_make_user(email, metadata=metadata)
+        user = _get_or_make_user(email)
         if user:
             logger.info("agentdna_warmup_user", email=email, actor_id=user.get_actor_id())
     except Exception as exc:
@@ -209,12 +225,8 @@ def deploy_user(email: str) -> dict:
     if not email:
         return {"ok": False, "reason": "email is required"}
 
-    metadata = {
-        "email": email,
-        "orgId": os.environ.get("ORGANISATION_ID", ""),
-    }
     try:
-        user = _get_or_make_user(email, metadata=metadata)
+        user = _get_or_make_user(email)
         if user is None:
             return {"ok": False, "reason": "could not construct user identity"}
         return {

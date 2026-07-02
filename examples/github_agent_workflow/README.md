@@ -62,9 +62,124 @@ The system consists of two cooperating AI agents.
 
 ---
 
+# Try it Out
+
+## Install dependencies
+
+Run the following to install the required dependencies
+
+```
+python3 -m venv venv
+
+source venv/bin/activate
+
+pip3 install -r requirements.txt
+```
+
+## Setup Environment Variables
+
+Copy `.env.sample` into `.env` by running the following command:
+
+```
+cp .env.sample .env
+```
+
+### Edit `.env` variables
+
+- `LLM_PROVIDER`
+
+Supported values: `gemini`, `openai` and `ollama`
+
+**Gemini**:
+
+Set the following values for `gemini` provider:
+
+    ```
+    GEMINI_API_KEY=
+    GEMINI_MODEL=gemini-3.1-flash-lite
+    GEMINI_TEMPERATURE=0.1
+    ```
+
+You can Gemini API Key from [here](https://aistudio.google.com/api-keys)
+
+**Ollama**:
+
+Set the following values for `ollama` provider:
+
+```
+OLLAMA_BASE_URL=Server URL for Ollama (default=http://localhost:11434)
+OLLAMA_MODEL=<Name of local AI model>
+```
+
+**OpenAI**:
+
+Set the following values for `openai` provider:
+
+```
+OPENAI_API_KEY=
+OPENAI_MODEL=<name of the AI model>
+OPENAI_BASE_URL=https://llm.agentdna.io
+```
+
+You can get the API Key for OpenAI API [here](https://platform.openai.com/api-keys)
+
+- `GITHUB_TOKEN`
+
+This environment requires your Github Personal Access Token (Classic). You can get it from [here](https://github.com/settings/tokens)
+
+- `MCP_SERVER_HOST` and `MCP_SERVER_PORT`
+
+These represent the Host and Port information for the Github MCP server respectively
+
+- `AGENTDNA_API_KEY`
+
+Get your AgentDNA API Key by Signing Up on the [AgentDNA Dashboard](https://agentdna.dashboard.io).
+
+## Run Project Servers
+
+- Run the following to start the Github MCP server:
+
+```
+python3 scripts/start_mcp.py
+```
+
+- In another terminal window, run the following to start the Streamlit UI:
+
+```
+streamlit run ui/streamlit_app.py
+```
+
+## UI Walkthrough
+
+### 1. Register User and Agents
+
+
+The first section of the UI represents the registeration of user and agents
+
+![setup_identity](assets/1_setup_identity.png)
+
+Provide that email which you have registered with on AgentDNA Dashboard and choose names for your Agents, and click on the respective buttons to register them
+
+### 2. Admin Approval
+
+Before we can see the Agents in action, they have to undergo an approval process by the admin, who will review the policy of the Agents.
+
+Once approved, you will recieve an email about the same.
+
+### 3. Running the prompt
+
+The second section of Demo lets you a run simple prompt to create issues on any Github repo, wherever your Github account has the required permissions
+
+![run_prompt](assets/2_run_prompt.png)
+
+After the prompt runs successfully, you will be view the details of the intent workflow [here](https://dashboard.agentdna.io/intents)
+
+---
+
 # Components
 
-## Coordinator
+
+## Coordinator Agent
 
 Responsible for understanding the user's request.
 
@@ -79,7 +194,7 @@ The Coordinator never calls GitHub directly.
 
 ---
 
-## Worker
+## Worker Agent
 
 Responsible for execution.
 
@@ -111,25 +226,6 @@ Each tool:
 3. Executes the GitHub REST request
 4. Appends an application event to the workflow
 5. Returns the updated workflow to the Worker
-
----
-
-## AgentDNA
-
-AgentDNA provides:
-
-* Identity management
-* Workflow verification
-* Envelope signing
-* Provenance generation
-
-Each participant possesses an identity:
-
-* Human
-* Coordinator
-* Worker
-
-GitHub is currently modeled as an application actor.
 
 ---
 
@@ -222,43 +318,11 @@ AgentDNA.create_workflow_provenance(...)
 
 This produces a provenance record representing the complete execution.
 
----
-
-# Repository Structure
-
-```
-app/
-├── agents/
-│   ├── coordinator/
-│   ├── worker/
-│   ├── graph.py
-│   └── agentdna_helpers.py
-│
-├── integrations/
-│   └── agentdna/
-│
-├── mcp_client/
-│
-├── mcp_server/
-│
-├── utils.py
-│
-scripts/
-├── start_mcp.py
-├── run_flow.py
-│
-streamlit_app.py
-```
 
 ---
 
 # Configuration
 
-Copy the sample environment file.
-
-```
-cp .env.sample .env
-```
 
 Populate the following values:
 

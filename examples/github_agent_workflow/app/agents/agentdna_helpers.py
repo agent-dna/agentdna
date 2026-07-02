@@ -49,6 +49,10 @@ def get_dna(
         policy_file=skills_file,
     )
 
+def find_dna(
+    agent_name: str,
+) -> AgentDNA | None:
+    return agentdna_registry.find(agent_name)
 
 def verify_inbound(
     dna: AgentDNA,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 import secrets
@@ -33,6 +34,12 @@ COORDINATOR_SKILLS_FILE = str(
     / "skills.md"
 )
 
+if not bool(os.environ.get("AGENTDNA_API_KEY")):
+    st.error(
+        "The AGENTDNA_API_KEY environment variable is not set. "
+        "Please set it to your AgentDNA API key and restart the app."
+    )
+    st.stop()
 
 st.set_page_config(page_title="GithubAgent", layout="wide")
 

@@ -85,15 +85,7 @@ def _post_via_cbac(
             api_key=os.environ.get(
                 "AGENTDNA_API_KEY",
                 ""
-            ),
-            provenance_url=os.environ.get(
-                "AGENTDNA_CHAIN_URL",
-                "",
-            ),
-        ),
-        cbac_url=os.environ.get(
-            "AGENTDNA_CBAC_URL",
-            "",
+            )
         ),
     )
 
@@ -106,12 +98,7 @@ def _post_via_cbac(
             app_method="POST",
             app_headers=_gh_headers(),
             app_body=body,
-            app_timeout=float(
-                os.environ.get(
-                    "CBAC_TIMEOUT_SECONDS",
-                    "3600",
-                )
-            ),
+            app_timeout=103600
         )
 
     except PermissionError as exc:
