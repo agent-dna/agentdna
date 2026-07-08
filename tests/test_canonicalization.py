@@ -1,28 +1,37 @@
 import copy
 
-from agentdna.helpers import canonicalize_envelope
-from agentdna.types import Actor, Envelope
-
+from dataclasses import fields
+from agentdna.helpers import canonicalize_envelope, _envelope_to_dict
+from agentdna.types import Actor, Envelope, Issue
 
 def create_envelope():
     """
-    Creates a minimal envelope for canonicalization
-    tests.
+    Creates a minimal envelope for
+    canonicalization tests.
     """
     return Envelope(
         from_=Actor(
-            id="alice",
+            id="bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
             name="Alice",
             type="human",
+            metadata={
+                "department": "Engineering",
+            },
         ),
         to=Actor(
-            id="bob",
+            id="bafybeig7r4m2l6s3v5kq9x8c1n0pahf6wzj2e4t7y8u9m3n5q6r1s2v4ya",
             name="Bob",
             type="agent",
+            metadata={
+                "model": "gpt-5",
+            },
         ),
         payload="Hello World",
-        metadata={},
         epoch=1,
+        metadata={
+            "workflow_id": "1234",
+        },
+        issues=[],
     )
 
 
@@ -187,3 +196,57 @@ def test_grandparent_signature_changes_digest():
     digest2 = canonicalize_envelope(child)
 
     assert digest1 != digest2
+
+def test_canonicalization_contains_all_envelope_fields():
+    """
+    Ensures every Envelope, Actor and Issue field
+    intended for canonicalization is present in the
+    serialized dictionary.
+    """
+    envelope = create_envelope()
+    envelope.issues = [
+        Issue(
+            depth=1,
+            reason="Test issue",
+        )
+    ]
+
+    result = _envelope_to_dict(envelope)
+
+    expected_envelope_fields = {
+        field.name
+        for field in fields(Envelope)
+        if field.name not in {
+            "signature",
+            "parent_envelope",
+        }
+    }
+
+    assert set(result.keys()) == expected_envelope_fields
+
+    assert set(result["from_"].keys()) == {
+        field.name
+        for field in fields(Actor)
+    }
+
+    assert set(result["to"].keys()) == {
+        field.name
+        for field in fields(Actor)
+    }
+
+    assert set(result["issues"][0].keys()) == {
+        field.name
+        for field in fields(Issue)
+    }
+
+def test_current_signature_not_serialized():
+    """
+    Ensures the current envelope signature is
+    excluded from canonicalization.
+    """
+    envelope = create_envelope()
+    envelope.signature = "sample"
+
+    result = _envelope_to_dict(envelope)
+
+    assert "signature" not in result
