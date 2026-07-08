@@ -125,6 +125,13 @@ def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
         },
         "payload": envelope.payload,
         "metadata": envelope.metadata,
+        "epoch": envelope.epoch,
+        "issues": [
+            {
+                "depth": issue.depth,
+                "reason": issue.reason
+            } for issue in envelope.issues
+        ]
     }
 
     if not is_current:

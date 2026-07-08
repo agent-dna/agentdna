@@ -1,6 +1,9 @@
 import pytest
 
-from agentdna.types import VERIFY_LIGHT, VERIFY_HEAVY
+from agentdna.types import (
+    VERIFY_LIGHT, VERIFY_HEAVY, VerificationResult,
+    Issue
+)
 
 def test_simple_build_handle_ideal_flow(user, agent):
     workflow = user.build(
@@ -188,5 +191,52 @@ def test_heavy_verification_mode(user, agent, second_agent):
     workflow.envelope.parent_envelope.payload = ""
 
     result = second_agent.handle(workflow)
+
+    assert result.verification.valid == False
+
+def test_issues_tamper_in_envelope(user, agent):
+    """
+    Ensures the signature verification
+    fails upon `issues` attribute of
+    envelope getting tampered.
+    """
+    workflow = user.build(
+        recipient_actor_id=agent.get_actor_id(),
+        recipient_actor_name=agent.name,
+        recipient_actor_type=agent.type,
+        payload="MFA is mandatory",
+        verification_result=VerificationResult(
+            valid=False,
+            chain_depth=1,
+            issues=[Issue(
+                depth=1,
+                reason="CoCA error: signature verification failed"
+            )]
+        )
+    )
+
+    workflow.envelope.issues = None
+    
+    result = agent.handle(workflow)
+
+    assert result.verification.valid == False
+
+def test_epoch_tamper_in_envelope(user, agent):
+    """
+    Ensures the signature verification
+    fails upon `issues` attribute of
+    envelope getting tampered.
+    """
+    
+    workflow = user.build(
+        recipient_actor_id=agent.get_actor_id(),
+        recipient_actor_name=agent.name,
+        recipient_actor_type=agent.type,
+        payload="MFA is mandatory"
+    )
+
+    workflow.envelope.epoch = 2
+    
+    result = agent.handle(workflow)
 
     assert result.verification.valid == False
