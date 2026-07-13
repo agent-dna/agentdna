@@ -35,3 +35,23 @@ semantic = [
 [project.urls]
 Homepage = "https://github.com/agent-dna/agentdna"
 Repository = "https://github.com/agent-dna/agentdna"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "ruff>=0.15.20",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pyright]
+# Package is only partially typed; basic keeps the hook signal useful without noise.
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+include = ["agentdna"]
+# examples/ has its own heavy deps that aren't in the dev env; ruff still covers it, pyright does not.
+exclude = ["examples", ".venv", "**/__pycache__"]

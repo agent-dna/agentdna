@@ -21,6 +21,7 @@ MODEL_EMBEDDINGS_DIR = "embeddings_cache"
 CURRENT_VERSION = "1.0"
 SUPPORTED_VERSIONS = ["1.0"]
 
+
 @dataclass
 class Actor:
     """
@@ -64,6 +65,7 @@ class Envelope:
     # Previous envelope in the provenance chain.
     parent_envelope: Envelope | None = None
 
+
 @dataclass
 class IntentWorkflow:
     """
@@ -86,10 +88,12 @@ class IntentWorkflow:
     # Latest envelope in the workflow.
     envelope: Envelope | None = None
 
+
 @dataclass
 class Issue:
     depth: int
     reason: str
+
 
 @dataclass
 class VerificationResult:
@@ -97,11 +101,13 @@ class VerificationResult:
     chain_depth: int
     issues: list[Issue] = field(default_factory=list)
 
+
 @dataclass
 class HandleResult:
     workflow: IntentWorkflow
     envelope: Envelope
     verification: VerificationResult
+
 
 @dataclass
 class AgentCard:
@@ -116,6 +122,7 @@ class UserCard:
     type: str
     id: str
     metadata: dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class ActorRegistryEntry:

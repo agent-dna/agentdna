@@ -8,6 +8,7 @@ def build_actor_card_payload(
         "policy": policy,
     }
 
+
 def build_user_card_payload(
     user_id: str,
 ) -> dict:

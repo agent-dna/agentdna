@@ -57,9 +57,7 @@ from app.utils import (
 )
 from app.agents.state import GithubAgentState
 
-SKILLS_FILE = str(
-    Path(__file__).parent / "skills.md"
-)
+SKILLS_FILE = str(Path(__file__).parent / "skills.md")
 
 WORKER_SYSTEM = """
 You are the Worker agent.
@@ -87,11 +85,7 @@ def _extract_workflow(messages: list) -> str:
     """
 
     for msg in reversed(messages):
-
-        is_tool = (
-            getattr(msg, "type", "") == "tool"
-            or msg.__class__.__name__ == "ToolMessage"
-        )
+        is_tool = getattr(msg, "type", "") == "tool" or msg.__class__.__name__ == "ToolMessage"
 
         if not is_tool:
             continue
@@ -108,7 +102,6 @@ def _extract_workflow(messages: list) -> str:
                 pass
         elif isinstance(content, list):
             for part in content:
-
                 if not isinstance(part, dict):
                     continue
 
@@ -143,6 +136,7 @@ def _wrap_tools(
 
     for tool in tools:
         current_tool = tool
+
         async def _call(
             _tool=current_tool,
             **kwargs,
@@ -167,11 +161,9 @@ def _wrap_tools(
 
     return wrapped
 
-COORDINATOR_SKILLS_FILE = str(
-    Path(__file__).resolve().parents[1]
-    / "coordinator"
-    / "skills.md"
-)
+
+COORDINATOR_SKILLS_FILE = str(Path(__file__).resolve().parents[1] / "coordinator" / "skills.md")
+
 
 async def worker_node(state: GithubAgentState) -> GithubAgentState:
     """
@@ -184,19 +176,12 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
     )
 
     if dna is None:
-        raise RuntimeError(
-            "AgentDNA not defined for worker_node"
-        )
+        raise RuntimeError("AgentDNA not defined for worker_node")
 
-    coordinator_dna = get_dna(
-        coordinator_name(),
-        COORDINATOR_SKILLS_FILE
-    )
+    coordinator_dna = get_dna(coordinator_name(), COORDINATOR_SKILLS_FILE)
 
     if coordinator_dna is None:
-        raise RuntimeError(
-            "Coordinator AgentDNA not found"
-        )
+        raise RuntimeError("Coordinator AgentDNA not found")
 
     handle_result = verify_inbound(
         dna,
@@ -204,18 +189,13 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
     )
 
     if handle_result is None:
-        raise RuntimeError(
-            "worker_node: failed to deserialize or verify workflow"
-        )
+        raise RuntimeError("worker_node: failed to deserialize or verify workflow")
 
     #
     # Verification failed
     #
     if not handle_result.verification.valid:
-
-        latest_envelope = get_latest_envelope(
-            handle_result.workflow
-        )
+        latest_envelope = get_latest_envelope(handle_result.workflow)
 
         rejected_workflow = dna.build(
             recipient_actor_id=latest_envelope.from_.id,
@@ -233,14 +213,9 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
 
         return {
             "_agentdna_terminal": True,
-            "_agentdna_terminal_reason":
-                "verification_failed",
-            "_agentdna_workflow":
-                serialize_workflow(
-                    rejected_workflow
-                ),
-            "final_response":
-                "Request rejected due to workflow verification failure.",
+            "_agentdna_terminal_reason": "verification_failed",
+            "_agentdna_workflow": serialize_workflow(rejected_workflow),
+            "final_response": "Request rejected due to workflow verification failure.",
         }
 
     task_spec = state.get(
@@ -250,14 +225,11 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
 
     if not task_spec:
         return {
-            "final_response":
-                "Worker received an empty task spec.",
+            "final_response": "Worker received an empty task spec.",
             "worker_messages": [],
         }
 
-    workflow_json = serialize_workflow(
-        handle_result.workflow
-    )
+    workflow_json = serialize_workflow(handle_result.workflow)
 
     raw_tools = await get_github_tools()
 
@@ -276,44 +248,24 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
         prompt=WORKER_SYSTEM,
     )
 
-    result = await agent.ainvoke(
-        {
-            "messages": [
-                HumanMessage(
-                    content=task_spec
-                )
-            ]
-        }
-    )
+    result = await agent.ainvoke({"messages": [HumanMessage(content=task_spec)]})
 
     messages = result.get(
         "messages",
         [],
     )
 
-    final = (
-        messages[-1]
-        if messages
-        else None
-    )
+    final = messages[-1] if messages else None
 
-    final_text = (
-        getattr(final, "content", "")
-        if final is not None
-        else ""
-    )
+    final_text = getattr(final, "content", "") if final is not None else ""
 
     if not isinstance(
         final_text,
         str,
     ):
-        final_text = str(
-            final_text
-        )
+        final_text = str(final_text)
 
-    returned_workflow_json = _extract_workflow(
-        messages
-    )
+    returned_workflow_json = _extract_workflow(messages)
 
     if not returned_workflow_json:
         failed_workflow = dna.build(
@@ -332,16 +284,11 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
         return {
             "_agentdna_terminal": True,
             "_agentdna_terminal_reason": "mcp_failed",
-            "_agentdna_workflow": serialize_workflow(
-                failed_workflow
-            ),
-            "final_response":
-                "MCP did not return a workflow.",
+            "_agentdna_workflow": serialize_workflow(failed_workflow),
+            "final_response": "MCP did not return a workflow.",
         }
 
-    returned_workflow = deserialize_workflow(
-        returned_workflow_json
-    )
+    returned_workflow = deserialize_workflow(returned_workflow_json)
 
     worker_to_coordinator_workflow = dna.build(
         recipient_actor_id=coordinator_dna.get_actor_id(),
@@ -351,8 +298,7 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
             {
                 "agent": worker_name(),
                 "status": "completed",
-                "final_response_preview":
-                    final_text[:500],
+                "final_response_preview": final_text[:500],
             }
         ),
         workflow=returned_workflow,
@@ -361,9 +307,6 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
     return {
         "worker_messages": messages,
         "final_response": final_text,
-        "_agentdna_workflow":
-            serialize_workflow(
-                worker_to_coordinator_workflow
-            ),
+        "_agentdna_workflow": serialize_workflow(worker_to_coordinator_workflow),
         "_agentdna_phase": "finalize",
     }

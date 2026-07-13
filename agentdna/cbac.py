@@ -8,10 +8,7 @@ import requests
 import yaml
 import os
 
-from typing import (
-    Optional, Callable, Dict, 
-    Any, List, Tuple
-)
+from typing import Optional, Callable, Dict, Any, List, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
@@ -22,7 +19,7 @@ from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 from sentence_transformers import SentenceTransformer
 
-_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5" # bi-encoder for Tier 1 cosine
+_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"  # bi-encoder for Tier 1 cosine
 _DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
 
 # Gap thresholds: allow when gap > +0.12, deny when gap < -0.08, else escalate.
@@ -35,42 +32,52 @@ _ENTAILMENT_THRESHOLD: float = 0.55
 _CONTRADICTION_THRESHOLD: float = 0.60
 
 REQUIRED_FRONTMATTER_KEYS = (
-    "agent-did", "issued-by", "issued-at", "expires-at", "allowed-actions",
+    "agent-did",
+    "issued-by",
+    "issued-at",
+    "expires-at",
+    "allowed-actions",
 )
+
 
 @dataclass
 class SkillsCard:
     """Parsed skill.md card. Frontmatter fields + the markdown body."""
-    agent_did:         str
-    agent_name:        str
-    issued_by:         str
-    issued_at:         datetime
-    expires_at:        datetime
-    allowed_actions:   List[str]
+
+    agent_did: str
+    agent_name: str
+    issued_by: str
+    issued_at: datetime
+    expires_at: datetime
+    allowed_actions: List[str]
     forbidden_actions: List[str] = field(default_factory=list)
-    constraints:       Dict[str, Any] = field(default_factory=dict)
-    can_delegate_to:   List[str] = field(default_factory=list)
-    requires:          Dict[str, Any] = field(default_factory=dict)
-    body:              str = ""
-    raw_frontmatter:   Dict[str, Any] = field(default_factory=dict)
+    constraints: Dict[str, Any] = field(default_factory=dict)
+    can_delegate_to: List[str] = field(default_factory=list)
+    requires: Dict[str, Any] = field(default_factory=dict)
+    body: str = ""
+    raw_frontmatter: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CardCheck:
     """Result of CBAC check for one layer in the chain."""
-    layer_did:    str
-    card_id:     Optional[str]
-    card:         Optional[SkillsCard]
-    action:       Optional[str]
-    passed:       bool
-    reasons:      List[str] = field(default_factory=list)
+
+    layer_did: str
+    card_id: Optional[str]
+    card: Optional[SkillsCard]
+    action: Optional[str]
+    passed: bool
+    reasons: List[str] = field(default_factory=list)
+
 
 @dataclass
 class CBACResult:
     """Overall CBAC decision after walking the full chain."""
-    decision:    str                                # "allow" | "deny" | "advise"
-    reason:      str = ""
-    trace:       List[CardCheck] = field(default_factory=list)
+
+    decision: str  # "allow" | "deny" | "advise"
+    reason: str = ""
+    trace: List[CardCheck] = field(default_factory=list)
+
 
 def parse_skill_md(text: str) -> SkillsCard:
     """
@@ -109,6 +116,7 @@ def parse_skill_md(text: str) -> SkillsCard:
         raw_frontmatter=fm,
     )
 
+
 def _parse_dt(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -116,6 +124,7 @@ def _parse_dt(value: Any) -> datetime:
         s = value.replace("Z", "+00:00")
         return datetime.fromisoformat(s)
     raise ValueError(f"unparseable timestamp: {value!r}")
+
 
 def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> str:
     """Recursively gather every string found in an arbitrary blob.
@@ -143,14 +152,13 @@ def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> st
             parts.append(_collect_text(v, include_keys=include_keys, _depth=_depth + 1))
         return " ".join(parts)
     if isinstance(obj, (list, tuple, set)):
-        return " ".join(
-            _collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj
-        )
+        return " ".join(_collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj)
     # Dataclass / arbitrary object → walk its __dict__.
     data = getattr(obj, "__dict__", None)
     if isinstance(data, dict):
         return _collect_text(data, include_keys=include_keys, _depth=_depth + 1)
     return str(obj)
+
 
 def _intended_action_text(intended_action: Any) -> str:
     """Flatten an intended-action of *any* shape (str / dict / list / object)
@@ -164,6 +172,7 @@ def _intended_action_text(intended_action: Any) -> str:
     scaffolding that would only dilute the coverage score.
     """
     return _collect_text(intended_action, include_keys=False)
+
 
 class CBAC:
     def __init__(
@@ -190,19 +199,17 @@ class CBAC:
 
         # Make embeddings config dir
         self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
-        os.makedirs(
-            self.embeddings_dir,
-            exist_ok=True
-        )
+        os.makedirs(self.embeddings_dir, exist_ok=True)
 
     def _get_encoder(self):
         if self._encoder is None:
             self._encoder = SentenceTransformer(self._encoder_name)
         return self._encoder
-    
+
     def _get_nli(self):
         if self._nli is None:
             from sentence_transformers.cross_encoder import CrossEncoder
+
             self._nli = CrossEncoder(self._nli_model_name)
             try:
                 if not self._nli.model:
@@ -217,7 +224,7 @@ class CBAC:
                 # Fallback for deberta NLI label order (contradiction/entailment/neutral)
                 self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
         return self._nli
-    
+
     def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
 
@@ -226,6 +233,7 @@ class CBAC:
         """
         import numpy as np
         from scipy.special import softmax as sp_softmax
+
         nli = self._get_nli()
         raw = nli.predict([(premise, hypothesis)], apply_softmax=False)
         probs = sp_softmax(raw[0])
@@ -268,7 +276,7 @@ class CBAC:
                     chunks.append(f"{key}: {value}")
             return chunks
         return []
-    
+
     def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
         """NLI-classify each chunk as allowed or forbidden.
 
@@ -300,27 +308,20 @@ class CBAC:
         associated with an agent.
         """
 
-        actor_card_dict = self.provenance.get_latest_provenance_record(
-            actor_id=agent_id
-        )
+        actor_card_dict = self.provenance.get_latest_provenance_record(actor_id=agent_id)
 
-        actor_card = AgentCard(
-            **actor_card_dict
-        )
+        actor_card = AgentCard(**actor_card_dict)
 
         try:
             return base64.b64decode(actor_card.policy).decode("utf-8")
         except Exception as exc:
-            raise RuntimeError(
-                f"failed to decode policy for "
-                f"agent {agent_id}: {exc}"
-            ) from exc
+            raise RuntimeError(f"failed to decode policy for agent {agent_id}: {exc}") from exc
 
     def __get_embedding_file_path(self, agent_id: str) -> Path:
         """Return the .pkl path for this agent's precomputed policy vectors."""
         digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
         return Path(self.embeddings_dir) / f"{digest}.pkl"
-    
+
     def __save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
         path = self.__get_embedding_file_path(agent_id)
         with path.open("wb") as f:
@@ -371,7 +372,7 @@ class CBAC:
         policy = self.__get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
-        
+
         chunks = self._flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
@@ -402,7 +403,7 @@ class CBAC:
 
         await asyncio.to_thread(self.__save_to_embeddings_dir, agent_id, payload)
         return payload
-    
+
     async def __check1_drift(
         self,
         user_intent: str,
@@ -421,10 +422,11 @@ class CBAC:
                 f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
             )
         return None
-    
+
     def _max_cosine(self, query_vec, chunk_vecs) -> float:
         """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
         import numpy as np
+
         if chunk_vecs.shape[0] == 0:
             return 0.0
         sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
@@ -487,7 +489,9 @@ class CBAC:
 
         intent_text = _intended_action_text(intended_action)
         if not intent_text.strip():
-            return CBACResult(decision="deny", reason="Intended action carries no analysable content")
+            return CBACResult(
+                decision="deny", reason="Intended action carries no analysable content"
+            )
 
         # Check 1: NLI drift — only runs when caller supplies the root user intent.
         if user_intent and intent_text:
@@ -500,7 +504,9 @@ class CBAC:
         try:
             current_policy = self.__get_latest_agent_policy(agent_id)
         except Exception as e:
-            return CBACResult(decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}")
+            return CBACResult(
+                decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}"
+            )
         if not current_policy:
             return CBACResult(decision="deny", reason=f"No policy available for agent {agent_id}")
 
@@ -514,7 +520,9 @@ class CBAC:
             try:
                 cached = await self.precompute_policy(agent_id)
             except Exception as e:
-                return CBACResult(decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}")
+                return CBACResult(
+                    decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}"
+                )
 
         allowed_chunks: List[str] = cached["allowed_chunks"]
         forbidden_chunks: List[str] = cached["forbidden_chunks"]
@@ -540,13 +548,13 @@ class CBAC:
             return CBACResult(
                 decision="allow",
                 reason=f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
-                       f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+                f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
             )
         if gap < -self._deny_gap:
             return CBACResult(
                 decision="deny",
                 reason=f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
-                       f"(intent closer to forbidden than allowed policy)",
+                f"(intent closer to forbidden than allowed policy)",
             )
 
         # Tier 2: NLI entailment vs top allowed chunk.
@@ -592,7 +600,7 @@ class CBAC:
         if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
             return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
         return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
-    
+
     def authorise_agent_app_interaction(
         self,
         agent_id: str,

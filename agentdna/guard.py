@@ -53,8 +53,14 @@ import json
 
 from dataclasses import asdict, dataclass, field
 from typing import (
-    Any, Awaitable, Callable, Dict,
-    Iterator, Optional, Tuple, TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Iterator,
+    Optional,
+    Tuple,
+    TYPE_CHECKING,
 )
 
 from .helpers import get_envelope_depth, parse_workflow
@@ -66,6 +72,7 @@ if TYPE_CHECKING:
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class AppRequest:
     """An external HTTP action a guarded function wants performed.
@@ -75,10 +82,11 @@ class AppRequest:
     guard performs the request after authorization (locally, or via the
     remote CBAC proxy which decides and executes in one step).
     """
-    url:     str
-    method:  str = "POST"
+
+    url: str
+    method: str = "POST"
     headers: Dict[str, str] = field(default_factory=dict)
-    body:    str | dict | None = None
+    body: str | dict | None = None
     timeout: float = 30.0
 
 
@@ -90,14 +98,15 @@ class GovernanceContext:
     appended. Because callers share this holder object (not a snapshot),
     updates made inside nested calls are visible to the enclosing scope.
     """
-    actor:       "AgentDNA"
-    workflow:    IntentWorkflow
+
+    actor: "AgentDNA"
+    workflow: IntentWorkflow
     user_intent: str = ""
-    lock:        asyncio.Lock = field(default_factory=asyncio.Lock)
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
-_governance_ctx: contextvars.ContextVar[Optional[GovernanceContext]] = (
-    contextvars.ContextVar("agentdna_governance_ctx", default=None)
+_governance_ctx: contextvars.ContextVar[Optional[GovernanceContext]] = contextvars.ContextVar(
+    "agentdna_governance_ctx", default=None
 )
 
 
@@ -133,12 +142,13 @@ def cbac_context(
 
 # ── Layer configuration ───────────────────────────────────────────────────────
 
+
 @dataclass
 class GuardConfig:
-    mode:          str = "remote"      # "remote" | "local"
-    cbac_url:      str = "https://cbac-admin.agentdna.io"
-    cbac_timeout:  float = 100.0
-    advise_action: str = "deny"        # local-mode "advise" mapping; fail-closed
+    mode: str = "remote"  # "remote" | "local"
+    cbac_url: str = "https://cbac-admin.agentdna.io"
+    cbac_timeout: float = 100.0
+    advise_action: str = "deny"  # local-mode "advise" mapping; fail-closed
 
 
 _config = GuardConfig()
@@ -171,6 +181,7 @@ def get_config() -> GuardConfig:
 
 # ── Workflow (de)serialization ────────────────────────────────────────────────
 
+
 def serialize_workflow(workflow: IntentWorkflow) -> str:
     return json.dumps(
         asdict(workflow),
@@ -184,6 +195,7 @@ def deserialize_workflow(data: str) -> IntentWorkflow:
 
 
 # ── Guard internals ───────────────────────────────────────────────────────────
+
 
 def _default_intent(app_name: str, action_name: str, kwargs: Dict[str, Any]) -> str:
     parts = [f"{app_name}:{action_name}"]
@@ -218,13 +230,17 @@ async def _execute_request(request: AppRequest) -> Tuple[int, str, dict]:
     async with httpx.AsyncClient(timeout=request.timeout) as client:
         if isinstance(request.body, (dict, list)):
             response = await client.request(
-                request.method, request.url,
-                json=request.body, headers=request.headers,
+                request.method,
+                request.url,
+                json=request.body,
+                headers=request.headers,
             )
         else:
             response = await client.request(
-                request.method, request.url,
-                content=request.body, headers=request.headers,
+                request.method,
+                request.url,
+                content=request.body,
+                headers=request.headers,
             )
 
     try:
@@ -372,6 +388,7 @@ async def _append_outcome(
 
 # ── The decorator ─────────────────────────────────────────────────────────────
 
+
 def cbac_guard(
     *,
     app_name: str = "app",
@@ -419,9 +436,7 @@ def cbac_guard(
 
     def decorate(fn: Callable[..., Awaitable[Any]]):
         if not asyncio.iscoroutinefunction(fn):
-            raise TypeError(
-                f"cbac_guard requires an async function, got {fn!r}"
-            )
+            raise TypeError(f"cbac_guard requires an async function, got {fn!r}")
 
         action_name = action or fn.__name__
         sig = inspect.signature(fn)
@@ -456,9 +471,7 @@ def cbac_guard(
             )
 
             outbound_payload = (
-                describe(call_kwargs)
-                if describe
-                else _default_describe(action_name, call_kwargs)
+                describe(call_kwargs) if describe else _default_describe(action_name, call_kwargs)
             )
             await _append_outbound(ctx, app_name, outbound_payload)
 
@@ -475,7 +488,10 @@ def cbac_guard(
                     result = await fn(*args, **kwargs)
                 except Exception as exc:
                     await _append_outcome(
-                        ctx, app_name, {"status": "error"}, issue_reason=str(exc),
+                        ctx,
+                        app_name,
+                        {"status": "error"},
+                        issue_reason=str(exc),
                     )
                     return {"status": "error", "error": str(exc)}
 
@@ -488,7 +504,10 @@ def cbac_guard(
                 request = await fn(*args, **kwargs)
             except Exception as exc:
                 await _append_outcome(
-                    ctx, app_name, {"status": "error"}, issue_reason=str(exc),
+                    ctx,
+                    app_name,
+                    {"status": "error"},
+                    issue_reason=str(exc),
                 )
                 return {"status": "error", "error": str(exc)}
 
@@ -526,7 +545,10 @@ def cbac_guard(
                         status_code, text, data = await _execute_request(request)
             except Exception as exc:
                 await _append_outcome(
-                    ctx, app_name, {"status": "error"}, issue_reason=str(exc),
+                    ctx,
+                    app_name,
+                    {"status": "error"},
+                    issue_reason=str(exc),
                 )
                 return {"status": "error", "error": str(exc)}
 
@@ -535,7 +557,8 @@ def cbac_guard(
 
             if status_code >= 300:
                 await _append_outcome(
-                    ctx, app_name,
+                    ctx,
+                    app_name,
                     {"status": "failed", "http_status": status_code},
                     issue_reason=text[:500],
                 )
@@ -548,7 +571,8 @@ def cbac_guard(
         async def _deny_or_error(ctx: GovernanceContext, decision: str, detail: str):
             if decision == "deny":
                 await _append_outcome(
-                    ctx, app_name,
+                    ctx,
+                    app_name,
                     {"status": "denied", "reason": detail},
                     issue_reason=f"cbac denied: {detail}",
                 )
@@ -557,7 +581,10 @@ def cbac_guard(
                 return {"status": "denied", "error": detail}
 
             await _append_outcome(
-                ctx, app_name, {"status": "error"}, issue_reason=detail,
+                ctx,
+                app_name,
+                {"status": "error"},
+                issue_reason=detail,
             )
             return {"status": "error", "error": detail}
 

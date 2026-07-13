@@ -23,10 +23,10 @@ logger = structlog.get_logger(__name__)
 # Paths to the per-agent skills files.
 _AGENTS_BASE = Path(__file__).resolve().parents[2] / "agents"
 _COORDINATOR_SKILLS = str(_AGENTS_BASE / "coordinator" / "skills.md")
-_WORKER_SKILLS      = str(_AGENTS_BASE / "worker"      / "skills.md")
+_WORKER_SKILLS = str(_AGENTS_BASE / "worker" / "skills.md")
 
 # Persisted Actor name -> ID map (project root). Overwritten on every warmup.
-_PROJECT_ROOT   = Path(__file__).resolve().parents[3]
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 AGENT_IDS_FILE = _PROJECT_ROOT / "agent_actor_ids.json"
 
 
@@ -34,11 +34,12 @@ def _known_agents() -> tuple:
     """(alias, skills) per agent, with aliases resolved at call time."""
     return (
         (coordinator_name(), _COORDINATOR_SKILLS),
-        (worker_name(),      _WORKER_SKILLS),
+        (worker_name(), _WORKER_SKILLS),
     )
 
 
 # ── Agent kind ────────────────────────────────────────────────────────────────
+
 
 def warmup_coordinator() -> None:
     """Construct (and cache) the Coordinator's agent AgentDNA."""
@@ -72,6 +73,7 @@ def warmup_agents() -> None:
 
 
 # ── DID persistence ───────────────────────────────────────────────────────────
+
 
 def dump_agent_actor_ids(path: Optional[Path] = None) -> None:
     """
@@ -134,7 +136,10 @@ def dump_agent_actor_ids(path: Optional[Path] = None) -> None:
             path=str(target),
             error=str(exc),
         )
+
+
 # ── User kind ─────────────────────────────────────────────────────────────────
+
 
 def warmup_user(email: Optional[str] = None) -> None:
     """
@@ -160,6 +165,7 @@ def warmup_user(email: Optional[str] = None) -> None:
 
 # ── One-shot ──────────────────────────────────────────────────────────────────
 
+
 def warmup_all(user_email: Optional[str] = None) -> None:
     """Warm up both agent identities + the default user identity."""
     warmup_agents()
@@ -167,6 +173,7 @@ def warmup_all(user_email: Optional[str] = None) -> None:
 
 
 # ── UI-driven deploy helpers (return a status dict for display) ────────────────
+
 
 def deploy_agent(role: str, name: str) -> dict:
     """
@@ -183,7 +190,7 @@ def deploy_agent(role: str, name: str) -> dict:
 
     skills = {
         "coordinator": _COORDINATOR_SKILLS,
-        "worker":      _WORKER_SKILLS,
+        "worker": _WORKER_SKILLS,
     }.get(role)
     if skills is None:
         return {"ok": False, "reason": f"unknown role {role!r}"}

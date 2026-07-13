@@ -7,6 +7,7 @@ AgentDNA integration:
   - Signs a forwarding envelope committing the Coordinator's output to the
     upstream chain so the Worker can verify on receipt.
 """
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,26 +48,23 @@ Output a concise plain-text instruction the Worker can act on directly.
 Do NOT call any tools yourself."""
 from app.agents.state import GithubAgentState
 
+
 async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
     """LangGraph node — verifies inbound envelope, produces task_spec, signs forward."""
     user_did = state.get("_agentdna_user_id")
     dna = get_dna(coordinator_name(), COORDINATOR_SKILLS_FILE)
     next_agent_dna = get_dna(worker_name())
-    
+
     if dna is None:
         raise RuntimeError("AgentDNA not defined for coordinator_node")
     if next_agent_dna is None:
         raise RuntimeError("AgentDNA not defined for worker_node")
-    
+
     handle_result = verify_inbound(dna, state)
     if handle_result is None:
-        raise RuntimeError(
-            "coordinator_node: failed to deserialize or verify workflow"
-        )
+        raise RuntimeError("coordinator_node: failed to deserialize or verify workflow")
 
-    latest_envelope = get_latest_envelope(
-        handle_result.workflow
-    )
+    latest_envelope = get_latest_envelope(handle_result.workflow)
     if (
         latest_envelope.from_.type == next_agent_dna.type
         and latest_envelope.from_.id == next_agent_dna.get_actor_id()
@@ -105,9 +103,7 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
                 "_agentdna_user_id",
                 "",
             ),
-            "_agentdna_workflow": serialize_workflow(
-                final_workflow
-            ),
+            "_agentdna_workflow": serialize_workflow(final_workflow),
         }
 
     if not handle_result.verification.valid:
@@ -117,10 +113,12 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
             recipient_actor_id=latest_envelope.from_.id,
             recipient_actor_name=latest_envelope.from_.name,
             recipient_actor_type=latest_envelope.from_.type,
-            payload=json.dumps({
-                "status": "rejected",
-                "reason": "verification_failed",
-            }),
+            payload=json.dumps(
+                {
+                    "status": "rejected",
+                    "reason": "verification_failed",
+                }
+            ),
             verification_result=handle_result.verification,
             workflow=handle_result.workflow,
         )
@@ -141,20 +139,20 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
             HumanMessage(content=user_input),
         ]
     )
-    task_spec = (
-        response.content if isinstance(response.content, str) else str(response.content)
-    )
+    task_spec = response.content if isinstance(response.content, str) else str(response.content)
 
     coordinator_workflow = dna.build(
         recipient_actor_id=next_agent_dna.get_actor_id(),
         recipient_actor_name=next_agent_dna.name,
         recipient_actor_type=next_agent_dna.type,
-        payload=json.dumps({
-            "agent":             coordinator_name(),
-            "action":            "produce_task_spec",
-            "task_spec_preview": task_spec[:200],
-        }),
-        workflow=handle_result.workflow
+        payload=json.dumps(
+            {
+                "agent": coordinator_name(),
+                "action": "produce_task_spec",
+                "task_spec_preview": task_spec[:200],
+            }
+        ),
+        workflow=handle_result.workflow,
     )
 
     coordinator_workflow_str = serialize_workflow(coordinator_workflow)
@@ -162,7 +160,7 @@ async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
     update: GithubAgentState = {
         "task_spec": task_spec,
         "_agentdna_phase": "execute",
-        "_agentdna_user_id": state.get("_agentdna_user_id", "")
+        "_agentdna_user_id": state.get("_agentdna_user_id", ""),
     }
     if coordinator_workflow_str != "":
         update["_agentdna_workflow"] = coordinator_workflow_str

@@ -16,22 +16,15 @@ import streamlit as st
 from app.agent_names import coordinator_name, worker_name
 from app.agents.graph import build_graph
 from app.constants import ANONYMOUS_USER_EMAIL
-from app.integrations.agentdna import (
-    UserSession,
-    deploy_agent,
-    deploy_user
-)
+from app.integrations.agentdna import UserSession, deploy_agent, deploy_user
 from app.agents.agentdna_helpers import get_dna
 from app.utils import (
     serialize_workflow,
     deserialize_workflow,
 )
+
 COORDINATOR_SKILLS_FILE = str(
-    Path(__file__).resolve().parent.parent
-    / "app"
-    / "agents"
-    / "coordinator"
-    / "skills.md"
+    Path(__file__).resolve().parent.parent / "app" / "agents" / "coordinator" / "skills.md"
 )
 
 if not bool(os.environ.get("AGENTDNA_API_KEY")):
@@ -49,15 +42,14 @@ st.caption(
     "AI agents, with a verified and auditable trail at every step."
 )
 
+
 def _random_agent_name(prefix: str) -> str:
     alphabet = string.ascii_letters + string.digits
 
-    suffix = "".join(
-        secrets.choice(alphabet)
-        for _ in range(7)
-    )
+    suffix = "".join(secrets.choice(alphabet) for _ in range(7))
 
     return f"{prefix}_{suffix}"
+
 
 with st.sidebar:
     st.markdown("### What this does")
@@ -91,9 +83,7 @@ def _render_identity(label: str, result: dict | None) -> None:
         ]
 
         if result.get("card_id"):
-            lines.append(
-                f"{card_label} : {result.get('card_id')}"
-            )
+            lines.append(f"{card_label} : {result.get('card_id')}")
         st.success(f"{label} ready")
         st.code("\n".join(lines), language="text")
     else:
@@ -162,20 +152,19 @@ st.caption("Example prompts:")
 
 st.code(
     'Create an issue titled "Fix login bug" in the repository '
-    'SynapzeCore/sample-repo with body '
+    "SynapzeCore/sample-repo with body "
     '"Users receive a 500 Internal Server Error after login."',
     language="text",
 )
 
 st.code(
-    'Create an issue titled "Update documentation" '
-    'in SynapzeCore/sample-repo.',
+    'Create an issue titled "Update documentation" in SynapzeCore/sample-repo.',
     language="text",
 )
 
 st.code(
-    'Create a pull request in SynapzeCore/sample-repo '
-    'from branch feature/auth to main titled '
+    "Create a pull request in SynapzeCore/sample-repo "
+    "from branch feature/auth to main titled "
     '"Add authentication flow" with body '
     '"Implements JWT authentication and login endpoints."',
     language="text",
@@ -213,19 +202,13 @@ if st.button("Run", type="primary"):
 
                 initial_state: dict = {"user_input": user_input}
                 if session is not None:
-                    initial_state["_agentdna_workflow"] = serialize_workflow(
-                        session.workflow
-                    )
+                    initial_state["_agentdna_workflow"] = serialize_workflow(session.workflow)
                     initial_state["_agentdna_user_id"] = session.user_id
 
                 result = await graph.ainvoke(initial_state)
 
                 if session is not None and result.get("_agentdna_workflow"):
-                    session.complete(
-                        deserialize_workflow(
-                            result["_agentdna_workflow"]
-                        )
-                    )
+                    session.complete(deserialize_workflow(result["_agentdna_workflow"]))
 
                 return result, (session.user_id if session else None)
 
@@ -241,9 +224,7 @@ if st.button("Run", type="primary"):
                     "unknown_error",
                 )
 
-                st.error(
-                    f"Workflow terminated: {reason}"
-                )
+                st.error(f"Workflow terminated: {reason}")
 
         if user_id:
             st.info(f"Your User ID: `{user_id}`")

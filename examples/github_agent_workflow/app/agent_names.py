@@ -60,7 +60,5 @@ def set_agent_name(role: str, name: str) -> Dict[str, str]:
     """
     data = _read()
     data[role] = (name or "").strip()
-    AGENT_NAMES_FILE.write_text(
-        json.dumps(data, indent=2) + "\n", encoding="utf-8"
-    )
+    AGENT_NAMES_FILE.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     return data

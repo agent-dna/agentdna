@@ -30,12 +30,9 @@ from app.utils import serialize_workflow, deserialize_workflow
 from pathlib import Path
 
 COORDINATOR_SKILLS_FILE = (
-    Path(__file__).resolve().parent.parent
-    / "app"
-    / "agents"
-    / "coordinator"
-    / "skills.md"
+    Path(__file__).resolve().parent.parent / "app" / "agents" / "coordinator" / "skills.md"
 )
+
 
 async def main(user_input: str) -> None:
     user_email = os.environ.get(
@@ -51,9 +48,7 @@ async def main(user_input: str) -> None:
     )
 
     if coordinator_dna is None:
-        raise RuntimeError(
-            "failed to load coordinator AgentDNA"
-        )
+        raise RuntimeError("failed to load coordinator AgentDNA")
 
     user_session = await UserSession.open(
         intent={
@@ -76,16 +71,10 @@ async def main(user_input: str) -> None:
     }
 
     if user_session is not None:
-        initial_state["_agentdna_workflow"] = serialize_workflow(
-            user_session.workflow
-        )
-        initial_state["_agentdna_user_id"] = (
-            user_session.user_id
-        )
+        initial_state["_agentdna_workflow"] = serialize_workflow(user_session.workflow)
+        initial_state["_agentdna_user_id"] = user_session.user_id
 
-        print(
-            f"[agentdna] user_did={user_session.user_id}\n"
-        )
+        print(f"[agentdna] user_did={user_session.user_id}\n")
 
     result = await graph.ainvoke(initial_state)
 
@@ -95,19 +84,11 @@ async def main(user_input: str) -> None:
     workflow = result.get("_agentdna_workflow")
 
     if workflow and user_session:
-        print(
-            "─── Final Workflow ───────────────────────────────────────"
-        )
-        completed = user_session.complete(
-            deserialize_workflow(workflow)
-        )
-        print(
-            f"[agentdna] provenance written = {completed}"
-        )
+        print("─── Final Workflow ───────────────────────────────────────")
+        completed = user_session.complete(deserialize_workflow(workflow))
+        print(f"[agentdna] provenance written = {completed}")
 
-    print(
-        "─── Coordinator output ─────────────────────────────────────"
-    )
+    print("─── Coordinator output ─────────────────────────────────────")
     print(
         result.get(
             "task_spec",
@@ -115,9 +96,7 @@ async def main(user_input: str) -> None:
         )
     )
 
-    print(
-        "\n─── Worker transcript ─────────────────────────────────────"
-    )
+    print("\n─── Worker transcript ─────────────────────────────────────")
 
     for msg in result.get(
         "worker_messages",
@@ -143,9 +122,7 @@ async def main(user_input: str) -> None:
 
         print(f"[{role}] {content}")
 
-    print(
-        "\n─── Final response ─────────────────────────────────────────"
-    )
+    print("\n─── Final response ─────────────────────────────────────────")
 
     print(
         result.get(
@@ -157,9 +134,7 @@ async def main(user_input: str) -> None:
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(
-            "Usage: python scripts/run_flow.py '<request>'"
-        )
+        print("Usage: python scripts/run_flow.py '<request>'")
         sys.exit(1)
 
     asyncio.run(main(sys.argv[1]))

@@ -54,6 +54,7 @@ def _gh_headers() -> dict:
 
 # ── Guarded tools: pure business logic, zero governance code ─────────────────
 
+
 @cbac_guard(
     app_name="github",
     describe=lambda kw: {
@@ -87,6 +88,7 @@ async def summarize_task(text: str) -> dict:
 
 # ── Reporting helpers ─────────────────────────────────────────────────────────
 
+
 def print_chain(workflow) -> None:
     print("\n─── Envelope chain (root → latest) ─────────────────────────")
     for i, env in enumerate(reversed(unwrap_workflow(workflow))):
@@ -107,16 +109,31 @@ def print_chain(workflow) -> None:
 
 # ── Main flow ─────────────────────────────────────────────────────────────────
 
+
 async def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="owner/name")
     parser.add_argument("--title", default="Guard PoC issue")
     parser.add_argument("--body", default="Created by the cbac_guard proof of concept.")
-    parser.add_argument("--email", default=os.environ.get("GITHUB_AGENT_USER_EMAIL", ANONYMOUS_USER_EMAIL))
-    parser.add_argument("--mode", choices=["remote", "local"], default=os.environ.get("CBAC_MODE", "remote"))
-    parser.add_argument("--demo-plain", action="store_true", help="also run the plain-callable demo (local mode only)")
-    parser.add_argument("--finalize", action="store_true", help="write the workflow provenance card at the end")
-    parser.add_argument("--no-governance", action="store_true", help="run without a governance context (pass-through)")
+    parser.add_argument(
+        "--email", default=os.environ.get("GITHUB_AGENT_USER_EMAIL", ANONYMOUS_USER_EMAIL)
+    )
+    parser.add_argument(
+        "--mode", choices=["remote", "local"], default=os.environ.get("CBAC_MODE", "remote")
+    )
+    parser.add_argument(
+        "--demo-plain",
+        action="store_true",
+        help="also run the plain-callable demo (local mode only)",
+    )
+    parser.add_argument(
+        "--finalize", action="store_true", help="write the workflow provenance card at the end"
+    )
+    parser.add_argument(
+        "--no-governance",
+        action="store_true",
+        help="run without a governance context (pass-through)",
+    )
     args = parser.parse_args()
 
     configure(

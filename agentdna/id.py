@@ -1,17 +1,20 @@
 import hashlib
 from multiformats_cid.cid import CIDv0
 
+
 def get_agent_card_id(agent_id: str):
     """
     Get a deterministic Agent Card ID based on the provided agent name.
     """
     return get_id(agent_id)
 
+
 def get_user_card_id(user_id: str):
     """
     Get a deterministic User Card ID based on the provided agent name.
     """
     return get_id(user_id)
+
 
 def get_id(val: str):
     """

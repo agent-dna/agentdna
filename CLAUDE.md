@@ -10,8 +10,8 @@ The `agentdna/` package is the shippable library. `examples/github_agent_workflo
 
 ## Environment & commands
 
-- Python `>=3.10,<3.13`. There is **no test suite, Makefile, linter config, or CI** in this repo — do not assume `pytest`/`make`/`ruff` targets exist.
-- Install for development: `pip install -e .`
+- Python `>=3.10,<3.13`. Dependency + venv management is **`uv`** (`uv.lock` is committed). `uv sync` installs runtime + `dev` deps into `.venv`; `pip install -e .` also works for a plain runtime install. There is **no test suite or CI**.
+- Lint / format / type-check (dev tooling, see [Working conventions](#working-conventions)): `uv run ruff format .`, `uv run ruff check .`, `uv run pyright`.
 - CBAC (`agentdna/cbac.py`) requires optional ML deps that are **not** in the base install: `pip install -e ".[semantic]"` (pulls `sentence-transformers`, `scipy`, `numpy`). The rest of the library works without them; only import `cbac` when these are present.
 - Build: `python -m build` (setuptools backend).
 - Bump the version in `pyproject.toml` (`[project].version`) when releasing.
@@ -62,4 +62,14 @@ A separate three-tier semantic authorization pipeline that decides whether an ag
 3. **Tier 3** — optional LLM backend; if none is configured the result is `"advise"` and the caller decides.
 
 Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed** (any error → `deny`). Policy embeddings are precomputed and cached as pickles under `~/.agentdna/embeddings_cache/`, keyed by policy hash so an on-chain policy update triggers recompute. `authorise_agent_app_interaction` is a different path that delegates the decision to a remote CBAC service (`cbac_url`, default `https://cbac-admin.agentdna.io`).
+
+## Working conventions
+
+- **Don't add excessive comments.** The code is self-documenting; comment only non-obvious *why*, not *what*. (The existing `#TODO:-` question-comments are open notes, not a pattern to imitate.)
+- **Don't read `.env` files** — they hold real secrets. `.env.sample` is a safe template and may be read.
+- **Match the existing style.** Source under `agentdna/` is `ruff format`ted (`line-length = 100`, config in `pyproject.toml`); keep it that way and follow the existing snake_case + dataclass idioms.
+- **Don't add dependencies without asking.** The base package intentionally keeps a small dependency set; ML deps live behind the `[semantic]` extra.
+- **`agentdna/` is the shippable library; `examples/github_agent_workflow/` is a separate app.** Editing either is fine — just never make the library import from or depend on `examples/` or its runtime deps.
+
+Dev tooling lives in the `dev` dependency group (`uv sync` installs it): **`ruff`** (format + lint, config `[tool.ruff]`, applied repo-wide including `examples/`) and **`pyright`** (config `[tool.pyright]`, `basic` mode, scoped to `agentdna/` — `examples/` is excluded because its heavy runtime deps aren't in the dev env). Keep `agentdna/` both `ruff format`-clean and pyright-clean.
 
