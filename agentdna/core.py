@@ -502,6 +502,12 @@ class AgentDNA:
         returns the IntentWorklow
         """
 
+        if recipient_actor_type not in supported_actors:
+            raise ValueError(
+                f"unsupported actor type: {recipient_actor_type},"
+                f"supported actor types: {supported_actors}"
+            )
+
         from_ = from_actor or Actor(
             id=self.get_actor_id(),
             name=self.name,
