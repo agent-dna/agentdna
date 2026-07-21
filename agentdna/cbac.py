@@ -34,6 +34,14 @@ _DENY_GAP_DEFAULT: float = 0.08
 _ENTAILMENT_THRESHOLD: float = 0.55
 _CONTRADICTION_THRESHOLD: float = 0.60
 
+# Structure-aware chunking: paragraphs / list items are the primary unit,
+# split further only past this word-count budget (~1.3 tokens/word for English).
+_CHUNK_MAX_WORDS: int = 120
+_NLI_BATCH_SIZE: int = 64
+
+_BULLET_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
+_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+
 REQUIRED_FRONTMATTER_KEYS = (
     "agent-did", "issued-by", "issued-at", "expires-at", "allowed-actions",
 )
@@ -231,12 +239,114 @@ class CBAC:
         probs = sp_softmax(raw[0])
         return {self._nli_labels.get(i, str(i)): float(probs[i]) for i in range(len(probs))}
 
+    def _nli_scores_batch(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, float]]:
+        """Batched NLI over many (premise, hypothesis) pairs in one predict() call.
+
+        Same per-pair result shape as calling :meth:`_nli_scores` in a loop,
+        but the cross-encoder processes ``pairs`` in mini-batches instead of
+        one sample at a time — the loop form never lets the model's internal
+        batching do anything useful.
+        """
+        from scipy.special import softmax as sp_softmax
+        if not pairs:
+            return []
+        nli = self._get_nli()
+        raw = nli.predict(
+            pairs,
+            apply_softmax=False,
+            batch_size=_NLI_BATCH_SIZE,
+            show_progress_bar=False,
+        )
+        probs = sp_softmax(raw, axis=1)
+        return [
+            {self._nli_labels.get(i, str(i)): float(row[i]) for i in range(len(row))}
+            for row in probs
+        ]
+
+    def _split_list_items(self, block: str) -> List[str]:
+        """Split a paragraph block into its list items, if any.
+
+        A bulleted/numbered line starts a new item; any following line that
+        isn't itself a bullet is a wrapped continuation of that item, not a
+        new unit. Blocks with no bullets at all collapse into a single item
+        (this is what re-joins a hard-wrapped prose paragraph).
+        """
+        lines = block.splitlines()
+        if not any(_BULLET_RE.match(l) for l in lines):
+            return [" ".join(l.strip() for l in lines if l.strip())]
+        items: List[str] = []
+        current: List[str] = []
+        for line in lines:
+            if _BULLET_RE.match(line):
+                if current:
+                    items.append(" ".join(current))
+                current = [line.strip()]
+            else:
+                stripped = line.strip()
+                if stripped:
+                    current.append(stripped)
+        if current:
+            items.append(" ".join(current))
+        return items
+
+    def _split_by_word_budget(self, unit: str, max_words: int) -> List[str]:
+        """Split ``unit`` only if it exceeds ``max_words``, preferring sentence
+        boundaries so a chunk never straddles unrelated sentences unnecessarily."""
+        words = unit.split()
+        if len(words) <= max_words:
+            return [unit]
+        sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(unit) if s.strip()]
+        if len(sentences) <= 1:
+            return [
+                " ".join(words[i:i + max_words])
+                for i in range(0, len(words), max_words)
+            ]
+        out: List[str] = []
+        current: List[str] = []
+        current_len = 0
+        for sent in sentences:
+            n = len(sent.split())
+            if current and current_len + n > max_words:
+                out.append(" ".join(current))
+                current, current_len = [], 0
+            current.append(sent)
+            current_len += n
+        if current:
+            out.append(" ".join(current))
+        return out
+
+    def _chunk_body_text(self, text: str, max_words: int = _CHUNK_MAX_WORDS) -> List[str]:
+        """Structure-aware, budget-capped chunking for free-form policy text.
+
+        Paragraphs (blank-line separated) and list items are the primary
+        chunk boundary — not individual lines — so a hard-wrapped sentence or
+        a bullet's wrapped continuation stays in one chunk. A unit is only
+        split further, on sentence boundaries, if it exceeds ``max_words``.
+        Lines starting with ``#`` are dropped, matching the previous
+        comment-stripping behaviour.
+        """
+        filtered = "\n".join(
+            l for l in text.splitlines() if not l.strip().startswith("#")
+        )
+        chunks: List[str] = []
+        for block in re.split(r'\n\s*\n', filtered):
+            block = block.strip()
+            if not block:
+                continue
+            for unit in self._split_list_items(block):
+                unit = unit.strip()
+                if not unit:
+                    continue
+                chunks.extend(self._split_by_word_budget(unit, max_words))
+        return chunks
+
     def _flatten_policy_chunks(self, policy: Any) -> List[str]:
         """Flatten a policy of any shape into a list of text chunks.
 
         Each YAML frontmatter entry becomes "key: value" (one chunk per list item
-        for list-valued keys). Body lines are included as-is. This unified path
-        works for any skill.md schema — no hardcoded key names.
+        for list-valued keys). The body is chunked by paragraph/list-item
+        structure via :meth:`_chunk_body_text`, not by raw line. This unified
+        path works for any skill.md schema — no hardcoded key names.
         """
         chunks: List[str] = []
         if isinstance(policy, SkillsCard):
@@ -246,10 +356,7 @@ class CBAC:
                         chunks.append(f"{key}: {item}")
                 elif value is not None:
                     chunks.append(f"{key}: {value}")
-            for line in policy.body.splitlines():
-                line = line.strip()
-                if line and not line.startswith("#"):
-                    chunks.append(line)
+            chunks.extend(self._chunk_body_text(policy.body))
             return chunks
         if isinstance(policy, str):
             stripped = policy.strip()
@@ -258,7 +365,7 @@ class CBAC:
                     return self._flatten_policy_chunks(parse_skill_md(policy))
                 except (ValueError, Exception):
                     pass
-            return [l.strip() for l in policy.splitlines() if l.strip()]
+            return self._chunk_body_text(policy)
         if isinstance(policy, dict):
             for key, value in policy.items():
                 if isinstance(value, list):
@@ -276,15 +383,23 @@ class CBAC:
           premise = chunk, hypothesis = "This capability is permitted"
           premise = chunk, hypothesis = "This capability is prohibited"
         The chunk goes into the forbidden bucket only when the prohibition
-        entailment clearly beats the permission entailment.
+        entailment clearly beats the permission entailment. All 2*len(chunks)
+        queries are sent to the cross-encoder in one batched call instead of
+        one pair at a time.
         """
+        if not chunks:
+            return [], []
+        pairs: List[Tuple[str, str]] = []
+        for chunk in chunks:
+            pairs.append((chunk, "This capability is permitted and allowed"))
+            pairs.append((chunk, "This capability is prohibited and forbidden"))
+        scores = self._nli_scores_batch(pairs)
+
         allowed: List[str] = []
         forbidden: List[str] = []
-        for chunk in chunks:
-            allow_s = self._nli_scores(chunk, "This capability is permitted and allowed")
-            forbid_s = self._nli_scores(chunk, "This capability is prohibited and forbidden")
-            allow_e = allow_s.get("entailment", 0.0)
-            forbid_e = forbid_s.get("entailment", 0.0)
+        for i, chunk in enumerate(chunks):
+            allow_e = scores[2 * i].get("entailment", 0.0)
+            forbid_e = scores[2 * i + 1].get("entailment", 0.0)
             if forbid_e > allow_e and forbid_e > 0.40:
                 forbidden.append(chunk)
             else:
