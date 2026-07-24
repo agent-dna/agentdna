@@ -175,6 +175,6 @@ class Provenance:
                 signature=signature_bytes,
             )
 
-            return bool(is_valid)
+            return is_valid
         except Exception:
             return False

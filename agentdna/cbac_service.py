@@ -1,23 +1,43 @@
+"""
+Reference CBAC decision service.
+
+Backs agentdna.guard's authorize call (agentdna/guard.py `_authorize_sync`)
+by exposing POST /authorize-cbac. This is a stand-in for the real
+cbac-admin service: decision only, it never executes the caller's action.
+
+`verify_agent_app_interaction` and everything it depends on are copied
+here directly from agentdna/cbac.py (which is left unmodified) rather
+than imported, so this service is self-contained.
+
+Needs the "semantic" and "service" extras:
+    pip install agent-dna[semantic,service]
+
+Usage:
+    python -m agentdna.cbac_service
+"""
+
+from __future__ import annotations
+
 import asyncio
 import base64
 import hashlib
-import json
-import pickle
-import requests
-import yaml
 import os
+import pickle
+import yaml
 
-from typing import Optional, Callable, Dict, Any, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
-from .id import get_id
-from .provenance import Provenance
-from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
-
+import uvicorn
+from fastapi import FastAPI, Request
+from fastapi.responses import PlainTextResponse
 
 from sentence_transformers import SentenceTransformer
+
+from .provenance import Provenance
+from .types import AgentCard, MODEL_EMBEDDINGS_DIR
 
 _DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"  # bi-encoder for Tier 1 cosine
 _DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
@@ -30,17 +50,6 @@ _DENY_GAP_DEFAULT: float = 0.08
 # NLI thresholds for Check 1 drift and Tier 2 entailment.
 _ENTAILMENT_THRESHOLD: float = 0.55
 _CONTRADICTION_THRESHOLD: float = 0.60
-
-# HHEM cross-encoder for hallucination scoring (1 = grounded, 0 = hallucinated).
-_DEFAULT_HHEM_MODEL = "vectara/hallucination_evaluation_model"
-
-# LHI: weighted geometric mean of (intent, policy, hallucination, output) scores,
-# then an asymmetric EMA against the stored trust — slow to build, fast to lose.
-_LHI_WEIGHTS: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
-_LHI_LAMBDA_UP: float = 0.95
-_LHI_LAMBDA_DOWN: float = 0.70
-
-_TRUST_STORE_FILE = "trust_scores.json"
 
 REQUIRED_FRONTMATTER_KEYS = (
     "agent-did",
@@ -186,6 +195,10 @@ def _intended_action_text(intended_action: Any) -> str:
 
 
 class CBAC:
+    """Copied from agentdna/cbac.py: verify_agent_app_interaction and its
+    direct dependencies only. agentdna/cbac.py is left unmodified; this is
+    an independent copy so the service has no import-time dependency on it."""
+
     def __init__(
         self,
         provenance: Provenance,
@@ -195,10 +208,6 @@ class CBAC:
         llm_backend: Optional[Callable] = None,
         allow_gap: float = _ALLOW_GAP_DEFAULT,
         deny_gap: float = _DENY_GAP_DEFAULT,
-        hhem_model_name: str = _DEFAULT_HHEM_MODEL,
-        lhi_weights: Tuple[float, float, float, float] = _LHI_WEIGHTS,
-        lhi_lambda_up: float = _LHI_LAMBDA_UP,
-        lhi_lambda_down: float = _LHI_LAMBDA_DOWN,
     ):
         self.provenance = provenance
         self.cbac_url = cbac_url
@@ -207,14 +216,9 @@ class CBAC:
         self._llm_backend = llm_backend
         self._allow_gap = allow_gap
         self._deny_gap = deny_gap
-        self._hhem_model_name = hhem_model_name
-        self._lhi_weights = lhi_weights
-        self._lhi_lambda_up = lhi_lambda_up
-        self._lhi_lambda_down = lhi_lambda_down
 
         self._encoder = None
         self._nli = None
-        self._hhem = None
         self._nli_labels: Dict[int, str] = {}
 
         # Make embeddings config dir
@@ -244,26 +248,6 @@ class CBAC:
                 # Fallback for deberta NLI label order (contradiction/entailment/neutral)
                 self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
         return self._nli
-
-    def _get_hhem(self):
-        if self._hhem is None:
-            from transformers import AutoModelForSequenceClassification
-
-            # trust_remote_code is required by HHEM-2.1 (custom predict() head).
-            self._hhem = AutoModelForSequenceClassification.from_pretrained(
-                self._hhem_model_name, trust_remote_code=True
-            )
-        return self._hhem
-
-    def hallucination_score(self, source_text: str, generated_text: str) -> float:
-        """Score how well ``generated_text`` is grounded in ``source_text``.
-
-        Runs the HHEM cross-encoder on the (premise, hypothesis) pair and
-        returns a score in [0, 1]: 1 = fully supported by the source,
-        0 = hallucinated. Higher is better.
-        """
-        model = self._get_hhem()
-        return float(model.predict([(source_text, generated_text)])[0])
 
     def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
@@ -305,7 +289,7 @@ class CBAC:
                     return self._flatten_policy_chunks(parse_skill_md(policy))
                 except (ValueError, Exception):
                     pass
-            return [l.strip() for l in policy.splitlines() if l.strip()]
+            return [line.strip() for line in policy.splitlines() if line.strip()]
         if isinstance(policy, dict):
             for key, value in policy.items():
                 if isinstance(value, list):
@@ -640,159 +624,46 @@ class CBAC:
             return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
         return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
 
-    def authorise_agent_app_interaction(
-        self,
-        agent_id: str,
-        action_intent: str,
-        envelope: IntentWorkflow,
-        app_url: str,
-        app_method: str = "POST",
-        app_headers: dict | None = None,
-        app_body: str | dict | None = None,
-        app_timeout: float = 100.0,
-    ) -> requests.Response:
-        if isinstance(app_body, dict):
-            app_body = json.dumps(app_body)
-            app_headers = {"Content-Type": "application/json", **(app_headers or {})}
 
-        envelope_dict = asdict(envelope)
-        payload = {
-            "agent_id": agent_id,
-            "action_intent": action_intent,
-            "envelope": envelope_dict,
-            "app_request": {
-                "url": app_url,
-                "method": app_method,
-                "headers": app_headers or {},
-                "body": app_body or "",
-            },
-        }
+# ── HTTP boundary ──────────────────────────────────────────────────────────────
 
-        resp = requests.post(
-            f"{self.cbac_url.rstrip('/')}/agent-admin/v1/authorize-action",
-            json=payload,
-            timeout=app_timeout,
+_cbac: CBAC | None = None
+
+
+def _get_cbac() -> CBAC:
+    global _cbac
+    if _cbac is None:
+        provenance = Provenance(
+            name="cbac-service",
+            api_key=os.environ.get("AGENTDNA_API_KEY", ""),
         )
+        _cbac = CBAC(provenance=provenance)
+    return _cbac
 
-        decision = resp.headers.get("X-CBAC-Decision")
 
-        if decision == "deny":
-            raise PermissionError(resp.text)
-        if decision == "error":
-            raise RuntimeError(resp.text)
+app = FastAPI()
 
-        return resp
 
-    #TODO:- Replace trust file by light db.
-    @property
-    def __trust_store_path(self) -> Path:
-        return Path(self.provenance.config_dir) / _TRUST_STORE_FILE
+@app.post("/authorize-cbac")
+async def authorize_cbac(request: Request) -> PlainTextResponse:
+    body = await request.json()
 
-    def __load_trust_store(self) -> Dict[str, Any]:
-        try:
-            with self.__trust_store_path.open("r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
+    try:
+        result = await _get_cbac().verify_agent_app_interaction(
+            agent_id=body.get("agent_id", ""),
+            intended_action=body.get("intended_action"),
+            user_intent=body.get("user_intent"),
+        )
+        decision, reason = result.decision, result.reason
+    except Exception as exc:
+        decision, reason = "error", str(exc)
 
-    def __save_trust_store(self, store: Dict[str, Any]):
-        with self.__trust_store_path.open("w") as f:
-            json.dump(store, f, indent=2)
+    return PlainTextResponse(reason, headers={"X-CBAC-Decision": decision})
 
-    def compute_lhi(
-        self,
-        agent_id: str,
-        callee_name: str,
-        callee_type: str,
-        intent_score: float,
-        policy_score: float,
-        hallucination_score: float,
-        output_score: float,
-    ) -> float:
-        """Update and return the LHI trust score for one (agent → callee) edge.
 
-        Called *after* the interaction executed, once all four per-interaction
-        scores (each in [0, 1], higher is better) are known:
-
-        1. Instantaneous quality ``s`` = weighted geometric mean of the four
-           scores — non-compensatory, so a single near-zero component drags
-           ``s`` toward zero regardless of the others.
-        2. Asymmetric EMA against the stored trust for this edge:
-           ``T = λ·T_prev + (1−λ)·s`` with λ = ``lhi_lambda_up`` when improving
-           (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
-           drops fast). First interaction with a callee: ``T = s``.
-
-        The full record (callee, all four scores, trust) is persisted locally
-        under the config dir and appended to a dedicated per-agent LHI card on
-        the Provenance Layer (created on first write), so the trust history is
-        independently verifiable on-chain. Trust never overrides the per-
-        interaction allow/deny gates — it is read pre-execution only to
-        arbitrate the inconclusive ("advise") band.
-        """
-        scores = {
-            "intent": intent_score,
-            "policy": policy_score,
-            "hallucination": hallucination_score,
-            "output": output_score,
-        }
-        for key, value in scores.items():
-            if not 0.0 <= value <= 1.0:
-                raise ValueError(f"{key}_score must be in [0, 1], got {value}")
-
-        #TODO: should this be a geometric mean? 
-        s = 1.0
-        for value, weight in zip(scores.values(), self._lhi_weights):
-            s *= value**weight
-
-        store = self.__load_trust_store()
-        agent_entry = store.setdefault(agent_id, {"callees": {}})
-        prev_entry = agent_entry["callees"].get(callee_name)
-
-        if prev_entry is None:
-            trust = s
-        else:
-            prev = prev_entry["trust"]
-            lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
-            trust = lam * prev + (1 - lam) * s
-
-        record = {
-            "type": "lhi_record",
-            "agent_id": agent_id,
-            "callee": {"name": callee_name, "type": callee_type},
-            "scores": scores,
-            "trust": trust,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        }
-
-        agent_entry["callees"][callee_name] = {
-            "type": callee_type,
-            "scores": scores,
-            "trust": trust,
-            "updated_at": record["updated_at"],
-        }
-
-        # Local store is the working copy; the chain is the audit log. Persist
-        # locally first so a chain failure never loses the trust update.
-        lhi_card_id = agent_entry.get("lhi_card_id")
-        is_new_card = lhi_card_id is None
-        if is_new_card:
-            lhi_card_id = get_id(f"{agent_id}:lhi")
-            agent_entry["lhi_card_id"] = lhi_card_id
-        self.__save_trust_store(store)
-
-        try:
-            if is_new_card:
-                self.provenance.create_new_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
-                )
-            else:
-                self.provenance.append_to_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
-                )
-        except Exception as exc:
-            raise RuntimeError(
-                f"LHI record for agent {agent_id} saved locally but failed to "
-                f"write to provenance card {lhi_card_id}: {exc}"
-            ) from exc
-
-        return trust
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host=os.environ.get("CBAC_SERVICE_HOST", "127.0.0.1"),
+        port=int(os.environ.get("CBAC_SERVICE_PORT", "8767")),
+    )

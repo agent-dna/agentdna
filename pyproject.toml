@@ -30,6 +30,20 @@ semantic = [
   "sentence-transformers>=3.0.0",
   "scipy>=1.10.0",
   "numpy>=1.24.0",
+  # HHEM-2.1's remote code (hallucination_score) is incompatible with transformers 5.x
+  "transformers>=4.40.0,<5",
+]
+# Required to run the reference CBAC decision service (agentdna/cbac_service.py)
+# Install with: pip install agent-dna[semantic,service]
+service = [
+  "fastapi>=0.115.0",
+  "uvicorn>=0.30.0",
+]
+# Required for the MCP integration glue (agentdna/mcp.py)
+# Install with: pip install agent-dna[mcp]
+mcp = [
+  "fastmcp>=3.4.0",
+  "langchain-mcp-adapters>=0.3.0",
 ]
 
 [project.urls]
@@ -39,6 +53,7 @@ Repository = "https://github.com/agent-dna/agentdna"
 [dependency-groups]
 dev = [
     "pyright>=1.1.411",
+    "pytest>=8.0.0",
     "ruff>=0.15.20",
 ]
 
