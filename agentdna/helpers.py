@@ -1,29 +1,28 @@
 import json
+import hashlib
 
 from .types import Envelope, IntentWorkflow, Actor, Issue
 
 
-def canonicalize_envelope(
-    envelope: Envelope,
-) -> str:
+def canonicalize_envelope(envelope: Envelope) -> str:
     """
     Produces the canonical representation used
     for both signing and verification.
 
     Ancestor signatures are included.
+
+    Returns the SHA-256 hash of the envelope
     """
 
-    envelope_dict = _envelope_to_dict(
-        envelope,
-        include_current_signature=True,
-    )
+    envelope_dict = _envelope_to_dict(envelope)
 
-    return json.dumps(
+    envelope_dict_str = json.dumps(
         envelope_dict,
         sort_keys=True,
         separators=(",", ":"),
-        ensure_ascii=False,
-    )
+    ).encode("utf-8")
+
+    return hashlib.sha256(envelope_dict_str).hexdigest()
 
 
 def get_latest_envelope(
@@ -95,19 +94,14 @@ def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
     return envelopes
 
 
-def _envelope_to_dict(
-    envelope: Envelope,
-    include_current_signature: bool,
-) -> dict:
+def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
     """
     Converts an envelope into a canonical dictionary.
 
-    Rules:
+    Parent envelope signatures are always included.
 
-    - Current envelope signature is included only when
-      include_current_signature=True.
-
-    - Parent envelope signatures are always included.
+    `is_current` skips adding the signature attribute to the dict
+    if envelope is current.
 
     This creates a chain-of-attestation where every
     envelope commits to all previously signed envelopes.
@@ -128,16 +122,15 @@ def _envelope_to_dict(
         },
         "payload": envelope.payload,
         "metadata": envelope.metadata,
+        "epoch": envelope.epoch,
+        "issues": [{"depth": issue.depth, "reason": issue.reason} for issue in envelope.issues],
     }
 
-    if include_current_signature:
+    if not is_current:
         result["signature"] = envelope.signature
 
     if envelope.parent_envelope is not None:
-        result["parent_envelope"] = _envelope_to_dict(
-            envelope.parent_envelope,
-            include_current_signature=True,
-        )
+        result["parent_envelope"] = _envelope_to_dict(envelope.parent_envelope, is_current=False)
 
     return result
 
