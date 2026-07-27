@@ -55,6 +55,11 @@ def _worker_dna() -> Optional[AgentDNA]:
     return get_dna(worker_name(), SKILLS_FILE)
 
 
+def _worker_agent_id() -> Optional[str]:
+    dna = _worker_dna()
+    return dna.get_actor_id() if dna else None
+
+
 def _gh_headers() -> dict:
     return {
         "Authorization": f"Bearer {settings.github_token}",
@@ -67,8 +72,7 @@ def _gh_headers() -> dict:
 # ── MCP server side: guarded tools + governance ──────────────────────────────
 
 mcp = FastMCP("github-mcp-guarded")
-mcp.add_middleware(CBACMiddleware(actor_provider=_worker_dna))
-
+mcp.add_middleware(CBACMiddleware(agent_id_provider=_worker_agent_id))
 
 
 async def _github_post(url: str, body: dict) -> dict:
@@ -179,7 +183,7 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
     agent = create_react_agent(make_llm(temperature=0.0), tools, prompt=WORKER_SYSTEM)
 
     root = get_root_envelope(handle_result.workflow)
-    with cbac_context(actor=dna, user_intent=(root.payload if root else "")):
+    with cbac_context(agent_id=dna.get_actor_id(), user_intent=(root.payload if root else "")):
         result = await agent.ainvoke({"messages": [HumanMessage(content=task_spec)]})
 
     # The guard authorizes tool calls but no longer mutates the chain; the

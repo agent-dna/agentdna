@@ -88,6 +88,7 @@ class CBACResult:
     decision: str  # "allow" | "deny" | "advise"
     reason: str = ""
     trace: List[CardCheck] = field(default_factory=list)
+    hallucination_score: Optional[float] = None
 
 
 def parse_skill_md(text: str) -> SkillsCard:
@@ -471,6 +472,78 @@ class CBAC:
         sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
         return float(np.max(sims))
 
+    async def __tiered_decision(
+        self,
+        intent_text: str,
+        intent_vec,
+        allowed_chunks: List[str],
+        forbidden_chunks: List[str],
+        allowed_vecs,
+        forbidden_vecs,
+        policy_text: str,
+    ) -> Tuple[str, str]:
+        """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM). Returns (decision, reason).
+
+        Pure decision logic, extracted from :meth:`verify_agent_app_interaction` so
+        the caller can attach a hallucination score to the result exactly once,
+        after a decision is reached, without duplicating it at every tier's exit.
+        """
+        import numpy as np
+
+        # Tier 1: cosine gap.
+        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
+        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
+        gap = allowed_score - forbidden_score
+
+        if gap > self._allow_gap:
+            return (
+                "allow",
+                f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
+                f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+            )
+        if gap < -self._deny_gap:
+            return (
+                "deny",
+                f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
+                f"(intent closer to forbidden than allowed policy)",
+            )
+
+        # Tier 2: NLI entailment vs top allowed chunk.
+        if not allowed_chunks:
+            return ("deny", "Tier 2: no allowed policy chunks found")
+
+        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
+        top_chunk = allowed_chunks[top_idx]
+        t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
+        entailment = t2_scores.get("entailment", 0.0)
+        contradiction = t2_scores.get("contradiction", 0.0)
+
+        if entailment >= _ENTAILMENT_THRESHOLD:
+            return ("allow", f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}")
+        if contradiction >= _CONTRADICTION_THRESHOLD:
+            return ("deny", f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}")
+
+        # Tier 3: LLM judgment (optional).
+        if self._llm_backend is None:
+            return (
+                "advise",
+                f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
+                f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
+                "no LLM backend configured — caller must decide",
+            )
+
+        try:
+            llm_decision = await self._llm_backend(intent_text, policy_text)
+        except Exception as e:
+            return ("advise", f"Tier 3 LLM error: {e}")
+
+        verdict = str(llm_decision).lower()
+        if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
+            return ("deny", f"Tier 3 LLM: {llm_decision}")
+        if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
+            return ("allow", f"Tier 3 LLM: {llm_decision}")
+        return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}")
+
     async def verify_agent_app_interaction(
         self,
         agent_id: str,
@@ -522,7 +595,10 @@ class CBAC:
         -------
         CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
         Fail-closed: any unrecoverable error (no policy, empty content,
-        model failure) resolves to ``deny``.
+        model failure) resolves to ``deny``. When ``user_intent`` is supplied
+        and Tier 1/2/3 reach a decision, ``hallucination_score`` is also set
+        (HHEM score of ``intended_action`` grounded in ``user_intent``, 1 =
+        grounded) — informational only, it never changes ``decision``.
         """
         import numpy as np
 
@@ -578,67 +654,28 @@ class CBAC:
             lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
         )
 
-        # Tier 1: cosine gap.
-        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
-        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
-        gap = allowed_score - forbidden_score
+        decision, reason = await self.__tiered_decision(
+            intent_text,
+            intent_vec,
+            allowed_chunks,
+            forbidden_chunks,
+            allowed_vecs,
+            forbidden_vecs,
+            policy_text,
+        )
 
-        if gap > self._allow_gap:
-            return CBACResult(
-                decision="allow",
-                reason=f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
-                f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
-            )
-        if gap < -self._deny_gap:
-            return CBACResult(
-                decision="deny",
-                reason=f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
-                f"(intent closer to forbidden than allowed policy)",
-            )
+        # Hallucination score rides along with the decision but never gates it —
+        # a scoring failure must not flip an already-decided allow into a deny.
+        hallucination = None
+        if user_intent:
+            try:
+                hallucination = await asyncio.to_thread(
+                    self.hallucination_score, user_intent, intent_text
+                )
+            except Exception:
+                hallucination = None
 
-        # Tier 2: NLI entailment vs top allowed chunk.
-        if not allowed_chunks:
-            return CBACResult(decision="deny", reason="Tier 2: no allowed policy chunks found")
-
-        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
-        top_chunk = allowed_chunks[top_idx]
-        t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
-        entailment = t2_scores.get("entailment", 0.0)
-        contradiction = t2_scores.get("contradiction", 0.0)
-
-        if entailment >= _ENTAILMENT_THRESHOLD:
-            return CBACResult(
-                decision="allow",
-                reason=f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}",
-            )
-        if contradiction >= _CONTRADICTION_THRESHOLD:
-            return CBACResult(
-                decision="deny",
-                reason=f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
-            )
-
-        # Tier 3: LLM judgment (optional).
-        if self._llm_backend is None:
-            return CBACResult(
-                decision="advise",
-                reason=(
-                    f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
-                    f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
-                    "no LLM backend configured — caller must decide"
-                ),
-            )
-
-        try:
-            llm_decision = await self._llm_backend(intent_text, policy_text)
-        except Exception as e:
-            return CBACResult(decision="advise", reason=f"Tier 3 LLM error: {e}")
-
-        verdict = str(llm_decision).lower()
-        if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
-            return CBACResult(decision="deny", reason=f"Tier 3 LLM: {llm_decision}")
-        if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
-            return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
-        return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
+        return CBACResult(decision=decision, reason=reason, hallucination_score=hallucination)
 
     def authorise_agent_app_interaction(
         self,
@@ -683,7 +720,7 @@ class CBAC:
 
         return resp
 
-    #TODO:- Replace trust file by light db.
+    # TODO:- Replace trust file by light db.
     @property
     def __trust_store_path(self) -> Path:
         return Path(self.provenance.config_dir) / _TRUST_STORE_FILE
@@ -739,7 +776,7 @@ class CBAC:
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{key}_score must be in [0, 1], got {value}")
 
-        #TODO: should this be a geometric mean? 
+        # TODO: should this be a geometric mean?
         s = 1.0
         for value, weight in zip(scores.values(), self._lhi_weights):
             s *= value**weight

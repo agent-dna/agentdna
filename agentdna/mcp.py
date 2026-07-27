@@ -15,36 +15,33 @@ in-process ones and the ``@cbac_guard`` decorators need no change:
     outgoing call, *after* the framework built the LLM-facing schema, so
     the model never sees or controls it.
   - server side: :class:`CBACMiddleware` pops it back off before argument
-    validation and re-opens a ``cbac_context`` so the guard has an actor +
-    intent to authorize against.
+    validation and re-opens a ``cbac_context`` so the guard has an agent id
+    + intent to authorize against.
 
 Typical wiring (one import surface)::
 
     from agentdna.mcp import cbac_guard, cbac_context, CBACMiddleware, intent_interceptor
 
     # server
-    mcp.add_middleware(CBACMiddleware(actor_provider=my_dna))
+    mcp.add_middleware(CBACMiddleware(agent_id_provider=my_agent_id))
 
     # client
     client = MultiServerMCPClient(servers, tool_interceptors=[intent_interceptor])
 
     # request entry point
-    with cbac_context(actor=my_dna, user_intent=root_intent):
+    with cbac_context(agent_id=my_agent_id, user_intent=root_intent):
         await agent.ainvoke(...)
 """
 
 from __future__ import annotations
 
-from typing import Callable, Optional, TYPE_CHECKING
+from typing import Callable, Optional
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.types import CallToolRequestParams
 
 # Re-exported so MCP users import the whole recipe from one place.
 from .guard import cbac_context, cbac_guard, get_context
-
-if TYPE_CHECKING:
-    from .core import AgentDNA
 
 __all__ = [
     "CBACMiddleware",
@@ -65,24 +62,24 @@ class CBACMiddleware(Middleware):
     """Server-side: restore the governance context from the hidden
     ``user_intent`` argument so ``@cbac_guard`` can authorize the call.
 
-    ``actor_provider`` returns the server's own agent identity (whose
+    ``agent_id_provider`` returns the server's own agent id (whose
     on-chain policy is checked). Returning ``None`` leaves governance off
     for that call -- the tool runs unguarded -- so keep it reliable.
     """
 
-    def __init__(self, actor_provider: Callable[[], Optional["AgentDNA"]]):
-        self._actor_provider = actor_provider
+    def __init__(self, agent_id_provider: Callable[[], Optional[str]]):
+        self._agent_id_provider = agent_id_provider
 
     async def on_call_tool(self, context: MiddlewareContext[CallToolRequestParams], call_next):
         args = dict(context.message.arguments or {})
         user_intent = args.pop(INTENT_ARG, "")
         context = context.copy(message=context.message.model_copy(update={"arguments": args}))
 
-        actor = self._actor_provider()
-        if actor is None:
+        agent_id = self._agent_id_provider()
+        if not agent_id:
             return await call_next(context)
 
-        with cbac_context(actor=actor, user_intent=user_intent or ""):
+        with cbac_context(agent_id=agent_id, user_intent=user_intent or ""):
             return await call_next(context)
 
 

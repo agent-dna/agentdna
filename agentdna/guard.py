@@ -46,11 +46,7 @@ from typing import (
     Iterator,
     Optional,
     Tuple,
-    TYPE_CHECKING,
 )
-
-if TYPE_CHECKING:
-    from .core import AgentDNA
 
 
 # ── Data model ────────────────────────────────────────────────────────────────
@@ -60,11 +56,11 @@ if TYPE_CHECKING:
 class GovernanceContext:
     """Per-request governance state the guard authorizes against.
 
-    The guard reads ``actor`` (for the agent id) and ``user_intent`` --
-    the only two inputs the CBAC call needs beyond the intended action.
+    ``agent_id`` (whose policy is checked) and ``user_intent`` are the
+    only two inputs the CBAC call needs beyond the intended action.
     """
 
-    actor: "AgentDNA"
+    agent_id: str
     user_intent: str = ""
 
 
@@ -77,10 +73,10 @@ def get_context() -> Optional[GovernanceContext]:
     """Return the ambient GovernanceContext, or None when governance is off."""
     return _governance_ctx.get()
 
-#TODO:- instead of AgentDNA capture agent_id. 
+
 @contextlib.contextmanager
 def cbac_context(
-    actor: "AgentDNA",
+    agent_id: str,
     user_intent: str = "",
 ) -> Iterator[GovernanceContext]:
     """Open a governance scope. Set once at the request entry point.
@@ -88,7 +84,7 @@ def cbac_context(
     Every ``@cbac_guard``-wrapped callable invoked inside this block
     reads the context ambiently; the caller passes nothing per call.
     """
-    holder = GovernanceContext(actor=actor, user_intent=user_intent)
+    holder = GovernanceContext(agent_id=agent_id, user_intent=user_intent)
     token = _governance_ctx.set(holder)
     try:
         yield holder
@@ -98,12 +94,13 @@ def cbac_context(
 
 # ── Layer configuration ───────────────────────────────────────────────────────
 
-#TODO:- Check if we can remove advise_action?
+
+# TODO:- Check if we can remove advise_action?
 @dataclass
 class GuardConfig:
     cbac_url: str = "https://cbac-admin.agentdna.io"
     cbac_timeout: float = 100.0
-    advise_action: str = "deny" 
+    advise_action: str = "deny"
 
 
 _config = GuardConfig()
@@ -180,7 +177,8 @@ def _authorize_sync(
     decision = response.headers.get("X-CBAC-Decision", "advise")
     return decision, response.text
 
-#TODO:- Verify return type. 
+
+# TODO:- Verify return type.
 async def _authorize(
     ctx: GovernanceContext,
     intent_text: str,
@@ -188,7 +186,7 @@ async def _authorize(
 ) -> Tuple[str, str]:
     decision, detail = await asyncio.to_thread(
         _authorize_sync,
-        ctx.actor.get_actor_id(),
+        ctx.agent_id,
         intent_text,
         ctx.user_intent or None,
         cfg,
