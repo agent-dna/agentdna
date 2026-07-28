@@ -1,3 +1,7 @@
+from fastapi import Request
+from fastapi import FastAPI
+import uvicorn
+from fastapi.responses import PlainTextResponse
 import asyncio
 import base64
 import hashlib
@@ -13,9 +17,9 @@ from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
-from .id import get_id
-from .provenance import Provenance
-from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
+from agentdna.id import get_id
+from agentdna.provenance import Provenance
+from agentdna.types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 
 from sentence_transformers import SentenceTransformer
@@ -98,6 +102,8 @@ class CBACResult:
     reason: str = ""
     trace: List[CardCheck] = field(default_factory=list)
     hallucination_score: Optional[float] = None
+    intent_score: Optional[float] = None
+    policy_score: Optional[float] = None
 
 
 def parse_skill_md(text: str) -> SkillsCard:
@@ -322,8 +328,8 @@ class CBAC:
         (this is what re-joins a hard-wrapped prose paragraph).
         """
         lines = block.splitlines()
-        if not any(_BULLET_RE.match(l) for l in lines):
-            return [" ".join(l.strip() for l in lines if l.strip())]
+        if not any(_BULLET_RE.match(ln) for ln in lines):
+            return [" ".join(ln.strip() for ln in lines if ln.strip())]
         items: List[str] = []
         current: List[str] = []
         for line in lines:
@@ -372,7 +378,7 @@ class CBAC:
         Lines starting with ``#`` are dropped, matching the previous
         comment-stripping behaviour.
         """
-        filtered = "\n".join(l for l in text.splitlines() if not l.strip().startswith("#"))
+        filtered = "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("#"))
         chunks: List[str] = []
         for block in re.split(r"\n\s*\n", filtered):
             block = block.strip()
@@ -560,20 +566,28 @@ class CBAC:
         self,
         user_intent: str,
         agent_action: str,
-    ) -> Optional[Tuple[str, str]]:
+    ) -> Tuple[Optional[Tuple[str, str]], float]:
         """NLI drift check: does the agent's action contradict the user's intent?
 
-        Returns (decision, reason) if contradiction is strong enough, else None.
+        Returns ``((decision, reason), intent_score)`` if contradiction is
+        strong enough to deny, else ``(None, intent_score)``. ``intent_score``
+        (``1 - contradiction``, in [0, 1]) is always returned — it's the same
+        NLI call regardless of outcome, so the caller gets it for free to feed
+        into :meth:`compute_lhi` later.
         """
         scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
         contradiction = scores.get("contradiction", 0.0)
+        intent_score = 1.0 - contradiction
         if contradiction >= _CONTRADICTION_THRESHOLD:
             return (
-                "deny",
-                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
-                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+                (
+                    "deny",
+                    f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                    f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+                ),
+                intent_score,
             )
-        return None
+        return None, intent_score
 
     def _max_cosine(self, query_vec, chunk_vecs) -> float:
         """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
@@ -593,8 +607,16 @@ class CBAC:
         allowed_vecs,
         forbidden_vecs,
         policy_text: str,
-    ) -> Tuple[str, str]:
-        """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM). Returns (decision, reason).
+    ) -> Tuple[str, str, Optional[float]]:
+        """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM).
+
+        Returns ``(decision, reason, policy_score)``. ``policy_score`` is a
+        [0, 1] normalization of whichever signal decided — the Tier 1 cosine
+        gap rescaled against its own allow/deny thresholds (so it lands at
+        exactly 1.0/0.0 on a clean Tier 1 allow/deny), or the Tier 2 NLI
+        entailment as-is. Tier 3 (LLM judgment or no-backend "advise") has no
+        numeric signal, so ``policy_score`` is ``None`` there — the caller
+        must supply their own if they want to feed :meth:`compute_lhi`.
 
         Pure decision logic, extracted from :meth:`verify_agent_app_interaction` so
         the caller can attach a hallucination score to the result exactly once,
@@ -607,22 +629,27 @@ class CBAC:
         forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
         gap = allowed_score - forbidden_score
 
+        span = self._allow_gap + self._deny_gap
+        gap_score = max(0.0, min(1.0, (gap + self._deny_gap) / span)) if span > 0 else None
+
         if gap > self._allow_gap:
             return (
                 "allow",
                 f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
                 f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+                gap_score,
             )
         if gap < -self._deny_gap:
             return (
                 "deny",
                 f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
                 f"(intent closer to forbidden than allowed policy)",
+                gap_score,
             )
 
         # Tier 2: NLI entailment vs top allowed chunk.
         if not allowed_chunks:
-            return ("deny", "Tier 2: no allowed policy chunks found")
+            return ("deny", "Tier 2: no allowed policy chunks found", None)
 
         top_idx = int(np.argmax(allowed_vecs @ intent_vec))
         top_chunk = allowed_chunks[top_idx]
@@ -631,30 +658,35 @@ class CBAC:
         contradiction = t2_scores.get("contradiction", 0.0)
 
         if entailment >= _ENTAILMENT_THRESHOLD:
-            return ("allow", f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}")
+            return ("allow", f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}", entailment)
         if contradiction >= _CONTRADICTION_THRESHOLD:
-            return ("deny", f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}")
+            return (
+                "deny",
+                f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
+                entailment,
+            )
 
-        # Tier 3: LLM judgment (optional).
+        # Tier 3: LLM judgment (optional). No numeric signal — policy_score is None.
         if self._llm_backend is None:
             return (
                 "advise",
                 f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
                 f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
                 "no LLM backend configured — caller must decide",
+                None,
             )
 
         try:
             llm_decision = await self._llm_backend(intent_text, policy_text)
         except Exception as e:
-            return ("advise", f"Tier 3 LLM error: {e}")
+            return ("advise", f"Tier 3 LLM error: {e}", None)
 
         verdict = str(llm_decision).lower()
         if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
-            return ("deny", f"Tier 3 LLM: {llm_decision}")
+            return ("deny", f"Tier 3 LLM: {llm_decision}", None)
         if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
-            return ("allow", f"Tier 3 LLM: {llm_decision}")
-        return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}")
+            return ("allow", f"Tier 3 LLM: {llm_decision}", None)
+        return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}", None)
 
     async def verify_agent_app_interaction(
         self,
@@ -707,10 +739,15 @@ class CBAC:
         -------
         CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
         Fail-closed: any unrecoverable error (no policy, empty content,
-        model failure) resolves to ``deny``. When ``user_intent`` is supplied
-        and Tier 1/2/3 reach a decision, ``hallucination_score`` is also set
-        (HHEM score of ``intended_action`` grounded in ``user_intent``, 1 =
-        grounded) — informational only, it never changes ``decision``.
+        model failure) resolves to ``deny``. When ``user_intent`` is supplied,
+        ``intent_score`` is set from the Check-1 NLI comparison (``1 -
+        contradiction``). When Tier 1 or 2 decide, ``policy_score`` is also
+        set (normalized cosine gap or NLI entailment respectively; ``None``
+        on a Tier 3 decision, which has no numeric signal). When Tier 1/2/3
+        reach a decision, ``hallucination_score`` is set (HHEM score of
+        ``intended_action`` grounded in ``user_intent``, 1 = grounded).
+        ``intent_score``/``policy_score``/``hallucination_score`` are all
+        informational only — none of them ever changes ``decision``.
         """
         import numpy as np
 
@@ -721,11 +758,12 @@ class CBAC:
             )
 
         # Check 1: NLI drift — only runs when caller supplies the root user intent.
+        intent_score: Optional[float] = None
         if user_intent and intent_text:
-            drift = await self.__check1_drift(user_intent, intent_text)
+            drift, intent_score = await self.__check1_drift(user_intent, intent_text)
             if drift is not None:
                 decision, reason = drift
-                return CBACResult(decision=decision, reason=reason)
+                return CBACResult(decision=decision, reason=reason, intent_score=intent_score)
 
         # Fetch current policy from chain — always, so we can detect updates.
         try:
@@ -766,7 +804,7 @@ class CBAC:
             lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
         )
 
-        decision, reason = await self.__tiered_decision(
+        decision, reason, policy_score = await self.__tiered_decision(
             intent_text,
             intent_vec,
             allowed_chunks,
@@ -787,7 +825,13 @@ class CBAC:
             except Exception:
                 hallucination = None
 
-        return CBACResult(decision=decision, reason=reason, hallucination_score=hallucination)
+        return CBACResult(
+            decision=decision,
+            reason=reason,
+            hallucination_score=hallucination,
+            intent_score=intent_score,
+            policy_score=policy_score,
+        )
 
     def authorise_agent_app_interaction(
         self,
@@ -945,3 +989,47 @@ class CBAC:
             ) from exc
 
         return trust
+
+
+# ── HTTP boundary ──────────────────────────────────────────────────────────────
+
+_cbac: CBAC | None = None
+
+
+def _get_cbac() -> CBAC:
+    global _cbac
+    if _cbac is None:
+        provenance = Provenance(
+            name="cbac-service",
+            api_key=os.environ.get("AGENTDNA_API_KEY", ""),
+        )
+        _cbac = CBAC(provenance=provenance)
+    return _cbac
+
+
+app = FastAPI()
+
+
+@app.post("/authorize-cbac")
+async def authorize_cbac(request: Request) -> PlainTextResponse:
+    body = await request.json()
+
+    try:
+        result = await _get_cbac().verify_agent_app_interaction(
+            agent_id=body.get("agent_id", ""),
+            intended_action=body.get("intended_action"),
+            user_intent=body.get("user_intent"),
+        )
+        decision, reason = result.decision, result.reason
+    except Exception as exc:
+        decision, reason = "error", str(exc)
+
+    return PlainTextResponse(reason, headers={"X-CBAC-Decision": decision})
+
+
+if __name__ == "__main__":
+    uvicorn.run(
+        app,
+        host=os.environ.get("CBAC_SERVICE_HOST", "127.0.0.1"),
+        port=int(os.environ.get("CBAC_SERVICE_PORT", "8767")),
+    )

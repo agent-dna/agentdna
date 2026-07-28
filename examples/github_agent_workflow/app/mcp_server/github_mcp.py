@@ -76,7 +76,7 @@ def _post_via_cbac(
         )
     """
 
-    from agentdna.cbac import CBAC
+    from cbac_service.cbac import CBAC
     from agentdna.provenance import Provenance
 
     cbac = CBAC(

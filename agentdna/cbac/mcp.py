@@ -4,7 +4,7 @@ MCP integration for the CBAC guard (optional).
 Install with ``pip install agent-dna[mcp]``.
 
 ``@cbac_guard`` authorizes a tool against the ambient
-:func:`~agentdna.guard.cbac_context` -- trivial when the tool runs in the
+:func:`~agentdna.cbac.guard.cbac_context` -- trivial when the tool runs in the
 same process. Over MCP the tool runs in the server process, and a
 contextvar cannot cross a process boundary. This module carries the one
 value that must cross -- the root user intent -- as a hidden tool
@@ -20,7 +20,7 @@ in-process ones and the ``@cbac_guard`` decorators need no change:
 
 Typical wiring (one import surface)::
 
-    from agentdna.mcp import cbac_guard, cbac_context, CBACMiddleware, intent_interceptor
+    from agentdna.cbac.mcp import cbac_guard, cbac_context, CBACMiddleware, intent_interceptor
 
     # server
     mcp.add_middleware(CBACMiddleware(agent_id_provider=my_agent_id))

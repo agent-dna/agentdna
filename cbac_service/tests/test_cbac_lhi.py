@@ -5,7 +5,7 @@ import pytest
 
 pytest.importorskip("sentence_transformers")
 
-from agentdna.cbac import _LHI_LAMBDA_DOWN, _LHI_LAMBDA_UP, _LHI_WEIGHTS, CBAC
+from cbac_service.cbac import _LHI_LAMBDA_DOWN, _LHI_LAMBDA_UP, _LHI_WEIGHTS, CBAC
 from agentdna.id import get_id
 
 SCORES = {

@@ -1,5 +1,6 @@
 import json
 import hashlib
+from typing import overload
 
 from .types import Envelope, IntentWorkflow, Actor, Issue
 
@@ -143,6 +144,10 @@ def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
     return IntentWorkflow(**data)
 
 
+@overload
+def parse_envelope(data: dict | Envelope) -> Envelope: ...
+@overload
+def parse_envelope(data: None) -> None: ...
 def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
     """Recursively turns a raw dict (and any nested dicts) into a
     proper Envelope, including the parent_envelope chain."""

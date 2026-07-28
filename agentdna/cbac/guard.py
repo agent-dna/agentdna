@@ -155,7 +155,7 @@ def _authorize_sync(
 ) -> Tuple[str, str]:
     """POST to the CBAC decision service.
 
-    The reference implementation (agentdna/cbac_service.py) runs
+    The reference implementation (the cbac_service package) runs
     ``verify_agent_app_interaction`` behind this endpoint and returns a
     decision only -- it never executes the action. The payload is
     exactly that method's inputs.

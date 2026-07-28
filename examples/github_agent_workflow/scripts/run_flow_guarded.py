@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from langgraph.graph import END, START, StateGraph
 
-from agentdna.guard import configure
+from agentdna.cbac import configure
 
 from app.agent_names import coordinator_name
 from app.agents.coordinator import coordinator_node

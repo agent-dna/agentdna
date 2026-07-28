@@ -7,7 +7,7 @@ import pytest
 
 pytest.importorskip("sentence_transformers")
 
-from agentdna.cbac import CBAC
+from cbac_service.cbac import CBAC
 
 AGENT_ID = "did:agent"
 
@@ -60,6 +60,12 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
     assert result.decision == "advise"
     assert result.hallucination_score is not None
     assert 0.0 <= result.hallucination_score <= 1.0
+    # Check-1 always runs when user_intent is supplied, so intent_score is set...
+    assert result.intent_score is not None
+    assert 0.0 <= result.intent_score <= 1.0
+    # ...but this pipeline is stubbed to fall through to Tier 3, which has no
+    # numeric signal, so policy_score stays None.
+    assert result.policy_score is None
 
 
 def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
@@ -71,6 +77,7 @@ def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
     )
     assert result.decision == "advise"
     assert result.hallucination_score is None
+    assert result.intent_score is None
 
 
 def test_hallucination_scoring_failure_does_not_change_decision(tmp_path, monkeypatch):
@@ -89,6 +96,37 @@ def test_hallucination_scoring_failure_does_not_change_decision(tmp_path, monkey
     )
     assert result.decision == "advise"
     assert result.hallucination_score is None
+
+
+def test_intent_score_is_one_minus_contradiction(tmp_path, monkeypatch):
+    cbac = make_verify_cbac(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        cbac, "_nli_scores", lambda premise, hypothesis: {"contradiction": 0.3, "entailment": 0.1}
+    )
+    drift, intent_score = asyncio.run(cbac._CBAC__check1_drift("user intent", "agent action"))
+    assert drift is None  # 0.3 < _CONTRADICTION_THRESHOLD, no deny
+    assert intent_score == pytest.approx(0.7)
+
+
+def test_policy_score_normalized_on_tier1_decision(tmp_path, monkeypatch):
+    cbac = make_verify_cbac(tmp_path, monkeypatch)
+    intent_vec = np.array([1.0, 0.0])
+    allowed_vecs = np.array([[1.0, 0.0]])  # cosine 1.0 -> gap = 1.0, clamps above allow_gap
+    forbidden_vecs = np.array([[0.0, 1.0]])  # cosine 0.0
+
+    decision, _reason, policy_score = asyncio.run(
+        cbac._CBAC__tiered_decision(
+            "intent text",
+            intent_vec,
+            ["allowed chunk"],
+            [],
+            allowed_vecs,
+            forbidden_vecs,
+            "policy text",
+        )
+    )
+    assert decision == "allow"
+    assert policy_score == pytest.approx(1.0)
 
 
 def test_hallucination_score_not_computed_on_early_hard_fail(tmp_path, monkeypatch):

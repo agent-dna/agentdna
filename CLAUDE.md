@@ -6,15 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `agent-dna` is a Python library (published to PyPI as `agent-dna`) providing a security, governance, and audit framework for multi-agent AI systems. It lets every participant in a workflow (human, agent, or app) cryptographically sign the action they perform, so a completed workflow can be independently verified and audited back to the original requester.
 
-The `agentdna/` package is the shippable library. `examples/github_agent_workflow/` is a standalone LangGraph + MCP demo app with its own deps and README — not part of the published package.
+The `agentdna/` package is the shippable library. Two other trees live in this repo and are **not** part of the published package: `cbac_service/` (the deployable CBAC decision service) and `examples/github_agent_workflow/` (a standalone LangGraph + MCP demo app with its own deps and README).
 
 ## Environment & commands
 
-- Python `>=3.10,<3.13`. Dependency + venv management is **`uv`** (`uv.lock` is committed). `uv sync` installs runtime + `dev` deps into `.venv`; `pip install -e .` also works for a plain runtime install. There is **no test suite or CI**.
+- Python `>=3.10,<3.13`. Dependency + venv management is **`uv`**. The repo holds **two independent projects**, each with its own `pyproject.toml`, `uv.lock`, and `.venv`:
+  - repo root = the `agent-dna` library. `uv sync`, `uv run pytest` (collects `tests/`). `pip install -e .` also works.
+  - `cbac_service/` = a standalone deployable that depends on `agent-dna` **from PyPI**. `uv --directory cbac_service sync` / `run pytest`. Its `[tool.uv.sources]` resolves `agent-dna` from the sibling checkout **for local dev only**; deploy with `uv sync --no-sources` to use the published library.
 - Lint / format / type-check (dev tooling, see [Working conventions](#working-conventions)): `uv run ruff format .`, `uv run ruff check .`, `uv run pyright`.
-- CBAC (`agentdna/cbac.py`) requires optional ML deps that are **not** in the base install: `pip install -e ".[semantic]"` (pulls `sentence-transformers`, `scipy`, `numpy`). The rest of the library works without them; only import `cbac` when these are present.
+- The heavy ML deps (`sentence-transformers`, `scipy`, `numpy`, `transformers`) belong to **`cbac_service`**; `agentdna/` imports none of them. The library's only extra is `[mcp]` (`fastmcp`, `langchain-mcp-adapters`), needed by `agentdna/cbac/mcp.py`.
 - Build: `python -m build` (setuptools backend).
 - Bump the version in `pyproject.toml` (`[project].version`) when releasing.
+- CI (`.github/workflows/`): `tests.yml` runs the library's `tests/` on every PR; `build.yml` and `release.yml` cover packaging. `cbac_service/tests/` is not in CI — run it locally.
 
 ## The Provenance Layer is a Rubix blockchain node
 
@@ -28,7 +31,7 @@ Actor identity (`provenance_id`) is the Rubix DID from the `Signer`. Signing key
 
 ## Core architecture
 
-Public API lives in `agentdna/core.py` as the `AgentDNA` class. Note `agentdna/__init__.py` is **empty** — despite the README's `from agentdna import AgentDNA`, code imports from `agentdna.core`.
+Public API lives in `agentdna/core.py` as the `AgentDNA` class, re-exported from `agentdna/__init__.py`, so both `from agentdna import AgentDNA` (as in the README) and `from agentdna.core import AgentDNA` work.
 
 The workflow lifecycle every participant follows: **`handle()` (verify inbound) → do work → `build()` (append signed envelope) → forward**. Only a `human` actor calls `create_workflow_provenance()` to commit the finished workflow.
 
@@ -46,7 +49,8 @@ Module map:
 - `id.py` — deterministic Card IDs: `CIDv0` over `sha256(actor_id)`.
 - `card.py` — card payload builders.
 - `config.py` — local actor registry at `~/.agentdna/actor_info.json` (maps actor DID → cached card id, so cards aren't re-created).
-- `cbac.py` — Context-Based Access Control (see below), an independent optional subsystem.
+- `cbac/guard.py` — the framework-agnostic CBAC guard (see below): `cbac_guard`, `cbac_context`, `configure`. Re-exported from `agentdna/cbac/__init__.py`.
+- `cbac/mcp.py` — MCP glue (`CBACMiddleware`, `intent_interceptor`); needs the `[mcp]` extra, so it is imported separately and `agentdna.cbac` does not pull in fastmcp.
 
 ## Critical invariant: envelope canonicalization
 
@@ -54,22 +58,27 @@ Module map:
 
 Verification (`Provenance.verify_envelope`) calls `rubix.did.online_signature_verify` against the Rubix node — it is a **network call**, and it verifies each envelope against the DID in that envelope's `from_.id`.
 
-## CBAC (agentdna/cbac.py)
+## CBAC
 
-A separate three-tier semantic authorization pipeline that decides whether an agent's intended action is permitted by its on-chain policy. Fetches the latest policy from the Provenance Layer, flattens it to text chunks (YAML frontmatter of a `skill.md` + body), and runs:
+Context-Based Access Control decides whether an agent's intended action is permitted by its on-chain policy. It splits across the two projects:
+
+- **`agentdna/cbac/`** (in the library, no ML deps) — the guard. `cbac_guard` decorates a tool/function, `cbac_context` carries the governance context via `contextvars`, and authorization is a `requests` POST to a CBAC service (`cbac_url`, default `https://cbac-admin.agentdna.io`).
+- **`cbac_service/cbac.py`** (the deployable) — the decision engine plus the `FastAPI` app serving `POST /authorize-cbac`.
+
+The engine is a three-tier semantic pipeline. It fetches the latest policy from the Provenance Layer, flattens it to text chunks (YAML frontmatter of a `skill.md` + body), and runs:
 1. **Tier 1** — cosine gap between allowed vs forbidden policy chunks (with an optional Check-1 NLI drift test against the root user intent).
 2. **Tier 2** — NLI entailment against the top allowed chunk.
 3. **Tier 3** — optional LLM backend; if none is configured the result is `"advise"` and the caller decides.
 
-Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed** (any error → `deny`). Policy embeddings are precomputed and cached as pickles under `~/.agentdna/embeddings_cache/`, keyed by policy hash so an on-chain policy update triggers recompute. `authorise_agent_app_interaction` is a different path that delegates the decision to a remote CBAC service (`cbac_url`, default `https://cbac-admin.agentdna.io`).
+Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed** (any error → `deny`). Policy embeddings are precomputed and cached as pickles under `~/.agentdna/embeddings_cache/`, keyed by policy hash so an on-chain policy update triggers recompute.
 
 ## Working conventions
 
 - **Don't add excessive comments.** The code is self-documenting; comment only non-obvious *why*, not *what*. (The existing `#TODO:-` question-comments are open notes, not a pattern to imitate.)
 - **Don't read `.env` files** — they hold real secrets. `.env.sample` is a safe template and may be read.
 - **Match the existing style.** Source under `agentdna/` is `ruff format`ted (`line-length = 100`, config in `pyproject.toml`); keep it that way and follow the existing snake_case + dataclass idioms.
-- **Don't add dependencies without asking.** The base package intentionally keeps a small dependency set; ML deps live behind the `[semantic]` extra.
-- **`agentdna/` is the shippable library; `examples/github_agent_workflow/` is a separate app.** Editing either is fine — just never make the library import from or depend on `examples/` or its runtime deps.
+- **Don't add dependencies without asking.** The library intentionally keeps a small dependency set; ML deps belong to `cbac_service`.
+- **`agentdna/` is the shippable library.** `examples/github_agent_workflow/` and `cbac_service/` are separate apps. Editing any of them is fine — just never make the library import from or depend on either.
 
-Dev tooling lives in the `dev` dependency group (`uv sync` installs it): **`ruff`** (format + lint, config `[tool.ruff]`, applied repo-wide including `examples/`) and **`pyright`** (config `[tool.pyright]`, `basic` mode, scoped to `agentdna/` — `examples/` is excluded because its heavy runtime deps aren't in the dev env). Keep `agentdna/` both `ruff format`-clean and pyright-clean.
+Dev tooling lives in the `dev` dependency group (`uv sync` installs it). The group also self-references `agent-dna[mcp]` so `agentdna/cbac/mcp.py`'s imports resolve for pyright; dependency groups are never published, so the wheel is unaffected. The tools: **`ruff`** (format + lint, config `[tool.ruff]`, applied repo-wide including `examples/`) and **`pyright`** (config `[tool.pyright]`, `basic` mode, scoped to `agentdna/` — `examples/` and `cbac_service/` are outside it because their heavy runtime deps aren't in the library's dev env). Keep `agentdna/` both `ruff format`-clean and pyright-clean.
 
