@@ -43,14 +43,10 @@ def make_llm(temperature: float = 0.0) -> BaseChatModel:
         from langchain_google_genai import ChatGoogleGenerativeAI
 
         if not settings.gemini_model:
-            raise ValueError(
-                "LLM_PROVIDER=gemini but GEMINI_MODEL is not set."
-            )
+            raise ValueError("LLM_PROVIDER=gemini but GEMINI_MODEL is not set.")
 
         if not settings.gemini_api_key:
-            raise ValueError(
-                "LLM_PROVIDER=gemini but GEMINI_API_KEY is not set."
-            )
+            raise ValueError("LLM_PROVIDER=gemini but GEMINI_API_KEY is not set.")
 
         return ChatGoogleGenerativeAI(
             model=settings.gemini_model,
@@ -62,9 +58,7 @@ def make_llm(temperature: float = 0.0) -> BaseChatModel:
         from langchain_ollama import ChatOllama
 
         if not settings.ollama_model:
-            raise ValueError(
-                "LLM_PROVIDER=ollama but OLLAMA_MODEL is not set."
-            )
+            raise ValueError("LLM_PROVIDER=ollama but OLLAMA_MODEL is not set.")
 
         return ChatOllama(
             model=settings.ollama_model,
@@ -76,14 +70,10 @@ def make_llm(temperature: float = 0.0) -> BaseChatModel:
         from langchain_openai import ChatOpenAI
 
         if not settings.openai_model:
-            raise ValueError(
-                "LLM_PROVIDER=openai but OPENAI_MODEL is not set."
-            )
+            raise ValueError("LLM_PROVIDER=openai but OPENAI_MODEL is not set.")
 
         if not settings.openai_api_key:
-            raise ValueError(
-                "LLM_PROVIDER=openai but OPENAI_API_KEY is not set."
-            )
+            raise ValueError("LLM_PROVIDER=openai but OPENAI_API_KEY is not set.")
 
         kwargs = {
             "model": settings.openai_model,
@@ -96,7 +86,4 @@ def make_llm(temperature: float = 0.0) -> BaseChatModel:
 
         return ChatOpenAI(**kwargs)
 
-    raise ValueError(
-        f"Unknown LLM_PROVIDER={provider!r}; "
-        "expected 'gemini', 'ollama' or 'openai'."
-    )
+    raise ValueError(f"Unknown LLM_PROVIDER={provider!r}; expected 'gemini', 'ollama' or 'openai'.")

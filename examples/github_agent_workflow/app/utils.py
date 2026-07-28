@@ -9,6 +9,7 @@ from agentdna.types import (
     Envelope,
 )
 
+
 def serialize_workflow(
     workflow: IntentWorkflow,
 ) -> str:
@@ -22,6 +23,7 @@ def serialize_workflow(
         separators=(",", ":"),
     )
 
+
 def deserialize_workflow(
     workflow_json: str,
 ) -> IntentWorkflow:
@@ -29,9 +31,7 @@ def deserialize_workflow(
     Deserializes an IntentWorkflow from JSON.
     """
 
-    data = json.loads(
-        workflow_json
-    )
+    data = json.loads(workflow_json)
 
     return IntentWorkflow(
         type=data["type"],
@@ -41,12 +41,9 @@ def deserialize_workflow(
             "info",
             {},
         ),
-        envelope=_deserialize_envelope(
-            data.get(
-                "envelope"
-            )
-        ),
+        envelope=_deserialize_envelope(data.get("envelope")),
     )
+
 
 def _deserialize_envelope(
     data: dict | None,
@@ -55,32 +52,18 @@ def _deserialize_envelope(
         return None
 
     return Envelope(
-        from_=Actor(
-            **data["from_"]
-        ),
-        to=Actor(
-            **data["to"]
-        ),
+        from_=Actor(**data["from_"]),
+        to=Actor(**data["to"]),
         payload=data["payload"],
         epoch=data["epoch"],
         metadata=data.get(
             "metadata",
             {},
         ),
-        issues=[
-            Issue(**issue)
-            for issue in data.get(
-                "issues",
-                []
-            )
-        ],
+        issues=[Issue(**issue) for issue in data.get("issues", [])],
         signature=data.get(
             "signature",
             "",
         ),
-        parent_envelope=_deserialize_envelope(
-            data.get(
-                "parent_envelope"
-            )
-        ),
+        parent_envelope=_deserialize_envelope(data.get("parent_envelope")),
     )

@@ -2,6 +2,11 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
+# cbac_service is a standalone deployable with its own pyproject.toml and lock;
+# it depends on this library from PyPI. Ship only the agentdna package.
+[tool.setuptools.packages.find]
+include = ["agentdna*"]
+
 [project]
 name = "agent-dna"
 version = "0.4.1"
@@ -24,14 +29,41 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Required for the three-tier semantic CBAC pipeline
-# Install with: pip install agent-dna[semantic]
-semantic = [
-  "sentence-transformers>=3.0.0",
-  "scipy>=1.10.0",
-  "numpy>=1.24.0",
+# Required for the MCP integration glue (agentdna/cbac/mcp.py)
+# Install with: pip install agent-dna[mcp]
+mcp = [
+  "fastmcp>=3.4.0",
+  "langchain-mcp-adapters>=0.3.0",
 ]
 
 [project.urls]
 Homepage = "https://github.com/agent-dna/agentdna"
 Repository = "https://github.com/agent-dna/agentdna"
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.411",
+    "pytest>=8.0.0",
+    "ruff>=0.15.20",
+    # pyright checks agentdna/cbac/mcp.py, so the dev env needs the extra's imports.
+    "agent-dna[mcp]",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+# cbac_service has its own env and its own pytest config; run it from there.
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.pyright]
+# Package is only partially typed; basic keeps the hook signal useful without noise.
+typeCheckingMode = "basic"
+pythonVersion = "3.10"
+venvPath = "."
+venv = ".venv"
+include = ["agentdna"]
+# examples/ has its own heavy deps that aren't in the dev env; ruff still covers it, pyright does not.
+exclude = ["examples", ".venv", "**/__pycache__"]

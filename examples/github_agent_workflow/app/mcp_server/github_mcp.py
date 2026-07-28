@@ -40,9 +40,7 @@ def _gh_headers() -> dict:
 
 def _worker_skills_file() -> str:
     """Absolute path to the Worker agent's skills.md."""
-    return str(
-        Path(__file__).resolve().parents[1] / "agents" / "worker" / "skills.md"
-    )
+    return str(Path(__file__).resolve().parents[1] / "agents" / "worker" / "skills.md")
 
 
 def _worker_did() -> Optional[str]:
@@ -52,11 +50,13 @@ def _worker_did() -> Optional[str]:
     dna = agentdna_registry.get(worker_name(), policy_file=_worker_skills_file())
     return dna.get_actor_id() if dna else None
 
+
 def _worker_dna():
     return agentdna_registry.get(
         worker_name(),
         policy_file=_worker_skills_file(),
     )
+
 
 def _post_via_cbac(
     url: str,
@@ -76,17 +76,11 @@ def _post_via_cbac(
         )
     """
 
-    from agentdna.cbac import CBAC
+    from cbac_service.cbac import CBAC
     from agentdna.provenance import Provenance
 
     cbac = CBAC(
-        provenance=Provenance(
-            name="cbac-internal",
-            api_key=os.environ.get(
-                "AGENTDNA_API_KEY",
-                ""
-            )
-        ),
+        provenance=Provenance(name="cbac-internal", api_key=os.environ.get("AGENTDNA_API_KEY", "")),
     )
 
     try:
@@ -98,7 +92,7 @@ def _post_via_cbac(
             app_method="POST",
             app_headers=_gh_headers(),
             app_body=body,
-            app_timeout=103600
+            app_timeout=103600,
         )
 
     except PermissionError as exc:
@@ -117,8 +111,7 @@ def _post_via_cbac(
 
     except Exception as exc:
         print(
-            f"[cbac] authorise_agent_app_interaction raised "
-            f"{type(exc).__name__}: {exc}",
+            f"[cbac] authorise_agent_app_interaction raised {type(exc).__name__}: {exc}",
             flush=True,
         )
 
@@ -138,6 +131,7 @@ def _post_via_cbac(
         response,
         None,
     )
+
 
 def _cbac_block(decision: str, request: str, response: Optional[str]) -> dict:
     """
@@ -196,28 +190,26 @@ async def create_issue(
     intent_workflow = None
 
     if workflow and worker_dna:
-        intent_workflow = deserialize_workflow(
-            workflow
-        )
+        intent_workflow = deserialize_workflow(workflow)
 
         intent_workflow = worker_dna.build(
             recipient_actor_id="",
             recipient_actor_name="github",
             recipient_actor_type="app",
-            payload=json.dumps({
-                "action": "create_issue",
-                "repo": repo,
-                "title": title,
-                "body_preview": body[:200],
-            }),
+            payload=json.dumps(
+                {
+                    "action": "create_issue",
+                    "repo": repo,
+                    "title": title,
+                    "body_preview": body[:200],
+                }
+            ),
             workflow=intent_workflow,
         )
 
     agent_id = _worker_did()
     if agent_id == "":
-        raise ValueError(
-            "AgentDNA is enabled but Worker agent has no DID"
-        )
+        raise ValueError("AgentDNA is enabled but Worker agent has no DID")
 
     try:
         if agent_id and is_agentdna_enabled() and intent_workflow:
@@ -229,51 +221,35 @@ async def create_issue(
                 workflow=intent_workflow,
             )
 
-
             if response is None:
                 if intent_workflow and worker_dna:
-                    depth = get_envelope_depth(
-                        intent_workflow.envelope
-                    )
+                    depth = get_envelope_depth(intent_workflow.envelope)
 
                     intent_workflow = worker_dna.build(
                         recipient_actor_id=worker_dna.get_actor_id(),
                         recipient_actor_name=worker_dna.name,
                         recipient_actor_type=worker_dna.type,
-                        payload=json.dumps({
-                            "status": "denied",
-                            "reason": detail,
-                        }),
+                        payload=json.dumps(
+                            {
+                                "status": "denied",
+                                "reason": detail,
+                            }
+                        ),
                         verification_result=VerificationResult(
                             valid=False,
                             chain_depth=depth + 1,
-                            issues=[Issue(
-                                depth=depth + 1,
-                                reason=f"cbac denied: {detail}"
-                            )]
+                            issues=[Issue(depth=depth + 1, reason=f"cbac denied: {detail}")],
                         ),
                         workflow=intent_workflow,
-                        from_actor=Actor(
-                            id="",
-                            name="github",
-                            type="app"
-                        )
+                        from_actor=Actor(id="", name="github", type="app"),
                     )
 
-                status = (
-                    "denied"
-                    if decision == "deny"
-                    else "error"
-                )
+                status = "denied" if decision == "deny" else "error"
 
                 return {
                     "status": status,
                     "error": detail,
-                    "workflow": (
-                        serialize_workflow(intent_workflow)
-                        if intent_workflow
-                        else ""
-                    ),
+                    "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
                 }
 
             status_code = response.status_code
@@ -294,25 +270,21 @@ async def create_issue(
             )
             status_code = response.status_code
             text = response.text
-            data = (
-                response.json()
-                if status_code < 300
-                else {}
-            )
+            data = response.json() if status_code < 300 else {}
 
     except Exception as exc:
         if worker_dna and intent_workflow:
-            depth = get_envelope_depth(
-                intent_workflow.envelope
-            )
+            depth = get_envelope_depth(intent_workflow.envelope)
 
             intent_workflow = worker_dna.build(
                 recipient_actor_id=worker_dna.get_actor_id(),
                 recipient_actor_name=worker_dna.name,
                 recipient_actor_type=worker_dna.type,
-                payload=json.dumps({
-                    "status": "error",
-                }),
+                payload=json.dumps(
+                    {
+                        "status": "error",
+                    }
+                ),
                 verification_result=VerificationResult(
                     valid=False,
                     chain_depth=depth + 1,
@@ -321,40 +293,32 @@ async def create_issue(
                             depth=depth + 1,
                             reason=str(exc),
                         )
-                    ]
+                    ],
                 ),
                 workflow=intent_workflow,
-                from_actor=Actor(
-                    id="",
-                    name="github",
-                    type="app"
-                )
+                from_actor=Actor(id="", name="github", type="app"),
             )
 
         return {
             "status": "error",
             "error": str(exc),
-            "workflow": (
-                serialize_workflow(intent_workflow)
-                if intent_workflow
-                else ""
-            ),
+            "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
         }
 
     if status_code >= 300:
         if intent_workflow and worker_dna:
-            depth = get_envelope_depth(
-                intent_workflow.envelope
-            )
+            depth = get_envelope_depth(intent_workflow.envelope)
 
             intent_workflow = worker_dna.build(
                 recipient_actor_id=worker_dna.get_actor_id(),
                 recipient_actor_name=worker_dna.name,
                 recipient_actor_type=worker_dna.type,
-                payload=json.dumps({
-                    "status": "failed",
-                    "http_status": status_code,
-                }),
+                payload=json.dumps(
+                    {
+                        "status": "failed",
+                        "http_status": status_code,
+                    }
+                ),
                 verification_result=VerificationResult(
                     valid=False,
                     chain_depth=depth + 1,
@@ -363,45 +327,34 @@ async def create_issue(
                             depth=depth + 1,
                             reason=text[:500],
                         )
-                    ]
+                    ],
                 ),
                 workflow=intent_workflow,
-                from_actor=Actor(
-                    id="",
-                    name="github",
-                    type="app"
-                )
+                from_actor=Actor(id="", name="github", type="app"),
             )
 
         return {
             "status": "failed",
             "http_status": status_code,
             "error": text,
-            "workflow": (
-                serialize_workflow(intent_workflow)
-                if intent_workflow
-                else ""
-            ),
+            "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
         }
-
 
     if intent_workflow and worker_dna:
         intent_workflow = worker_dna.build(
             recipient_actor_id=worker_dna.get_actor_id(),
             recipient_actor_name=worker_dna.name,
             recipient_actor_type=worker_dna.type,
-            payload=json.dumps({
-                "status": "created",
-                "issue_number": data.get("number"),
-                "html_url": data.get("html_url"),
-                "title": data.get("title"),
-            }),
+            payload=json.dumps(
+                {
+                    "status": "created",
+                    "issue_number": data.get("number"),
+                    "html_url": data.get("html_url"),
+                    "title": data.get("title"),
+                }
+            ),
             workflow=intent_workflow,
-            from_actor=Actor(
-                id="",
-                name="github",
-                type="app"
-            )
+            from_actor=Actor(id="", name="github", type="app"),
         )
 
     return {
@@ -409,12 +362,9 @@ async def create_issue(
         "issue_number": data.get("number"),
         "html_url": data.get("html_url"),
         "title": data.get("title"),
-        "workflow": (
-            serialize_workflow(intent_workflow)
-            if intent_workflow
-            else ""
-        ),
+        "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
     }
+
 
 @mcp.tool()
 async def create_pr(
@@ -473,14 +423,10 @@ async def create_pr(
     agent_id = _worker_did()
 
     if agent_id == "":
-        raise ValueError(
-            "AgentDNA is enabled but Worker agent has no DID"
-        )
+        raise ValueError("AgentDNA is enabled but Worker agent has no DID")
 
     try:
-
         if agent_id and is_agentdna_enabled() and intent_workflow:
-
             decision, response, detail = _post_via_cbac(
                 url=url,
                 body=request_payload,
@@ -490,12 +436,8 @@ async def create_pr(
             )
 
             if response is None:
-
                 if intent_workflow and worker_dna:
-
-                    depth = get_envelope_depth(
-                        intent_workflow.envelope
-                    )
+                    depth = get_envelope_depth(intent_workflow.envelope)
 
                     intent_workflow = worker_dna.build(
                         recipient_actor_id=worker_dna.get_actor_id(),
@@ -520,20 +462,12 @@ async def create_pr(
                         workflow=intent_workflow,
                     )
 
-                status = (
-                    "denied"
-                    if decision == "deny"
-                    else "error"
-                )
+                status = "denied" if decision == "deny" else "error"
 
                 return {
                     "status": status,
                     "error": detail,
-                    "workflow": (
-                        serialize_workflow(intent_workflow)
-                        if intent_workflow
-                        else ""
-                    ),
+                    "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
                 }
 
             status_code = response.status_code
@@ -545,7 +479,6 @@ async def create_pr(
                 data = {}
 
         else:
-
             response = await _post_direct(
                 url,
                 request_payload,
@@ -554,19 +487,11 @@ async def create_pr(
             status_code = response.status_code
             text = response.text
 
-            data = (
-                response.json()
-                if status_code < 300
-                else {}
-            )
+            data = response.json() if status_code < 300 else {}
 
     except Exception as exc:
-
         if worker_dna and intent_workflow:
-
-            depth = get_envelope_depth(
-                intent_workflow.envelope
-            )
+            depth = get_envelope_depth(intent_workflow.envelope)
 
             intent_workflow = worker_dna.build(
                 recipient_actor_id=worker_dna.get_actor_id(),
@@ -593,20 +518,12 @@ async def create_pr(
         return {
             "status": "error",
             "error": str(exc),
-            "workflow": (
-                serialize_workflow(intent_workflow)
-                if intent_workflow
-                else ""
-            ),
+            "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
         }
 
     if status_code >= 300:
-
         if worker_dna and intent_workflow:
-
-            depth = get_envelope_depth(
-                intent_workflow.envelope
-            )
+            depth = get_envelope_depth(intent_workflow.envelope)
 
             intent_workflow = worker_dna.build(
                 recipient_actor_id=worker_dna.get_actor_id(),
@@ -635,15 +552,10 @@ async def create_pr(
             "status": "failed",
             "http_status": status_code,
             "error": text,
-            "workflow": (
-                serialize_workflow(intent_workflow)
-                if intent_workflow
-                else ""
-            ),
+            "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
         }
 
     if worker_dna and intent_workflow:
-
         intent_workflow = worker_dna.build(
             recipient_actor_id=worker_dna.get_actor_id(),
             recipient_actor_name=worker_dna.name,
@@ -666,12 +578,9 @@ async def create_pr(
         "pr_number": data.get("number"),
         "html_url": data.get("html_url"),
         "title": data.get("title"),
-        "workflow": (
-            serialize_workflow(intent_workflow)
-            if intent_workflow
-            else ""
-        ),
+        "workflow": (serialize_workflow(intent_workflow) if intent_workflow else ""),
     }
+
 
 if __name__ == "__main__":
     mcp.run(

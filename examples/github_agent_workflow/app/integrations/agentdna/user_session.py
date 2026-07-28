@@ -47,7 +47,6 @@ def _alias_for(
     return submitter_email or "sample@example.com"
 
 
-
 def _get_or_make_user(
     alias: str,
 ) -> AgentDNA:
@@ -56,7 +55,6 @@ def _get_or_make_user(
         return _USER_CACHE[alias]
 
     with _USER_CACHE_LOCK:
-
         if alias in _USER_CACHE:
             return _USER_CACHE[alias]
 
@@ -81,7 +79,6 @@ def _get_or_make_user(
 
 
 class UserSession:
-
     def __init__(
         self,
         user: AgentDNA,
@@ -121,9 +118,7 @@ class UserSession:
             )
 
             if first_agent is None:
-                raise ValueError(
-                    "first_agent must be supplied"
-                )
+                raise ValueError("first_agent must be supplied")
 
             workflow = user.build(
                 recipient_actor_id=first_agent.get_actor_id(),
@@ -137,13 +132,9 @@ class UserSession:
             )
 
             if not handle_result.verification.valid:
-
                 logger.warning(
                     "user_initial_workflow_invalid",
-                    issues=[
-                        issue.reason
-                        for issue in handle_result.verification.issues
-                    ],
+                    issues=[issue.reason for issue in handle_result.verification.issues],
                 )
 
                 return None
@@ -155,7 +146,6 @@ class UserSession:
             )
 
         except Exception as exc:
-
             logger.warning(
                 "agentdna_user_open_failed",
                 error=str(exc),
@@ -169,28 +159,19 @@ class UserSession:
     ) -> bool:
 
         try:
-
             handle_result = self.user.handle(
                 workflow,
             )
 
             if not handle_result.verification.valid:
-
                 logger.warning(
                     "user_final_workflow_invalid",
-                    issues=[
-                        issue.reason
-                        for issue in handle_result.verification.issues
-                    ],
+                    issues=[issue.reason for issue in handle_result.verification.issues],
                 )
 
                 return False
 
-            workflow_card_id = (
-                self.user.create_workflow_provenance(
-                    workflow
-                )
-            )
+            workflow_card_id = self.user.create_workflow_provenance(workflow)
 
             logger.info(
                 "workflow_provenance_created",
@@ -200,7 +181,6 @@ class UserSession:
             return True
 
         except Exception as exc:
-
             logger.warning(
                 "workflow_completion_failed",
                 error=str(exc),

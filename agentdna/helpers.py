@@ -1,12 +1,9 @@
 import json
 import hashlib
+from typing import overload
 
-from .types import (
-    Envelope,
-    IntentWorkflow,
-    Actor,
-    Issue
-)
+from .types import Envelope, IntentWorkflow, Actor, Issue
+
 
 def canonicalize_envelope(envelope: Envelope) -> str:
     """
@@ -28,6 +25,7 @@ def canonicalize_envelope(envelope: Envelope) -> str:
 
     return hashlib.sha256(envelope_dict_str).hexdigest()
 
+
 def get_latest_envelope(
     workflow: IntentWorkflow,
 ) -> Envelope:
@@ -37,11 +35,10 @@ def get_latest_envelope(
     """
 
     if workflow.envelope is None:
-        raise ValueError(
-            "workflow does not contain an envelope"
-        )
+        raise ValueError("workflow does not contain an envelope")
 
     return workflow.envelope
+
 
 def get_root_envelope(
     workflow: IntentWorkflow,
@@ -51,9 +48,7 @@ def get_root_envelope(
     """
 
     if workflow.envelope is None:
-        raise ValueError(
-            "workflow does not contain an envelope"
-        )
+        raise ValueError("workflow does not contain an envelope")
 
     current = parse_envelope(workflow.envelope)
 
@@ -61,6 +56,7 @@ def get_root_envelope(
         current = parse_envelope(current.parent_envelope)
 
     return current
+
 
 def get_envelope_depth(
     envelope: Envelope | None,
@@ -72,6 +68,7 @@ def get_envelope_depth(
         envelope = envelope.parent_envelope
 
     return depth
+
 
 def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
     """
@@ -96,6 +93,7 @@ def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
         current = current.parent_envelope
 
     return envelopes
+
 
 def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
     """
@@ -126,23 +124,17 @@ def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
         "payload": envelope.payload,
         "metadata": envelope.metadata,
         "epoch": envelope.epoch,
-        "issues": [
-            {
-                "depth": issue.depth,
-                "reason": issue.reason
-            } for issue in envelope.issues
-        ]
+        "issues": [{"depth": issue.depth, "reason": issue.reason} for issue in envelope.issues],
     }
 
     if not is_current:
         result["signature"] = envelope.signature
 
     if envelope.parent_envelope is not None:
-        result["parent_envelope"] = (
-            _envelope_to_dict(envelope.parent_envelope, is_current=False)
-        )
+        result["parent_envelope"] = _envelope_to_dict(envelope.parent_envelope, is_current=False)
 
     return result
+
 
 def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
     if isinstance(data, IntentWorkflow):
@@ -151,6 +143,11 @@ def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
     data["envelope"] = parse_envelope(data.get("envelope"))
     return IntentWorkflow(**data)
 
+
+@overload
+def parse_envelope(data: dict | Envelope) -> Envelope: ...
+@overload
+def parse_envelope(data: None) -> None: ...
 def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
     """Recursively turns a raw dict (and any nested dicts) into a
     proper Envelope, including the parent_envelope chain."""
@@ -170,10 +167,12 @@ def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
 
     return Envelope(**data)
 
+
 def parse_actor(data: dict | Actor | None) -> Actor | None:
     if data is None or isinstance(data, Actor):
         return data
     return Actor(**data)
+
 
 def parse_issue(data: dict | Issue) -> Issue:
     if isinstance(data, Issue):

@@ -1,15 +1,9 @@
 from typing import List
 
-from .types import (
-    IntentWorkflow,
-    VerificationResult,
-    Issue
-)
+from .types import IntentWorkflow, VerificationResult, Issue
 from .provenance import Provenance
-from .helpers import (
-    unwrap_workflow,
-    get_latest_envelope
-)
+from .helpers import unwrap_workflow, get_latest_envelope
+
 
 def verify_light(
     provenance: Provenance,
@@ -19,22 +13,18 @@ def verify_light(
     Verifies only the latest envelope.
     """
 
-    envelope = get_latest_envelope(
-        workflow
-    )
+    envelope = get_latest_envelope(workflow)
 
     issues: List[Issue] = []
 
     try:
-        valid = provenance.verify_envelope(
-            envelope
-        )
+        valid = provenance.verify_envelope(envelope)
 
         if not valid:
             issues.append(
                 Issue(
                     depth=0,
-                    reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})"
+                    reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})",
                 )
             )
 
@@ -42,7 +32,7 @@ def verify_light(
         issues.append(
             Issue(
                 depth=0,
-                reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}"
+                reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}",
             )
         )
 
@@ -51,6 +41,7 @@ def verify_light(
         chain_depth=1,
         issues=issues,
     )
+
 
 def verify_heavy(
     provenance: Provenance,
@@ -64,27 +55,21 @@ def verify_heavy(
     envelope and traversing back to the root.
     """
 
-    envelopes = unwrap_workflow(
-        workflow
-    )
+    envelopes = unwrap_workflow(workflow)
 
-    chain_depth = len(
-        envelopes
-    )
+    chain_depth = len(envelopes)
 
     issues: List[Issue] = []
 
     current_depth = 0
     for envelope in envelopes:
         try:
-            valid = provenance.verify_envelope(
-                envelope
-            )
+            valid = provenance.verify_envelope(envelope)
             if not valid:
                 issues.append(
                     Issue(
                         depth=current_depth,
-                        reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})"
+                        reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})",
                     )
                 )
 
@@ -92,7 +77,7 @@ def verify_heavy(
             issues.append(
                 Issue(
                     depth=current_depth,
-                    reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}"
+                    reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}",
                 )
             )
 

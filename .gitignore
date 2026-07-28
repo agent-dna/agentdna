@@ -24,6 +24,7 @@ credentials/
 .agentdna/
 .claude/
 
+uv.lock
 
 # Example specific
 

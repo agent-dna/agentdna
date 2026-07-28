@@ -8,77 +8,77 @@ import requests
 import yaml
 import os
 
-from typing import (
-    Optional, Callable, Dict, 
-    Any, List, Tuple
-)
+from typing import Optional, Callable, Dict, Any, List, Tuple
 from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
-from .provenance import Provenance
-from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
+from agentdna.id import get_id
+from agentdna.provenance import Provenance
+from agentdna.types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 
 from sentence_transformers import SentenceTransformer
 
-_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5" # bi-encoder for Tier 1 cosine
-_DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
+# Pipeline tunables. See config.yaml for what each key means; a missing key
+# raises on access rather than silently running on a wrong threshold.
+#TODO:- Change
+_CONFIG_PATH = Path(os.environ.get("CBAC_CONFIG") or Path(__file__).with_name("config.yaml"))
+_CFG: Dict[str, Any] = yaml.safe_load(_CONFIG_PATH.read_text())
 
-# Gap thresholds: allow when gap > +0.12, deny when gap < -0.08, else escalate.
-# These are model-agnostic (relative difference, not absolute scores).
-_ALLOW_GAP_DEFAULT: float = 0.12
-_DENY_GAP_DEFAULT: float = 0.08
-
-# NLI thresholds for Check 1 drift and Tier 2 entailment.
-_ENTAILMENT_THRESHOLD: float = 0.55
-_CONTRADICTION_THRESHOLD: float = 0.60
-
-# Structure-aware chunking: paragraphs / list items are the primary unit,
-# split further only past this word-count budget (~1.3 tokens/word for English).
-_CHUNK_MAX_WORDS: int = 120
-_NLI_BATCH_SIZE: int = 64
-
-_BULLET_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
-_SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+')
+_BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 REQUIRED_FRONTMATTER_KEYS = (
-    "agent-did", "issued-by", "issued-at", "expires-at", "allowed-actions",
+    "agent-did",
+    "issued-by",
+    "issued-at",
+    "expires-at",
+    "allowed-actions",
 )
+
 
 @dataclass
 class SkillsCard:
     """Parsed skill.md card. Frontmatter fields + the markdown body."""
-    agent_did:         str
-    agent_name:        str
-    issued_by:         str
-    issued_at:         datetime
-    expires_at:        datetime
-    allowed_actions:   List[str]
+
+    agent_did: str
+    agent_name: str
+    issued_by: str
+    issued_at: datetime
+    expires_at: datetime
+    allowed_actions: List[str]
     forbidden_actions: List[str] = field(default_factory=list)
-    constraints:       Dict[str, Any] = field(default_factory=dict)
-    can_delegate_to:   List[str] = field(default_factory=list)
-    requires:          Dict[str, Any] = field(default_factory=dict)
-    body:              str = ""
-    raw_frontmatter:   Dict[str, Any] = field(default_factory=dict)
+    constraints: Dict[str, Any] = field(default_factory=dict)
+    can_delegate_to: List[str] = field(default_factory=list)
+    requires: Dict[str, Any] = field(default_factory=dict)
+    body: str = ""
+    raw_frontmatter: Dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
 class CardCheck:
     """Result of CBAC check for one layer in the chain."""
-    layer_did:    str
-    card_id:     Optional[str]
-    card:         Optional[SkillsCard]
-    action:       Optional[str]
-    passed:       bool
-    reasons:      List[str] = field(default_factory=list)
+
+    layer_did: str
+    card_id: Optional[str]
+    card: Optional[SkillsCard]
+    action: Optional[str]
+    passed: bool
+    reasons: List[str] = field(default_factory=list)
+
 
 @dataclass
 class CBACResult:
     """Overall CBAC decision after walking the full chain."""
-    decision:    str                                # "allow" | "deny" | "advise"
-    reason:      str = ""
-    trace:       List[CardCheck] = field(default_factory=list)
+
+    decision: str  # "allow" | "deny" | "advise"
+    reason: str = ""
+    trace: List[CardCheck] = field(default_factory=list)
+    hallucination_score: Optional[float] = None
+    intent_score: Optional[float] = None
+    policy_score: Optional[float] = None
+
 
 def parse_skill_md(text: str) -> SkillsCard:
     """
@@ -117,6 +117,7 @@ def parse_skill_md(text: str) -> SkillsCard:
         raw_frontmatter=fm,
     )
 
+
 def _parse_dt(value: Any) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -124,6 +125,7 @@ def _parse_dt(value: Any) -> datetime:
         s = value.replace("Z", "+00:00")
         return datetime.fromisoformat(s)
     raise ValueError(f"unparseable timestamp: {value!r}")
+
 
 def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> str:
     """Recursively gather every string found in an arbitrary blob.
@@ -151,14 +153,13 @@ def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> st
             parts.append(_collect_text(v, include_keys=include_keys, _depth=_depth + 1))
         return " ".join(parts)
     if isinstance(obj, (list, tuple, set)):
-        return " ".join(
-            _collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj
-        )
+        return " ".join(_collect_text(v, include_keys=include_keys, _depth=_depth + 1) for v in obj)
     # Dataclass / arbitrary object → walk its __dict__.
     data = getattr(obj, "__dict__", None)
     if isinstance(data, dict):
         return _collect_text(data, include_keys=include_keys, _depth=_depth + 1)
     return str(obj)
+
 
 def _intended_action_text(intended_action: Any) -> str:
     """Flatten an intended-action of *any* shape (str / dict / list / object)
@@ -173,16 +174,21 @@ def _intended_action_text(intended_action: Any) -> str:
     """
     return _collect_text(intended_action, include_keys=False)
 
+
 class CBAC:
     def __init__(
         self,
         provenance: Provenance,
         cbac_url: str = "https://cbac-admin.agentdna.io",
-        encoder_name: str = _DEFAULT_ENCODER,
-        nli_model_name: str = _DEFAULT_NLI_MODEL,
+        encoder_name: str = _CFG["encoder_model"],
+        nli_model_name: str = _CFG["nli_model"],
         llm_backend: Optional[Callable] = None,
-        allow_gap: float = _ALLOW_GAP_DEFAULT,
-        deny_gap: float = _DENY_GAP_DEFAULT,
+        allow_gap: float = _CFG["allow_gap"],
+        deny_gap: float = _CFG["deny_gap"],
+        hhem_model_name: str = _CFG["hhem_model"],
+        lhi_weights: Tuple[float, float, float, float] = tuple(_CFG["lhi_weights"]),
+        lhi_lambda_up: float = _CFG["lhi_lambda_up"],
+        lhi_lambda_down: float = _CFG["lhi_lambda_down"],
     ):
         self.provenance = provenance
         self.cbac_url = cbac_url
@@ -191,26 +197,29 @@ class CBAC:
         self._llm_backend = llm_backend
         self._allow_gap = allow_gap
         self._deny_gap = deny_gap
+        self._hhem_model_name = hhem_model_name
+        self._lhi_weights = lhi_weights
+        self._lhi_lambda_up = lhi_lambda_up
+        self._lhi_lambda_down = lhi_lambda_down
 
         self._encoder = None
         self._nli = None
+        self._hhem = None
         self._nli_labels: Dict[int, str] = {}
 
         # Make embeddings config dir
         self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
-        os.makedirs(
-            self.embeddings_dir,
-            exist_ok=True
-        )
+        os.makedirs(self.embeddings_dir, exist_ok=True)
 
     def _get_encoder(self):
         if self._encoder is None:
             self._encoder = SentenceTransformer(self._encoder_name)
         return self._encoder
-    
+
     def _get_nli(self):
         if self._nli is None:
             from sentence_transformers.cross_encoder import CrossEncoder
+
             self._nli = CrossEncoder(self._nli_model_name)
             try:
                 if not self._nli.model:
@@ -225,15 +234,35 @@ class CBAC:
                 # Fallback for deberta NLI label order (contradiction/entailment/neutral)
                 self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
         return self._nli
-    
+
+    def _get_hhem(self):
+        if self._hhem is None:
+            from transformers import AutoModelForSequenceClassification
+
+            # trust_remote_code is required by HHEM-2.1 (custom predict() head).
+            self._hhem = AutoModelForSequenceClassification.from_pretrained(
+                self._hhem_model_name, trust_remote_code=True
+            )
+        return self._hhem
+
+    def hallucination_score(self, source_text: str, generated_text: str) -> float:
+        """Score how well ``generated_text`` is grounded in ``source_text``.
+
+        Runs the HHEM cross-encoder on the (premise, hypothesis) pair and
+        returns a score in [0, 1]: 1 = fully supported by the source,
+        0 = hallucinated. Higher is better.
+        """
+        model = self._get_hhem()
+        return float(model.predict([(source_text, generated_text)])[0])
+
     def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
 
         Returns a dict like {'entailment': 0.82, 'contradiction': 0.05, 'neutral': 0.13}.
         Scores are softmax-normalised probabilities.
         """
-        import numpy as np
         from scipy.special import softmax as sp_softmax
+
         nli = self._get_nli()
         raw = nli.predict([(premise, hypothesis)], apply_softmax=False)
         probs = sp_softmax(raw[0])
@@ -248,13 +277,14 @@ class CBAC:
         batching do anything useful.
         """
         from scipy.special import softmax as sp_softmax
+
         if not pairs:
             return []
         nli = self._get_nli()
         raw = nli.predict(
             pairs,
             apply_softmax=False,
-            batch_size=_NLI_BATCH_SIZE,
+            batch_size=_CFG["nli_batch_size"],
             show_progress_bar=False,
         )
         probs = sp_softmax(raw, axis=1)
@@ -272,8 +302,8 @@ class CBAC:
         (this is what re-joins a hard-wrapped prose paragraph).
         """
         lines = block.splitlines()
-        if not any(_BULLET_RE.match(l) for l in lines):
-            return [" ".join(l.strip() for l in lines if l.strip())]
+        if not any(_BULLET_RE.match(ln) for ln in lines):
+            return [" ".join(ln.strip() for ln in lines if ln.strip())]
         items: List[str] = []
         current: List[str] = []
         for line in lines:
@@ -297,10 +327,7 @@ class CBAC:
             return [unit]
         sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(unit) if s.strip()]
         if len(sentences) <= 1:
-            return [
-                " ".join(words[i:i + max_words])
-                for i in range(0, len(words), max_words)
-            ]
+            return [" ".join(words[i : i + max_words]) for i in range(0, len(words), max_words)]
         out: List[str] = []
         current: List[str] = []
         current_len = 0
@@ -315,7 +342,7 @@ class CBAC:
             out.append(" ".join(current))
         return out
 
-    def _chunk_body_text(self, text: str, max_words: int = _CHUNK_MAX_WORDS) -> List[str]:
+    def _chunk_body_text(self, text: str, max_words: int = _CFG["chunk_max_words"]) -> List[str]:
         """Structure-aware, budget-capped chunking for free-form policy text.
 
         Paragraphs (blank-line separated) and list items are the primary
@@ -325,11 +352,9 @@ class CBAC:
         Lines starting with ``#`` are dropped, matching the previous
         comment-stripping behaviour.
         """
-        filtered = "\n".join(
-            l for l in text.splitlines() if not l.strip().startswith("#")
-        )
+        filtered = "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("#"))
         chunks: List[str] = []
-        for block in re.split(r'\n\s*\n', filtered):
+        for block in re.split(r"\n\s*\n", filtered):
             block = block.strip()
             if not block:
                 continue
@@ -375,7 +400,7 @@ class CBAC:
                     chunks.append(f"{key}: {value}")
             return chunks
         return []
-    
+
     def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
         """NLI-classify each chunk as allowed or forbidden.
 
@@ -415,27 +440,20 @@ class CBAC:
         associated with an agent.
         """
 
-        actor_card_dict = self.provenance.get_latest_provenance_record(
-            actor_id=agent_id
-        )
+        actor_card_dict = self.provenance.get_latest_provenance_record(actor_id=agent_id)
 
-        actor_card = AgentCard(
-            **actor_card_dict
-        )
+        actor_card = AgentCard(**actor_card_dict)
 
         try:
             return base64.b64decode(actor_card.policy).decode("utf-8")
         except Exception as exc:
-            raise RuntimeError(
-                f"failed to decode policy for "
-                f"agent {agent_id}: {exc}"
-            ) from exc
+            raise RuntimeError(f"failed to decode policy for agent {agent_id}: {exc}") from exc
 
     def __get_embedding_file_path(self, agent_id: str) -> Path:
         """Return the .pkl path for this agent's precomputed policy vectors."""
         digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
         return Path(self.embeddings_dir) / f"{digest}.pkl"
-    
+
     def __save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
         path = self.__get_embedding_file_path(agent_id)
         with path.open("wb") as f:
@@ -486,7 +504,7 @@ class CBAC:
         policy = self.__get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
-        
+
         chunks = self._flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
@@ -517,33 +535,132 @@ class CBAC:
 
         await asyncio.to_thread(self.__save_to_embeddings_dir, agent_id, payload)
         return payload
-    
+
     async def __check1_drift(
         self,
         user_intent: str,
         agent_action: str,
-    ) -> Optional[Tuple[str, str]]:
+    ) -> Tuple[Optional[Tuple[str, str]], float]:
         """NLI drift check: does the agent's action contradict the user's intent?
 
-        Returns (decision, reason) if contradiction is strong enough, else None.
+        Returns ``((decision, reason), intent_score)`` if contradiction is
+        strong enough to deny, else ``(None, intent_score)``. ``intent_score``
+        (``1 - contradiction``, in [0, 1]) is always returned — it's the same
+        NLI call regardless of outcome, so the caller gets it for free to feed
+        into :meth:`compute_lhi` later.
         """
         scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
         contradiction = scores.get("contradiction", 0.0)
-        if contradiction >= _CONTRADICTION_THRESHOLD:
+        intent_score = 1.0 - contradiction
+        if contradiction >= _CFG["contradiction_threshold"]:
             return (
-                "deny",
-                f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
-                f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+                (
+                    "deny",
+                    f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                    f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+                ),
+                intent_score,
             )
-        return None
-    
+        return None, intent_score
+
     def _max_cosine(self, query_vec, chunk_vecs) -> float:
         """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
         import numpy as np
+
         if chunk_vecs.shape[0] == 0:
             return 0.0
         sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
         return float(np.max(sims))
+
+    async def __tiered_decision(
+        self,
+        intent_text: str,
+        intent_vec,
+        allowed_chunks: List[str],
+        forbidden_chunks: List[str],
+        allowed_vecs,
+        forbidden_vecs,
+        policy_text: str,
+    ) -> Tuple[str, str, Optional[float]]:
+        """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM).
+
+        Returns ``(decision, reason, policy_score)``. ``policy_score`` is a
+        [0, 1] normalization of whichever signal decided — the Tier 1 cosine
+        gap rescaled against its own allow/deny thresholds (so it lands at
+        exactly 1.0/0.0 on a clean Tier 1 allow/deny), or the Tier 2 NLI
+        entailment as-is. Tier 3 (LLM judgment or no-backend "advise") has no
+        numeric signal, so ``policy_score`` is ``None`` there — the caller
+        must supply their own if they want to feed :meth:`compute_lhi`.
+
+        Pure decision logic, extracted from :meth:`verify_agent_app_interaction` so
+        the caller can attach a hallucination score to the result exactly once,
+        after a decision is reached, without duplicating it at every tier's exit.
+        """
+        import numpy as np
+
+        # Tier 1: cosine gap.
+        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
+        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
+        gap = allowed_score - forbidden_score
+
+        span = self._allow_gap + self._deny_gap
+        gap_score = max(0.0, min(1.0, (gap + self._deny_gap) / span)) if span > 0 else None
+
+        if gap > self._allow_gap:
+            return (
+                "allow",
+                f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
+                f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+                gap_score,
+            )
+        if gap < -self._deny_gap:
+            return (
+                "deny",
+                f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
+                f"(intent closer to forbidden than allowed policy)",
+                gap_score,
+            )
+
+        # Tier 2: NLI entailment vs top allowed chunk.
+        if not allowed_chunks:
+            return ("deny", "Tier 2: no allowed policy chunks found", None)
+
+        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
+        top_chunk = allowed_chunks[top_idx]
+        t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
+        entailment = t2_scores.get("entailment", 0.0)
+        contradiction = t2_scores.get("contradiction", 0.0)
+
+        if entailment >= _CFG["entailment_threshold"]:
+            return ("allow", f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}", entailment)
+        if contradiction >= _CFG["contradiction_threshold"]:
+            return (
+                "deny",
+                f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
+                entailment,
+            )
+
+        # Tier 3: LLM judgment (optional). No numeric signal — policy_score is None.
+        if self._llm_backend is None:
+            return (
+                "advise",
+                f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
+                f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
+                "no LLM backend configured — caller must decide",
+                None,
+            )
+
+        try:
+            llm_decision = await self._llm_backend(intent_text, policy_text)
+        except Exception as e:
+            return ("advise", f"Tier 3 LLM error: {e}", None)
+
+        verdict = str(llm_decision).lower()
+        if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
+            return ("deny", f"Tier 3 LLM: {llm_decision}", None)
+        if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
+            return ("allow", f"Tier 3 LLM: {llm_decision}", None)
+        return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}", None)
 
     async def verify_agent_app_interaction(
         self,
@@ -596,26 +713,39 @@ class CBAC:
         -------
         CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
         Fail-closed: any unrecoverable error (no policy, empty content,
-        model failure) resolves to ``deny``.
+        model failure) resolves to ``deny``. When ``user_intent`` is supplied,
+        ``intent_score`` is set from the Check-1 NLI comparison (``1 -
+        contradiction``). When Tier 1 or 2 decide, ``policy_score`` is also
+        set (normalized cosine gap or NLI entailment respectively; ``None``
+        on a Tier 3 decision, which has no numeric signal). When Tier 1/2/3
+        reach a decision, ``hallucination_score`` is set (HHEM score of
+        ``intended_action`` grounded in ``user_intent``, 1 = grounded).
+        ``intent_score``/``policy_score``/``hallucination_score`` are all
+        informational only — none of them ever changes ``decision``.
         """
         import numpy as np
 
         intent_text = _intended_action_text(intended_action)
         if not intent_text.strip():
-            return CBACResult(decision="deny", reason="Intended action carries no analysable content")
+            return CBACResult(
+                decision="deny", reason="Intended action carries no analysable content"
+            )
 
         # Check 1: NLI drift — only runs when caller supplies the root user intent.
+        intent_score: Optional[float] = None
         if user_intent and intent_text:
-            drift = await self.__check1_drift(user_intent, intent_text)
+            drift, intent_score = await self.__check1_drift(user_intent, intent_text)
             if drift is not None:
                 decision, reason = drift
-                return CBACResult(decision=decision, reason=reason)
+                return CBACResult(decision=decision, reason=reason, intent_score=intent_score)
 
         # Fetch current policy from chain — always, so we can detect updates.
         try:
             current_policy = self.__get_latest_agent_policy(agent_id)
         except Exception as e:
-            return CBACResult(decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}")
+            return CBACResult(
+                decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}"
+            )
         if not current_policy:
             return CBACResult(decision="deny", reason=f"No policy available for agent {agent_id}")
 
@@ -629,7 +759,9 @@ class CBAC:
             try:
                 cached = await self.precompute_policy(agent_id)
             except Exception as e:
-                return CBACResult(decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}")
+                return CBACResult(
+                    decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}"
+                )
 
         allowed_chunks: List[str] = cached["allowed_chunks"]
         forbidden_chunks: List[str] = cached["forbidden_chunks"]
@@ -646,68 +778,35 @@ class CBAC:
             lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
         )
 
-        # Tier 1: cosine gap.
-        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
-        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
-        gap = allowed_score - forbidden_score
+        decision, reason, policy_score = await self.__tiered_decision(
+            intent_text,
+            intent_vec,
+            allowed_chunks,
+            forbidden_chunks,
+            allowed_vecs,
+            forbidden_vecs,
+            policy_text,
+        )
 
-        if gap > self._allow_gap:
-            return CBACResult(
-                decision="allow",
-                reason=f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
-                       f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
-            )
-        if gap < -self._deny_gap:
-            return CBACResult(
-                decision="deny",
-                reason=f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
-                       f"(intent closer to forbidden than allowed policy)",
-            )
+        # Hallucination score rides along with the decision but never gates it —
+        # a scoring failure must not flip an already-decided allow into a deny.
+        hallucination = None
+        if user_intent:
+            try:
+                hallucination = await asyncio.to_thread(
+                    self.hallucination_score, user_intent, intent_text
+                )
+            except Exception:
+                hallucination = None
 
-        # Tier 2: NLI entailment vs top allowed chunk.
-        if not allowed_chunks:
-            return CBACResult(decision="deny", reason="Tier 2: no allowed policy chunks found")
+        return CBACResult(
+            decision=decision,
+            reason=reason,
+            hallucination_score=hallucination,
+            intent_score=intent_score,
+            policy_score=policy_score,
+        )
 
-        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
-        top_chunk = allowed_chunks[top_idx]
-        t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
-        entailment = t2_scores.get("entailment", 0.0)
-        contradiction = t2_scores.get("contradiction", 0.0)
-
-        if entailment >= _ENTAILMENT_THRESHOLD:
-            return CBACResult(
-                decision="allow",
-                reason=f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}",
-            )
-        if contradiction >= _CONTRADICTION_THRESHOLD:
-            return CBACResult(
-                decision="deny",
-                reason=f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
-            )
-
-        # Tier 3: LLM judgment (optional).
-        if self._llm_backend is None:
-            return CBACResult(
-                decision="advise",
-                reason=(
-                    f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
-                    f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
-                    "no LLM backend configured — caller must decide"
-                ),
-            )
-
-        try:
-            llm_decision = await self._llm_backend(intent_text, policy_text)
-        except Exception as e:
-            return CBACResult(decision="advise", reason=f"Tier 3 LLM error: {e}")
-
-        verdict = str(llm_decision).lower()
-        if any(w in verdict for w in ("deny", "reject", "not allow", "prohibited")):
-            return CBACResult(decision="deny", reason=f"Tier 3 LLM: {llm_decision}")
-        if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
-            return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
-        return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
-    
     def authorise_agent_app_interaction(
         self,
         agent_id: str,
@@ -750,3 +849,117 @@ class CBAC:
             raise RuntimeError(resp.text)
 
         return resp
+
+    # TODO:- Replace trust file by light db.
+    @property
+    def __trust_store_path(self) -> Path:
+        return Path(self.provenance.config_dir) / _CFG["trust_store_file"]
+
+    def __load_trust_store(self) -> Dict[str, Any]:
+        try:
+            with self.__trust_store_path.open("r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+
+    def __save_trust_store(self, store: Dict[str, Any]):
+        with self.__trust_store_path.open("w") as f:
+            json.dump(store, f, indent=2)
+
+    def compute_lhi(
+        self,
+        agent_id: str,
+        callee_name: str,
+        callee_type: str,
+        intent_score: float,
+        policy_score: float,
+        hallucination_score: float,
+        output_score: float,
+    ) -> float:
+        """Update and return the LHI trust score for one (agent → callee) edge.
+
+        Called *after* the interaction executed, once all four per-interaction
+        scores (each in [0, 1], higher is better) are known:
+
+        1. Instantaneous quality ``s`` = weighted geometric mean of the four
+           scores — non-compensatory, so a single near-zero component drags
+           ``s`` toward zero regardless of the others.
+        2. Asymmetric EMA against the stored trust for this edge:
+           ``T = λ·T_prev + (1−λ)·s`` with λ = ``lhi_lambda_up`` when improving
+           (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
+           drops fast). First interaction with a callee: ``T = s``.
+
+        The full record (callee, all four scores, trust) is persisted locally
+        under the config dir and appended to a dedicated per-agent LHI card on
+        the Provenance Layer (created on first write), so the trust history is
+        independently verifiable on-chain. Trust never overrides the per-
+        interaction allow/deny gates — it is read pre-execution only to
+        arbitrate the inconclusive ("advise") band.
+        """
+        scores = {
+            "intent": intent_score,
+            "policy": policy_score,
+            "hallucination": hallucination_score,
+            "output": output_score,
+        }
+        for key, value in scores.items():
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{key}_score must be in [0, 1], got {value}")
+
+        # TODO: should this be a geometric mean?
+        s = 1.0
+        for value, weight in zip(scores.values(), self._lhi_weights):
+            s *= value**weight
+
+        store = self.__load_trust_store()
+        agent_entry = store.setdefault(agent_id, {"callees": {}})
+        prev_entry = agent_entry["callees"].get(callee_name)
+
+        if prev_entry is None:
+            trust = s
+        else:
+            prev = prev_entry["trust"]
+            lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
+            trust = lam * prev + (1 - lam) * s
+
+        record = {
+            "type": "lhi_record",
+            "agent_id": agent_id,
+            "callee": {"name": callee_name, "type": callee_type},
+            "scores": scores,
+            "trust": trust,
+            "updated_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+        agent_entry["callees"][callee_name] = {
+            "type": callee_type,
+            "scores": scores,
+            "trust": trust,
+            "updated_at": record["updated_at"],
+        }
+
+        # Local store is the working copy; the chain is the audit log. Persist
+        # locally first so a chain failure never loses the trust update.
+        lhi_card_id = agent_entry.get("lhi_card_id")
+        is_new_card = lhi_card_id is None
+        if is_new_card:
+            lhi_card_id = get_id(f"{agent_id}:lhi")
+            agent_entry["lhi_card_id"] = lhi_card_id
+        self.__save_trust_store(store)
+
+        try:
+            if is_new_card:
+                self.provenance.create_new_provenance_card(
+                    card_id=lhi_card_id, card_info=json.dumps(record)
+                )
+            else:
+                self.provenance.append_to_provenance_card(
+                    card_id=lhi_card_id, card_info=json.dumps(record)
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                f"LHI record for agent {agent_id} saved locally but failed to "
+                f"write to provenance card {lhi_card_id}: {exc}"
+            ) from exc
+
+        return trust

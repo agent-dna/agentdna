@@ -49,10 +49,12 @@ def get_dna(
         policy_file=skills_file,
     )
 
+
 def find_dna(
     agent_name: str,
 ) -> AgentDNA | None:
     return agentdna_registry.find(agent_name)
+
 
 def verify_inbound(
     dna: AgentDNA,
@@ -83,17 +85,13 @@ def verify_inbound(
     if not dna:
         return None
 
-    workflow_str = state.get(
-        "_agentdna_workflow"
-    )
+    workflow_str = state.get("_agentdna_workflow")
 
     if not workflow_str:
         return None
 
     try:
-        workflow = deserialize_workflow(
-            workflow_str
-        )
+        workflow = deserialize_workflow(workflow_str)
 
         return dna.handle(
             workflow=workflow,

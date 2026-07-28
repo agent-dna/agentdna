@@ -10,6 +10,7 @@ the same Actor ID and Agent Card. This allows every component of the system to
 independently recover an agent's identity while participating in the same
 verified workflow.
 """
+
 from __future__ import annotations
 
 import os
@@ -22,9 +23,11 @@ import structlog
 
 logger = structlog.get_logger(__name__)
 
+
 def is_agentdna_enabled() -> bool:
     """True iff an API key is configured in the environment."""
     return bool(os.environ.get("AGENTDNA_API_KEY"))
+
 
 class AgentDNARegistry:
     """Process-wide singleton store for AgentDNA identities."""
@@ -99,7 +102,7 @@ class AgentDNARegistry:
         # Lazy import so callers don't pay AgentDNA's dependency cost when
         # the integration is disabled.
         from agentdna.core import AgentDNA
-        
+
         if not policy_file:
             raise Exception("policy file path must be provided")
 
@@ -108,7 +111,7 @@ class AgentDNARegistry:
             name=agent_name,
             type="agent",
             api_key=os.environ.get("AGENTDNA_API_KEY", ""),
-            agent_policy_file=Path(policy_file)
+            agent_policy_file=Path(policy_file),
         )
 
         logger.info(
