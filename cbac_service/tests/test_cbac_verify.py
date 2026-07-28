@@ -104,7 +104,7 @@ def test_intent_score_is_one_minus_contradiction(tmp_path, monkeypatch):
         cbac, "_nli_scores", lambda premise, hypothesis: {"contradiction": 0.3, "entailment": 0.1}
     )
     drift, intent_score = asyncio.run(cbac._CBAC__check1_drift("user intent", "agent action"))
-    assert drift is None  # 0.3 < _CONTRADICTION_THRESHOLD, no deny
+    assert drift is None  # 0.3 < contradiction_threshold, no deny
     assert intent_score == pytest.approx(0.7)
 
 

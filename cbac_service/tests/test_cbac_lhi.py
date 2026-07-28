@@ -5,8 +5,12 @@ import pytest
 
 pytest.importorskip("sentence_transformers")
 
-from cbac_service.cbac import _LHI_LAMBDA_DOWN, _LHI_LAMBDA_UP, _LHI_WEIGHTS, CBAC
+from cbac_service.cbac import _CFG, CBAC
 from agentdna.id import get_id
+
+_LHI_WEIGHTS = _CFG["lhi_weights"]
+_LHI_LAMBDA_UP = _CFG["lhi_lambda_up"]
+_LHI_LAMBDA_DOWN = _CFG["lhi_lambda_down"]
 
 SCORES = {
     "intent_score": 0.9,

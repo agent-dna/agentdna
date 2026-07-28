@@ -1,7 +1,3 @@
-from fastapi import Request
-from fastapi import FastAPI
-import uvicorn
-from fastapi.responses import PlainTextResponse
 import asyncio
 import base64
 import hashlib
@@ -24,33 +20,11 @@ from agentdna.types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
 
 from sentence_transformers import SentenceTransformer
 
-_DEFAULT_ENCODER = "BAAI/bge-small-en-v1.5"  # bi-encoder for Tier 1 cosine
-_DEFAULT_NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
-
-# Gap thresholds: allow when gap > +0.12, deny when gap < -0.08, else escalate.
-# These are model-agnostic (relative difference, not absolute scores).
-_ALLOW_GAP_DEFAULT: float = 0.12
-_DENY_GAP_DEFAULT: float = 0.08
-
-# NLI thresholds for Check 1 drift and Tier 2 entailment.
-_ENTAILMENT_THRESHOLD: float = 0.55
-_CONTRADICTION_THRESHOLD: float = 0.60
-
-# HHEM cross-encoder for hallucination scoring (1 = grounded, 0 = hallucinated).
-_DEFAULT_HHEM_MODEL = "vectara/hallucination_evaluation_model"
-
-# LHI: weighted geometric mean of (intent, policy, hallucination, output) scores,
-# then an asymmetric EMA against the stored trust — slow to build, fast to lose.
-_LHI_WEIGHTS: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
-_LHI_LAMBDA_UP: float = 0.95
-_LHI_LAMBDA_DOWN: float = 0.70
-
-_TRUST_STORE_FILE = "trust_scores.json"
-
-# Structure-aware chunking: paragraphs / list items are the primary unit,
-# split further only past this word-count budget (~1.3 tokens/word for English).
-_CHUNK_MAX_WORDS: int = 120
-_NLI_BATCH_SIZE: int = 64
+# Pipeline tunables. See config.yaml for what each key means; a missing key
+# raises on access rather than silently running on a wrong threshold.
+#TODO:- Change
+_CONFIG_PATH = Path(os.environ.get("CBAC_CONFIG") or Path(__file__).with_name("config.yaml"))
+_CFG: Dict[str, Any] = yaml.safe_load(_CONFIG_PATH.read_text())
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -206,15 +180,15 @@ class CBAC:
         self,
         provenance: Provenance,
         cbac_url: str = "https://cbac-admin.agentdna.io",
-        encoder_name: str = _DEFAULT_ENCODER,
-        nli_model_name: str = _DEFAULT_NLI_MODEL,
+        encoder_name: str = _CFG["encoder_model"],
+        nli_model_name: str = _CFG["nli_model"],
         llm_backend: Optional[Callable] = None,
-        allow_gap: float = _ALLOW_GAP_DEFAULT,
-        deny_gap: float = _DENY_GAP_DEFAULT,
-        hhem_model_name: str = _DEFAULT_HHEM_MODEL,
-        lhi_weights: Tuple[float, float, float, float] = _LHI_WEIGHTS,
-        lhi_lambda_up: float = _LHI_LAMBDA_UP,
-        lhi_lambda_down: float = _LHI_LAMBDA_DOWN,
+        allow_gap: float = _CFG["allow_gap"],
+        deny_gap: float = _CFG["deny_gap"],
+        hhem_model_name: str = _CFG["hhem_model"],
+        lhi_weights: Tuple[float, float, float, float] = tuple(_CFG["lhi_weights"]),
+        lhi_lambda_up: float = _CFG["lhi_lambda_up"],
+        lhi_lambda_down: float = _CFG["lhi_lambda_down"],
     ):
         self.provenance = provenance
         self.cbac_url = cbac_url
@@ -310,7 +284,7 @@ class CBAC:
         raw = nli.predict(
             pairs,
             apply_softmax=False,
-            batch_size=_NLI_BATCH_SIZE,
+            batch_size=_CFG["nli_batch_size"],
             show_progress_bar=False,
         )
         probs = sp_softmax(raw, axis=1)
@@ -368,7 +342,7 @@ class CBAC:
             out.append(" ".join(current))
         return out
 
-    def _chunk_body_text(self, text: str, max_words: int = _CHUNK_MAX_WORDS) -> List[str]:
+    def _chunk_body_text(self, text: str, max_words: int = _CFG["chunk_max_words"]) -> List[str]:
         """Structure-aware, budget-capped chunking for free-form policy text.
 
         Paragraphs (blank-line separated) and list items are the primary
@@ -578,7 +552,7 @@ class CBAC:
         scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
         contradiction = scores.get("contradiction", 0.0)
         intent_score = 1.0 - contradiction
-        if contradiction >= _CONTRADICTION_THRESHOLD:
+        if contradiction >= _CFG["contradiction_threshold"]:
             return (
                 (
                     "deny",
@@ -657,9 +631,9 @@ class CBAC:
         entailment = t2_scores.get("entailment", 0.0)
         contradiction = t2_scores.get("contradiction", 0.0)
 
-        if entailment >= _ENTAILMENT_THRESHOLD:
+        if entailment >= _CFG["entailment_threshold"]:
             return ("allow", f"Tier 2 NLI entailment={entailment:.2f} vs {top_chunk!r}", entailment)
-        if contradiction >= _CONTRADICTION_THRESHOLD:
+        if contradiction >= _CFG["contradiction_threshold"]:
             return (
                 "deny",
                 f"Tier 2 NLI contradiction={contradiction:.2f} vs {top_chunk!r}",
@@ -879,7 +853,7 @@ class CBAC:
     # TODO:- Replace trust file by light db.
     @property
     def __trust_store_path(self) -> Path:
-        return Path(self.provenance.config_dir) / _TRUST_STORE_FILE
+        return Path(self.provenance.config_dir) / _CFG["trust_store_file"]
 
     def __load_trust_store(self) -> Dict[str, Any]:
         try:
@@ -989,47 +963,3 @@ class CBAC:
             ) from exc
 
         return trust
-
-
-# ── HTTP boundary ──────────────────────────────────────────────────────────────
-
-_cbac: CBAC | None = None
-
-
-def _get_cbac() -> CBAC:
-    global _cbac
-    if _cbac is None:
-        provenance = Provenance(
-            name="cbac-service",
-            api_key=os.environ.get("AGENTDNA_API_KEY", ""),
-        )
-        _cbac = CBAC(provenance=provenance)
-    return _cbac
-
-
-app = FastAPI()
-
-
-@app.post("/authorize-cbac")
-async def authorize_cbac(request: Request) -> PlainTextResponse:
-    body = await request.json()
-
-    try:
-        result = await _get_cbac().verify_agent_app_interaction(
-            agent_id=body.get("agent_id", ""),
-            intended_action=body.get("intended_action"),
-            user_intent=body.get("user_intent"),
-        )
-        decision, reason = result.decision, result.reason
-    except Exception as exc:
-        decision, reason = "error", str(exc)
-
-    return PlainTextResponse(reason, headers={"X-CBAC-Decision": decision})
-
-
-if __name__ == "__main__":
-    uvicorn.run(
-        app,
-        host=os.environ.get("CBAC_SERVICE_HOST", "127.0.0.1"),
-        port=int(os.environ.get("CBAC_SERVICE_PORT", "8767")),
-    )
