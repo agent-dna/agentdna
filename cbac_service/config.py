@@ -1,29 +1,30 @@
+from typing import Tuple
+
 # Tunables for the CBAC decision pipeline (cbac_service/cbac.py).
-# Point CBAC_CONFIG at another file to override in a deployment.
 
 # Models
-encoder_model: BAAI/bge-small-en-v1.5              # bi-encoder for Tier 1 cosine
-nli_model: cross-encoder/nli-deberta-v3-small      # NLI for classify + Tier 2
-hhem_model: vectara/hallucination_evaluation_model # hallucination scoring (1 = grounded, 0 = hallucinated)
+ENCODER_MODEL = "BAAI/bge-small-en-v1.5"  # bi-encoder for Tier 1 cosine
+NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
+HHEM_MODEL = "vectara/hallucination_evaluation_model"  # hallucination scoring (1 = grounded)
 
 # Tier 1 gap thresholds: allow when gap > +allow_gap, deny when gap < -deny_gap,
 # else escalate. Model-agnostic (relative difference, not absolute scores).
-allow_gap: 0.12
-deny_gap: 0.08
+ALLOW_GAP = 0.12
+DENY_GAP = 0.08
 
 # NLI thresholds for Check 1 drift and Tier 2 entailment.
-entailment_threshold: 0.55
-contradiction_threshold: 0.60
+ENTAILMENT_THRESHOLD = 0.55
+CONTRADICTION_THRESHOLD = 0.60
 
 # LHI: weighted geometric mean of (intent, policy, hallucination, output) scores,
 # then an asymmetric EMA against the stored trust — slow to build, fast to lose.
-lhi_weights: [0.3, 0.3, 0.2, 0.2]
-lhi_lambda_up: 0.95
-lhi_lambda_down: 0.70
+LHI_WEIGHTS: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
+LHI_LAMBDA_UP = 0.95
+LHI_LAMBDA_DOWN = 0.70
 
-trust_store_file: trust_scores.json
+TRUST_STORE_FILE = "trust_scores.json"
 
 # Structure-aware chunking: paragraphs / list items are the primary unit,
 # split further only past this word-count budget (~1.3 tokens/word for English).
-chunk_max_words: 120
-nli_batch_size: 64
+CHUNK_MAX_WORDS = 120
+NLI_BATCH_SIZE = 64

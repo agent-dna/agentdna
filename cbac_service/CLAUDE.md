@@ -12,8 +12,10 @@ app that the library's guard calls over HTTP. All the ML deps live here;
 - `main.py` — the HTTP boundary: `app = FastAPI()`, the lazy `CBAC` singleton,
   and the `__main__` uvicorn runner (`CBAC_SERVICE_HOST` / `CBAC_SERVICE_PORT`).
 - `cbac.py` — the decision engine (class `CBAC`), no HTTP.
-- `config.yaml` — pipeline tunables, loaded at import as `_CFG`. Override the
-  path with `CBAC_CONFIG`.
+- `config.py` — pipeline tunables as module-level constants (`ALLOW_GAP`,
+  `ENCODER_MODEL`, `LHI_WEIGHTS`, …). Change a value here and redeploy.
+- `chunking.py` — structure-aware policy-text chunking (`chunk_body_text`).
+- `skills.py` — `skill.md` parsing + the CBAC result dataclasses.
 - **Not published as a wheel** (`[tool.uv] package = false`). Deployed from a
   checkout: `uvicorn cbac_service.main:app`.
 - One endpoint: **`POST /authorize-cbac`**. Returns the reason as the body and
@@ -48,8 +50,8 @@ allowed/forbidden, and runs three tiers:
    → allow, `contradiction_threshold` → deny).
 3. **Tier 3** — optional LLM backend; absent → `"advise"`.
 
-Every threshold and model name above is a key in `config.yaml` — read the values
-from there, not from this file.
+Every threshold and model name above is a constant in `config.py` — read the
+values from there, not from this file.
 
 Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
 (any error → `deny`). Policy embeddings are cached as pickles under

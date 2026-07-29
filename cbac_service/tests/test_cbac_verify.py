@@ -103,7 +103,7 @@ def test_intent_score_is_one_minus_contradiction(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cbac, "_nli_scores", lambda premise, hypothesis: {"contradiction": 0.3, "entailment": 0.1}
     )
-    drift, intent_score = asyncio.run(cbac._CBAC__check1_drift("user intent", "agent action"))
+    drift, intent_score = asyncio.run(cbac._check1_drift("user intent", "agent action"))
     assert drift is None  # 0.3 < contradiction_threshold, no deny
     assert intent_score == pytest.approx(0.7)
 
@@ -115,7 +115,7 @@ def test_policy_score_normalized_on_tier1_decision(tmp_path, monkeypatch):
     forbidden_vecs = np.array([[0.0, 1.0]])  # cosine 0.0
 
     decision, _reason, policy_score = asyncio.run(
-        cbac._CBAC__tiered_decision(
+        cbac._tiered_decision(
             "intent text",
             intent_vec,
             ["allowed chunk"],
