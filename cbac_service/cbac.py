@@ -39,6 +39,7 @@ from cbac_service.skills import (
     parse_skill_md,
 )
 
+#TODO:- Fix return types in CBAC class
 
 def _policy_hash(policy: str) -> str:
     """Content hash keying the embedding cache. The precompute side (writes it)
@@ -659,14 +660,18 @@ class CBAC:
         hallucination_score: float,
         output_score: float,
     ) -> float:
-        """Update and return the LHI trust score for one (agent → callee) edge.
+        """Update and return the LHI (Local Heuristic Intelligence) trust
+        score for one (agent → callee) edge.
 
         Called *after* the interaction executed, once all four per-interaction
         scores (each in [0, 1], higher is better) are known:
 
-        1. Instantaneous quality ``s`` = weighted geometric mean of the four
-           scores — non-compensatory, so a single near-zero component drags
-           ``s`` toward zero regardless of the others.
+        1. Instantaneous quality ``s`` = weighted **arithmetic** mean of the
+           four scores — the expected quality of the interaction. Deliberately
+           compensatory: hard constraints are already enforced by the
+           allow/deny gates *before* execution, and this update only ever sees
+           interactions that passed them, so the reputation's job is unbiased
+           longitudinal estimation, not constraint enforcement.
         2. Asymmetric EMA against the stored trust for this edge:
            ``T = λ·T_prev + (1−λ)·s`` with λ = ``lhi_lambda_up`` when improving
            (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
@@ -689,10 +694,9 @@ class CBAC:
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{key}_score must be in [0, 1], got {value}")
 
-        # TODO: should this be a geometric mean?
-        s = 1.0
-        for value, weight in zip(scores.values(), self._lhi_weights, strict=False):
-            s *= value**weight
+        s = sum(
+            value * weight for value, weight in zip(scores.values(), self._lhi_weights, strict=True)
+        )
 
         store = self._load_trust_store()
         agent_entry = store.setdefault(agent_id, {"callees": {}})

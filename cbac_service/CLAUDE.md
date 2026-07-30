@@ -62,10 +62,13 @@ Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
 - **Hallucination score (HHEM):** when a decision is reached with a user intent
   present, `CBAC.hallucination_score` (vectara HHEM model, 1 = grounded,
   0 = hallucinated) is attached to the result.
-- **LHI trust:** `compute_lhi` combines four component scores
-  (intent, policy, hallucination, output) as a weighted geometric mean
-  (`lhi_weights`), then folds it into a stored trust value via an **asymmetric
-  EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**. Any
-  zero component zeroes the instantaneous score. Trust is tracked **per
+- **LHI trust (Local Heuristic Intelligence):** `compute_lhi` combines four
+  component scores (intent, policy, hallucination, output) as a **weighted
+  arithmetic mean** (`lhi_weights`) — expected interaction quality, deliberately
+  compensatory because the allow/deny gates already enforce the hard constraints
+  pre-execution — then folds it into a stored trust value via an **asymmetric
+  EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**.
+  (Not a geometric mean: the binary output score would zero the whole
+  interaction on any transient tool failure.) Trust is tracked **per
   caller→callee edge** and persisted in `trust_store_file` under the config dir. The LHI math is covered by `tests/test_cbac_lhi.py`; score
   attachment by `tests/test_cbac_verify.py` — keep both green when touching it.
