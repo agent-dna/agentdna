@@ -351,8 +351,10 @@ class CBAC:
             return (
                 (
                     "deny",
-                    f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
-                    f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
+                    (
+                        f"Check 1 drift: user intent {user_intent!r} contradicts agent action "
+                        f"{agent_action!r} (NLI contradiction={contradiction:.2f})"
+                    ),
                 ),
                 intent_score,
             )
@@ -400,15 +402,19 @@ class CBAC:
         if gap > self._allow_gap:
             return (
                 "allow",
-                f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
-                f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})",
+                (
+                    f"Tier 1 cosine gap {gap:+.3f} > +{self._allow_gap} "
+                    f"(allowed={allowed_score:.3f}, forbidden={forbidden_score:.3f})"
+                ),
                 gap_score,
             )
         if gap < -self._deny_gap:
             return (
                 "deny",
-                f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
-                f"(intent closer to forbidden than allowed policy)",
+                (
+                    f"Tier 1 cosine gap {gap:+.3f} < -{self._deny_gap} "
+                    f"(intent closer to forbidden than allowed policy)"
+                ),
                 gap_score,
             )
 
@@ -435,9 +441,11 @@ class CBAC:
         if self._llm_backend is None:
             return (
                 "advise",
-                f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
-                f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
-                "no LLM backend configured — caller must decide",
+                (
+                    f"Tier 1/2 inconclusive (gap={gap:+.3f}, "
+                    f"entailment={entailment:.2f}, contradiction={contradiction:.2f}); "
+                    "no LLM backend configured — caller must decide"
+                ),
                 None,
             )
 

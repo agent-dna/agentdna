@@ -44,7 +44,8 @@ Repository = "https://github.com/agent-dna/agentdna"
 dev = [
     "pyright>=1.1.411",
     "pytest>=8.0.0",
-    "ruff>=0.15.20",
+    "ruff==0.16.0",  # pinned exact: CI has no committed uv.lock, so an unbounded
+                     # spec drifts to newer ruff and its new rules break CI.
     # pyright checks agentdna/cbac/mcp.py, so the dev env needs the extra's imports.
     "agent-dna[mcp]",
 ]
