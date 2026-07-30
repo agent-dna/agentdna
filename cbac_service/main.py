@@ -41,7 +41,7 @@ async def authorize_cbac(request: Request) -> PlainTextResponse:
 
     headers = {}
     try:
-        result = await _get_cbac().verify_agent_app_interaction(
+        result = await _get_cbac().verify_cbac(
             agent_id=body.get("agent_id", ""),
             intended_action=body.get("intended_action"),
             user_intent=body.get("user_intent"),

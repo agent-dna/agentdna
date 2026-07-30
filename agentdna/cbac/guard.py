@@ -95,12 +95,10 @@ def cbac_context(
 # ── Layer configuration ───────────────────────────────────────────────────────
 
 
-# TODO:- Check if we can remove advise_action?
 @dataclass
 class GuardConfig:
     cbac_url: str = "https://cbac-admin.agentdna.io"
     cbac_timeout: float = 100.0
-    advise_action: str = "deny"
 
 
 _config = GuardConfig()
@@ -109,17 +107,12 @@ _config = GuardConfig()
 def configure(
     cbac_url: Optional[str] = None,
     cbac_timeout: Optional[float] = None,
-    advise_action: Optional[str] = None,
 ) -> None:
     """Set layer-wide guard configuration. Call once at startup."""
     if cbac_url is not None:
         _config.cbac_url = cbac_url
     if cbac_timeout is not None:
         _config.cbac_timeout = cbac_timeout
-    if advise_action is not None:
-        if advise_action not in ("deny", "allow"):
-            raise ValueError(f"unsupported advise_action: {advise_action!r}")
-        _config.advise_action = advise_action
 
 
 def get_config() -> GuardConfig:
@@ -166,7 +159,7 @@ def _authorize_sync(
     """POST to the CBAC decision service.
 
     The reference implementation (the cbac_service package) runs
-    ``verify_agent_app_interaction`` behind this endpoint and returns a
+    ``verify_cbac`` behind this endpoint and returns a
     decision only -- it never executes the action. The payload is
     exactly that method's inputs.
 
@@ -214,8 +207,6 @@ async def _authorize(
         ctx.user_intent or None,
         cfg,
     )
-    if decision == "advise":
-        decision = cfg.advise_action
     return decision, detail, scores
 
 

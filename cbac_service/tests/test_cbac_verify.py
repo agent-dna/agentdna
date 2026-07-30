@@ -51,7 +51,7 @@ def make_verify_cbac(tmp_path, monkeypatch, policy_text="Agents may read pull re
 def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -71,7 +71,7 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
 def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None
         )
     )
@@ -88,7 +88,7 @@ def test_hallucination_scoring_failure_does_not_change_decision(tmp_path, monkey
 
     monkeypatch.setattr(cbac, "hallucination_score", boom)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -137,7 +137,7 @@ def test_hallucination_score_not_computed_on_early_hard_fail(tmp_path, monkeypat
         lambda *a, **k: pytest.fail("hallucination_score must not run on an early hard-fail"),
     )
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID, intended_action="", user_intent="Please show me the pull requests"
         )
     )

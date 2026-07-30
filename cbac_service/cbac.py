@@ -43,6 +43,13 @@ import numpy as np
 from sentence_transformers import SentenceTransformer
 
 
+def _policy_hash(policy: str) -> str:
+    """Content hash keying the embedding cache. The precompute side (writes it)
+    and the read side (compares it) must derive it identically, or cache
+    invalidation breaks — so both go through here."""
+    return hashlib.sha256(policy.encode()).hexdigest()
+
+
 def _flatten_mapping(mapping: Dict[str, Any]) -> List[str]:
     """Flatten a key→value mapping to "key: value" chunks — one per list item
     for list-valued keys, one per scalar otherwise. ``None`` values are skipped."""
@@ -318,7 +325,7 @@ class CBAC:
             "allowed_vecs": allowed_vecs,
             "forbidden_vecs": forbidden_vecs,
             "policy_text": policy_text,
-            "policy_hash": hashlib.sha256(policy.encode()).hexdigest(),
+            "policy_hash": _policy_hash(policy),
             "cached_at": datetime.now(timezone.utc).isoformat(),
             "encoder": self._encoder_name,
             "nli_model": self._nli_model_name,
@@ -381,7 +388,7 @@ class CBAC:
         numeric signal, so ``policy_score`` is ``None`` there — the caller
         must supply their own if they want to feed :meth:`compute_lhi`.
 
-        Pure decision logic, extracted from :meth:`verify_agent_app_interaction` so
+        Pure decision logic, extracted from :meth:`verify_cbac` so
         the caller can attach a hallucination score to the result exactly once,
         after a decision is reached, without duplicating it at every tier's exit.
         """
@@ -449,66 +456,50 @@ class CBAC:
             return ("allow", f"Tier 3 LLM: {llm_decision}", None)
         return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}", None)
 
-    async def verify_agent_app_interaction(
+    async def verify_cbac(
         self,
         agent_id: str,
         intended_action: Any,
         user_intent: Optional[str] = None,
     ) -> CBACResult:
         """
-        Three-tier semantic intent verification against the agent's policy.
+        Semantic intent verification against the agent's on-chain policy.
 
-        The policy is fetched from the Provenance Layer and flattened to
-        text chunks via a unified path — YAML key:value pairs plus markdown
-        body lines — so any skill.md schema works without hardcoded key names.
+        Fetches the policy, flattens it into allowed/forbidden chunks (cached
+        per policy hash), then runs the tiered decision — Tier 1 cosine gap →
+        Tier 2 NLI entailment → Tier 3 optional LLM — in
+        :meth:`_tiered_decision`; see that method for the per-tier thresholds
+        and the ``policy_score`` normalization.
 
-        Pipeline
-        --------
-        Check 1 (NLI drift)
-            If ``intended_action`` carries both a user-side field
-            (``user_intent`` / ``user_request``) and an agent-side field
-            (``action`` / ``description``), we run NLI to verify the agent
-            hasn't drifted from the user's original request.  A contradiction
-            score ≥ 0.60 → deny immediately.
-
-        Tier 1 (cosine gap)
-            All policy chunks are NLI-classified into allowed / forbidden
-            buckets at query time.  Both buckets are encoded with the
-            bi-encoder.  ``gap = max_allowed_cosine - max_forbidden_cosine``.
-            gap > +allow_gap → allow;  gap < -deny_gap → deny;  else → Tier 2.
-
-        Tier 2 (NLI entailment)
-            The intent is compared against the top-scoring allowed chunk via
-            NLI cross-encoder.  Entailment ≥ 0.55 → allow;
-            contradiction ≥ 0.60 → deny;  else → Tier 3.
-
-        Tier 3 (LLM judgment)
-            Delegated to ``llm_backend`` if configured.  If ``llm_backend``
-            is ``None`` the result is ``"advise"`` — the caller decides.
+        A Check-1 NLI drift test runs first, but only when ``user_intent`` is
+        supplied: it compares ``user_intent`` against the flattened
+        ``intended_action`` text and denies immediately on a strong
+        contradiction (``CONTRADICTION_THRESHOLD``).
 
         Parameters
         ----------
         agent_id:
-            Used to fetch the agent's policy via :meth:`_get_policy`.
+            Whose policy to fetch (via :meth:`_get_latest_agent_policy`).
         intended_action:
-            The action the agent wants to perform.  Any shape is accepted:
-            a plain string, a dict with ``action``/``description``/``params``,
-            or an object — the same recursive flattener used by the lexical
-            path gathers the text.
+            The action the agent wants to perform. Any shape — string, dict,
+            or object — is flattened to text by :func:`_intended_action_text`.
+        user_intent:
+            The root user request. When given, enables the Check-1 drift test
+            and the hallucination score; when omitted, both are skipped.
 
         Returns
         -------
         CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
-        Fail-closed: any unrecoverable error (no policy, empty content,
-        model failure) resolves to ``deny``. When ``user_intent`` is supplied,
-        ``intent_score`` is set from the Check-1 NLI comparison (``1 -
-        contradiction``). When Tier 1 or 2 decide, ``policy_score`` is also
-        set (normalized cosine gap or NLI entailment respectively; ``None``
-        on a Tier 3 decision, which has no numeric signal). When Tier 1/2/3
-        reach a decision, ``hallucination_score`` is set (HHEM score of
-        ``intended_action`` grounded in ``user_intent``, 1 = grounded).
-        ``intent_score``/``policy_score``/``hallucination_score`` are all
-        informational only — none of them ever changes ``decision``.
+        Fail-closed: any unrecoverable error (no policy, empty content, model
+        failure) resolves to ``deny``. The score fields are informational only
+        — none of them ever changes ``decision``:
+
+        - ``intent_score`` — from Check-1 (``1 - contradiction``), set whenever
+          ``user_intent`` is supplied.
+        - ``policy_score`` — set when Tier 1 or 2 decides; ``None`` on Tier 3.
+        - ``hallucination_score`` — HHEM grounding of ``intended_action`` in
+          ``user_intent`` (1 = grounded), set once a decision is reached and
+          ``user_intent`` is present.
         """
         intent_text = _intended_action_text(intended_action)
         if not intent_text.strip():
@@ -534,7 +525,7 @@ class CBAC:
         if not current_policy:
             return CBACResult(decision="deny", reason=f"No policy available for agent {agent_id}")
 
-        current_hash = hashlib.sha256(current_policy.encode()).hexdigest()
+        current_hash = _policy_hash(current_policy)
 
         # Load local cache and validate against current policy hash.
         cached = await asyncio.to_thread(self._load_from_embeddings_dir, agent_id)

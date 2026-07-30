@@ -24,10 +24,10 @@ def install_cbac(monkeypatch, **attrs):
 
 
 def authorizing(result):
-    async def verify_agent_app_interaction(agent_id, intended_action, user_intent):
+    async def verify_cbac(agent_id, intended_action, user_intent):
         return result
 
-    return verify_agent_app_interaction
+    return verify_cbac
 
 
 AUTHORIZE_BODY = {
@@ -50,7 +50,7 @@ LHI_BODY = {
 def test_authorize_returns_score_headers(monkeypatch):
     install_cbac(
         monkeypatch,
-        verify_agent_app_interaction=authorizing(
+        verify_cbac=authorizing(
             CBACResult(
                 decision="allow",
                 reason="Tier 1 allow",
@@ -72,7 +72,7 @@ def test_authorize_returns_score_headers(monkeypatch):
 def test_authorize_omits_headers_for_missing_scores(monkeypatch):
     install_cbac(
         monkeypatch,
-        verify_agent_app_interaction=authorizing(
+        verify_cbac=authorizing(
             CBACResult(decision="advise", reason="Tier 3 inconclusive", intent_score=0.7)
         ),
     )
@@ -88,7 +88,7 @@ def test_authorize_failure_sends_no_score_headers(monkeypatch):
     async def boom(agent_id, intended_action, user_intent):
         raise RuntimeError("policy lookup failed")
 
-    install_cbac(monkeypatch, verify_agent_app_interaction=boom)
+    install_cbac(monkeypatch, verify_cbac=boom)
     response = asyncio.run(main.authorize_cbac(stub_request(AUTHORIZE_BODY)))
 
     assert response.headers["X-CBAC-Decision"] == "error"
