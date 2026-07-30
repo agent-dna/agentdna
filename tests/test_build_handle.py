@@ -1,9 +1,7 @@
 import pytest
 
-from agentdna.types import (
-    VERIFY_LIGHT, VERIFY_HEAVY, VerificationResult,
-    Issue
-)
+from agentdna.types import VERIFY_LIGHT, VERIFY_HEAVY, VerificationResult, Issue
+
 
 def test_simple_build_handle_ideal_flow(user, agent):
     workflow = user.build(
@@ -45,6 +43,7 @@ def test_two_step_build_handle_success(user, agent):
     assert result.verification.valid
     assert workflow.envelope.parent_envelope.payload == "MFA is mandatory"
 
+
 def test_two_step_build_handle_failure(user, agent):
     workflow = user.build(
         recipient_actor_id=agent.get_actor_id(),
@@ -69,8 +68,9 @@ def test_two_step_build_handle_failure(user, agent):
 
     result = user.handle(workflow)
 
-    assert result.verification.valid == False
+    assert not result.verification.valid
     assert workflow.envelope.parent_envelope.payload == "MFA is mandatory"
+
 
 def test_three_step_build_handle_success(user, agent, second_agent):
     workflow = user.build(
@@ -96,6 +96,7 @@ def test_three_step_build_handle_success(user, agent, second_agent):
 
     assert result.verification.valid
 
+
 def test_three_step_build_handle_failure(user, agent, second_agent):
     workflow = user.build(
         recipient_actor_id=agent.get_actor_id(),
@@ -120,7 +121,8 @@ def test_three_step_build_handle_failure(user, agent, second_agent):
 
     result = second_agent.handle(workflow)
 
-    assert result.verification.valid == False
+    assert not result.verification.valid
+
 
 def test_handle_without_envelope_raises(agent):
     from agentdna.types import IntentWorkflow, CURRENT_VERSION
@@ -176,7 +178,7 @@ def test_heavy_verification_mode(user, agent, second_agent):
     )
 
     result = agent.handle(workflow)
-    
+
     assert result.verification.valid
 
     workflow = agent.build(
@@ -184,7 +186,7 @@ def test_heavy_verification_mode(user, agent, second_agent):
         recipient_actor_name=second_agent.name,
         recipient_actor_type=second_agent.type,
         payload="2FA approach",
-        workflow=workflow
+        workflow=workflow,
     )
 
     # Tamper the payload of first envelope
@@ -192,7 +194,8 @@ def test_heavy_verification_mode(user, agent, second_agent):
 
     result = second_agent.handle(workflow)
 
-    assert result.verification.valid == False
+    assert not result.verification.valid
+
 
 def test_issues_tamper_in_envelope(user, agent):
     """
@@ -208,18 +211,16 @@ def test_issues_tamper_in_envelope(user, agent):
         verification_result=VerificationResult(
             valid=False,
             chain_depth=1,
-            issues=[Issue(
-                depth=1,
-                reason="CoCA error: signature verification failed"
-            )]
-        )
+            issues=[Issue(depth=1, reason="CoCA error: signature verification failed")],
+        ),
     )
 
     workflow.envelope.issues = None
-    
+
     result = agent.handle(workflow)
 
-    assert result.verification.valid == False
+    assert not result.verification.valid
+
 
 def test_epoch_tamper_in_envelope(user, agent):
     """
@@ -227,16 +228,16 @@ def test_epoch_tamper_in_envelope(user, agent):
     fails upon `issues` attribute of
     envelope getting tampered.
     """
-    
+
     workflow = user.build(
         recipient_actor_id=agent.get_actor_id(),
         recipient_actor_name=agent.name,
         recipient_actor_type=agent.type,
-        payload="MFA is mandatory"
+        payload="MFA is mandatory",
     )
 
     workflow.envelope.epoch = 2
-    
+
     result = agent.handle(workflow)
 
-    assert result.verification.valid == False
+    assert not result.verification.valid

@@ -16,6 +16,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.agent_names import coordinator_name, worker_name
 from app.agents.agentdna_helpers import get_dna, verify_inbound
+from app.agents.state import GithubAgentState
 from app.config import settings
 from app.llm import make_llm
 from app.utils import serialize_workflow
@@ -46,12 +47,10 @@ likely intent and state your reasoning.
 
 Output a concise plain-text instruction the Worker can act on directly.
 Do NOT call any tools yourself."""
-from app.agents.state import GithubAgentState
 
 
 async def coordinator_node(state: GithubAgentState) -> GithubAgentState:
     """LangGraph node — verifies inbound envelope, produces task_spec, signs forward."""
-    user_did = state.get("_agentdna_user_id")
     dna = get_dna(coordinator_name(), COORDINATOR_SKILLS_FILE)
     next_agent_dna = get_dna(worker_name())
 

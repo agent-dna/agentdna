@@ -4,6 +4,7 @@ from dataclasses import fields
 from agentdna.helpers import canonicalize_envelope, _envelope_to_dict
 from agentdna.types import Actor, Envelope, Issue
 
+
 def create_envelope():
     """
     Creates a minimal envelope for
@@ -173,6 +174,7 @@ def test_deep_copy_produces_same_digest():
 
     assert digest1 == digest2
 
+
 def test_grandparent_signature_changes_digest():
     """
     Ensures grandparent signatures are recursively
@@ -197,6 +199,7 @@ def test_grandparent_signature_changes_digest():
 
     assert digest1 != digest2
 
+
 def test_canonicalization_contains_all_envelope_fields():
     """
     Ensures every Envelope, Actor and Issue field
@@ -216,7 +219,8 @@ def test_canonicalization_contains_all_envelope_fields():
     expected_envelope_fields = {
         field.name
         for field in fields(Envelope)
-        if field.name not in {
+        if field.name
+        not in {
             "signature",
             "parent_envelope",
         }
@@ -224,20 +228,12 @@ def test_canonicalization_contains_all_envelope_fields():
 
     assert set(result.keys()) == expected_envelope_fields
 
-    assert set(result["from_"].keys()) == {
-        field.name
-        for field in fields(Actor)
-    }
+    assert set(result["from_"].keys()) == {field.name for field in fields(Actor)}
 
-    assert set(result["to"].keys()) == {
-        field.name
-        for field in fields(Actor)
-    }
+    assert set(result["to"].keys()) == {field.name for field in fields(Actor)}
 
-    assert set(result["issues"][0].keys()) == {
-        field.name
-        for field in fields(Issue)
-    }
+    assert set(result["issues"][0].keys()) == {field.name for field in fields(Issue)}
+
 
 def test_current_signature_not_serialized():
     """

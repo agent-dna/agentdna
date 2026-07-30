@@ -71,9 +71,7 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
 def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_cbac(
-            agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None
-        )
+        cbac.verify_cbac(agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None)
     )
     assert result.decision == "advise"
     assert result.hallucination_score is None

@@ -1,5 +1,6 @@
 import pytest
 
+
 def test_build_with_invalid_recipient_type_raises(user):
     """
     Ensures build() rejects unsupported
@@ -12,6 +13,7 @@ def test_build_with_invalid_recipient_type_raises(user):
             recipient_actor_type="invalid",
             payload="Hello",
         )
+
 
 def test_build_with_empty_payload(user, agent):
     """
