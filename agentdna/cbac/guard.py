@@ -36,18 +36,11 @@ import contextlib
 import contextvars
 import functools
 import inspect
-
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import (
     Any,
-    Awaitable,
-    Callable,
-    Dict,
-    Iterator,
-    Optional,
-    Tuple,
 )
-
 
 # ── Data model ────────────────────────────────────────────────────────────────
 
@@ -64,12 +57,12 @@ class GovernanceContext:
     user_intent: str = ""
 
 
-_governance_ctx: contextvars.ContextVar[Optional[GovernanceContext]] = contextvars.ContextVar(
+_governance_ctx: contextvars.ContextVar[GovernanceContext | None] = contextvars.ContextVar(
     "agentdna_governance_ctx", default=None
 )
 
 
-def get_context() -> Optional[GovernanceContext]:
+def get_context() -> GovernanceContext | None:
     """Return the ambient GovernanceContext, or None when governance is off."""
     return _governance_ctx.get()
 
@@ -105,8 +98,8 @@ _config = GuardConfig()
 
 
 def configure(
-    cbac_url: Optional[str] = None,
-    cbac_timeout: Optional[float] = None,
+    cbac_url: str | None = None,
+    cbac_timeout: float | None = None,
 ) -> None:
     """Set layer-wide guard configuration. Call once at startup."""
     if cbac_url is not None:
@@ -122,14 +115,14 @@ def get_config() -> GuardConfig:
 # ── Guard internals ───────────────────────────────────────────────────────────
 
 
-def _default_intent(action_name: str, kwargs: Dict[str, Any]) -> str:
+def _default_intent(action_name: str, kwargs: dict[str, Any]) -> str:
     """Build the CBAC intent text from the call's own arguments."""
     parts = [action_name]
     parts.extend(f"{k}={str(v)[:200]}" for k, v in kwargs.items())
     return " ".join(parts)
 
 
-def _bind_kwargs(sig: inspect.Signature, args: tuple, kwargs: dict) -> Dict[str, Any]:
+def _bind_kwargs(sig: inspect.Signature, args: tuple, kwargs: dict) -> dict[str, Any]:
     """Flatten positional + keyword call args into a name->value dict."""
     try:
         bound = sig.bind(*args, **kwargs)
@@ -153,9 +146,9 @@ _FAILED_STATUSES = frozenset({"error", "denied", "failed"})
 def _authorize_sync(
     agent_id: str,
     intended_action: Any,
-    user_intent: Optional[str],
+    user_intent: str | None,
     cfg: GuardConfig,
-) -> Tuple[str, str, Dict[str, Optional[float]]]:
+) -> tuple[str, str, dict[str, float | None]]:
     """POST to the CBAC decision service.
 
     The reference implementation (the cbac_service package) runs
@@ -184,7 +177,7 @@ def _authorize_sync(
 
     decision = response.headers.get("X-CBAC-Decision", "advise")
 
-    scores: Dict[str, Optional[float]] = {}
+    scores: dict[str, float | None] = {}
     for name, header in _SCORE_HEADERS.items():
         raw = response.headers.get(header)
         try:
@@ -199,7 +192,7 @@ async def _authorize(
     ctx: GovernanceContext,
     intent_text: str,
     cfg: GuardConfig,
-) -> Tuple[str, str, Dict[str, Optional[float]]]:
+) -> tuple[str, str, dict[str, float | None]]:
     decision, detail, scores = await asyncio.to_thread(
         _authorize_sync,
         ctx.agent_id,
@@ -225,7 +218,7 @@ def _report_lhi_sync(
     agent_id: str,
     callee_name: str,
     callee_type: str,
-    scores: Dict[str, Optional[float]],
+    scores: dict[str, float | None],
     output_score: float,
     cfg: GuardConfig,
 ) -> None:
@@ -251,7 +244,7 @@ async def _report_lhi(
     ctx: GovernanceContext,
     callee_name: str,
     callee_type: str,
-    scores: Dict[str, Optional[float]],
+    scores: dict[str, float | None],
     output_score: float,
     cfg: GuardConfig,
 ) -> None:
@@ -287,8 +280,8 @@ async def _report_lhi(
 
 def cbac_guard(
     *,
-    action: Optional[str] = None,
-    action_intent: Optional[Callable[[Dict[str, Any]], str]] = None,
+    action: str | None = None,
+    action_intent: Callable[[dict[str, Any]], str] | None = None,
     on_deny: str = "return",
     callee_type: str = "tool",
 ):
@@ -352,7 +345,7 @@ def cbac_guard(
             )
 
             cfg = get_config()
-            scores: Dict[str, Optional[float]] = {}
+            scores: dict[str, float | None] = {}
             try:
                 decision, detail, scores = await _authorize(ctx, intent_text, cfg)
             except Exception as exc:

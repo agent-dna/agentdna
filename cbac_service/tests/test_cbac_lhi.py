@@ -5,9 +5,9 @@ import pytest
 
 pytest.importorskip("sentence_transformers")
 
+from agentdna.id import get_id
 from cbac_service.cbac import CBAC
 from cbac_service.config import LHI_LAMBDA_DOWN, LHI_LAMBDA_UP, LHI_WEIGHTS
-from agentdna.id import get_id
 
 _LHI_WEIGHTS = LHI_WEIGHTS
 _LHI_LAMBDA_UP = LHI_LAMBDA_UP
@@ -24,7 +24,7 @@ SCORES = {
 def geometric_mean(intent_score, policy_score, hallucination_score, output_score):
     values = (intent_score, policy_score, hallucination_score, output_score)
     s = 1.0
-    for value, weight in zip(values, _LHI_WEIGHTS):
+    for value, weight in zip(values, _LHI_WEIGHTS, strict=False):
         s *= value**weight
     return s
 

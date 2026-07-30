@@ -1,4 +1,5 @@
 import hashlib
+
 from multiformats_cid.cid import CIDv0
 
 
@@ -20,6 +21,6 @@ def get_id(val: str):
     """
     Get a deterministic ID based on the provided value.
     """
-    digest = hashlib.sha256(f"{val}".encode("utf-8")).digest()
+    digest = hashlib.sha256(f"{val}".encode()).digest()
     multihash_bytes = bytes([0x12, len(digest)]) + digest
     return CIDv0(multihash_bytes).encode().decode("utf-8")

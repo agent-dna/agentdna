@@ -1,42 +1,42 @@
-import os
-import json
 import base64
-import requests
-
-from datetime import datetime, timezone
-from typing import Any, Optional
-from pathlib import Path
+import json
+import os
 from dataclasses import asdict
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
 from urllib.parse import urljoin
 
+import requests
+
+from .card import build_actor_card_payload, build_user_card_payload
+from .config import (
+    ActorRegistryEntry,
+    get_actor_registry_entry,
+    get_default_config_dir,
+    upsert_actor_registry_entry,
+)
+from .id import get_agent_card_id, get_user_card_id
+from .provenance import Provenance
 from .types import (
-    supported_actors,
     ACTOR_TYPE_AGENT,
     ACTOR_TYPE_HUMAN,
-    Actor,
-    Envelope,
-    IntentWorkflow,
-    HandleResult,
-    AgentCard,
-    VerificationResult,
-    VERIFY_LIGHT,
-    VERIFY_HEAVY,
-    supported_verification_modes,
     CURRENT_VERSION,
+    VERIFY_HEAVY,
+    VERIFY_LIGHT,
+    Actor,
+    AgentCard,
+    Envelope,
+    HandleResult,
+    IntentWorkflow,
+    VerificationResult,
+    supported_actors,
+    supported_verification_modes,
 )
-from .provenance import Provenance
 from .verifier import (
-    verify_light,
     verify_heavy,
+    verify_light,
 )
-from .config import (
-    get_default_config_dir,
-    get_actor_registry_entry,
-    upsert_actor_registry_entry,
-    ActorRegistryEntry,
-)
-from .id import get_user_card_id, get_agent_card_id
-from .card import build_user_card_payload, build_actor_card_payload
 
 
 class AgentDNA:
@@ -49,7 +49,7 @@ class AgentDNA:
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
         verification_mode: str = VERIFY_LIGHT,
-        agent_policy_file: Optional[Path] = None,
+        agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
     ):
         if name == "":
@@ -259,7 +259,7 @@ class AgentDNA:
                 card_info=json.dumps(payload),
             )
         except Exception as exc:
-            raise Exception(f"failed to create agent card, err: {exc}")
+            raise Exception(f"failed to create agent card, err: {exc}") from exc
 
         return agent_card_id
 
@@ -314,7 +314,7 @@ class AgentDNA:
                 card_info=json.dumps(payload),
             )
         except Exception as exc:
-            raise Exception(f"failed to create agent card, err: {exc}")
+            raise Exception(f"failed to create agent card, err: {exc}") from exc
 
         agent.card_id = agent_card_id
 
@@ -393,7 +393,7 @@ class AgentDNA:
 
             return workflow_card_id
         except Exception as exc:
-            raise RuntimeError(f"failed create workflow provenance, err: {exc}")
+            raise RuntimeError(f"failed create workflow provenance, err: {exc}") from exc
 
     def build(
         self,
@@ -401,10 +401,10 @@ class AgentDNA:
         recipient_actor_name: str,
         recipient_actor_type: str,
         payload: str,
-        verification_result: Optional[VerificationResult] = None,
+        verification_result: VerificationResult | None = None,
         workflow: IntentWorkflow | None = None,
         remarks: str = "",
-        from_actor: Optional[Actor] = None,
+        from_actor: Actor | None = None,
     ) -> IntentWorkflow:
         """
         Creates and signs a new envelope and

@@ -6,7 +6,6 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from agentdna.provenance import Provenance
-
 from cbac_service.cbac import CBAC
 
 # ── HTTP boundary ──────────────────────────────────────────────────────────────

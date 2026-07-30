@@ -1,15 +1,12 @@
 import re
 
-from typing import List
-
 from cbac_service.config import CHUNK_MAX_WORDS
-
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
 
-def split_list_items(block: str) -> List[str]:
+def split_list_items(block: str) -> list[str]:
     """Split a paragraph block into its list items, if any.
 
     A bulleted/numbered line starts a new item; any following line that
@@ -20,8 +17,8 @@ def split_list_items(block: str) -> List[str]:
     lines = block.splitlines()
     if not any(_BULLET_RE.match(ln) for ln in lines):
         return [" ".join(ln.strip() for ln in lines if ln.strip())]
-    items: List[str] = []
-    current: List[str] = []
+    items: list[str] = []
+    current: list[str] = []
     for line in lines:
         if _BULLET_RE.match(line):
             if current:
@@ -36,7 +33,7 @@ def split_list_items(block: str) -> List[str]:
     return items
 
 
-def split_by_word_budget(unit: str, max_words: int) -> List[str]:
+def split_by_word_budget(unit: str, max_words: int) -> list[str]:
     """Split ``unit`` only if it exceeds ``max_words``, preferring sentence
     boundaries so a chunk never straddles unrelated sentences unnecessarily."""
     words = unit.split()
@@ -45,8 +42,8 @@ def split_by_word_budget(unit: str, max_words: int) -> List[str]:
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(unit) if s.strip()]
     if len(sentences) <= 1:
         return [" ".join(words[i : i + max_words]) for i in range(0, len(words), max_words)]
-    out: List[str] = []
-    current: List[str] = []
+    out: list[str] = []
+    current: list[str] = []
     current_len = 0
     for sent in sentences:
         n = len(sent.split())
@@ -60,7 +57,7 @@ def split_by_word_budget(unit: str, max_words: int) -> List[str]:
     return out
 
 
-def chunk_body_text(text: str, max_words: int = CHUNK_MAX_WORDS) -> List[str]:
+def chunk_body_text(text: str, max_words: int = CHUNK_MAX_WORDS) -> list[str]:
     """Structure-aware, budget-capped chunking for free-form policy text.
 
     Paragraphs (blank-line separated) and list items are the primary
@@ -71,7 +68,7 @@ def chunk_body_text(text: str, max_words: int = CHUNK_MAX_WORDS) -> List[str]:
     comment-stripping behaviour.
     """
     filtered = "\n".join(ln for ln in text.splitlines() if not ln.strip().startswith("#"))
-    chunks: List[str] = []
+    chunks: list[str] = []
     for block in re.split(r"\n\s*\n", filtered):
         block = block.strip()
         if not block:

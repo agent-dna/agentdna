@@ -1,9 +1,8 @@
-import yaml
-
-from typing import Any, Dict, List, Optional
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from typing import Any
 
+import yaml
 
 REQUIRED_FRONTMATTER_KEYS = (
     "agent-did",
@@ -23,13 +22,13 @@ class SkillsCard:
     issued_by: str
     issued_at: datetime
     expires_at: datetime
-    allowed_actions: List[str]
-    forbidden_actions: List[str] = field(default_factory=list)
-    constraints: Dict[str, Any] = field(default_factory=dict)
-    can_delegate_to: List[str] = field(default_factory=list)
-    requires: Dict[str, Any] = field(default_factory=dict)
+    allowed_actions: list[str]
+    forbidden_actions: list[str] = field(default_factory=list)
+    constraints: dict[str, Any] = field(default_factory=dict)
+    can_delegate_to: list[str] = field(default_factory=list)
+    requires: dict[str, Any] = field(default_factory=dict)
     body: str = ""
-    raw_frontmatter: Dict[str, Any] = field(default_factory=dict)
+    raw_frontmatter: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -37,11 +36,11 @@ class CardCheck:
     """Result of CBAC check for one layer in the chain."""
 
     layer_did: str
-    card_id: Optional[str]
-    card: Optional[SkillsCard]
-    action: Optional[str]
+    card_id: str | None
+    card: SkillsCard | None
+    action: str | None
     passed: bool
-    reasons: List[str] = field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -50,10 +49,10 @@ class CBACResult:
 
     decision: str  # "allow" | "deny" | "advise"
     reason: str = ""
-    trace: List[CardCheck] = field(default_factory=list)
-    hallucination_score: Optional[float] = None
-    intent_score: Optional[float] = None
-    policy_score: Optional[float] = None
+    trace: list[CardCheck] = field(default_factory=list)
+    hallucination_score: float | None = None
+    intent_score: float | None = None
+    policy_score: float | None = None
 
 
 def parse_skill_md(text: str) -> SkillsCard:
@@ -122,7 +121,7 @@ def _collect_text(obj: Any, *, include_keys: bool = True, _depth: int = 0) -> st
     if isinstance(obj, (int, float, bool)):
         return str(obj)
     if isinstance(obj, dict):
-        parts: List[str] = []
+        parts: list[str] = []
         for k, v in obj.items():
             if include_keys:
                 parts.append(str(k))

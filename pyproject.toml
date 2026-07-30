@@ -58,6 +58,25 @@ testpaths = ["tests"]
 target-version = "py310"
 line-length = 100
 
+[tool.ruff.lint]
+# Curated, low-noise ruleset — the single source of truth for local + CI.
+#   E/F   pycodestyle errors + pyflakes (undefined names, unused imports)
+#   I     import sorting
+#   UP    pyupgrade (modern 3.10+ type hints: list[str], X | None)
+#   B     flake8-bugbear (real bug patterns)
+#   ISC   implicit string-concat bugs
+# Deliberately NOT enabled — they fight intentional design in cbac_service:
+#   BLE001         the CBAC pipeline is fail-closed (any error → deny), so
+#                  broad `except Exception` is correct, not a smell.
+#   TRY003/TRY004  descriptive error messages and parse_skill_md's documented
+#                  ValueError contract are intentional.
+select = ["E", "F", "I", "UP", "B", "ISC"]
+ignore = [
+    "ISC001",  # conflicts with the formatter
+    "E501",    # line length is enforced by `ruff format`; E501 only nags about
+               # strings/comments/URLs the formatter can't break
+]
+
 [tool.pyright]
 # Package is only partially typed; basic keeps the hook signal useful without noise.
 typeCheckingMode = "basic"

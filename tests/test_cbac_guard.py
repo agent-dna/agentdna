@@ -17,7 +17,7 @@ SCORE_HEADERS = {
 
 @pytest.fixture(autouse=True)
 def guard_url():
-    configure(cbac_url="http://cbac.test", cbac_timeout=1.0, advise_action="deny")
+    configure(cbac_url="http://cbac.test", cbac_timeout=1.0)
 
 
 @pytest.fixture

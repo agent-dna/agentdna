@@ -35,7 +35,7 @@ Typical wiring (one import surface)::
 
 from __future__ import annotations
 
-from typing import Callable, Optional
+from collections.abc import Callable
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mcp.types import CallToolRequestParams
@@ -67,7 +67,7 @@ class CBACMiddleware(Middleware):
     for that call -- the tool runs unguarded -- so keep it reliable.
     """
 
-    def __init__(self, agent_id_provider: Callable[[], Optional[str]]):
+    def __init__(self, agent_id_provider: Callable[[], str | None]):
         self._agent_id_provider = agent_id_provider
 
     async def on_call_tool(self, context: MiddlewareContext[CallToolRequestParams], call_next):

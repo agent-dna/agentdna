@@ -1,5 +1,3 @@
-from typing import Tuple
-
 # Tunables for the CBAC decision pipeline (cbac_service/cbac.py).
 
 # Models
@@ -18,7 +16,7 @@ CONTRADICTION_THRESHOLD = 0.60
 
 # LHI: weighted geometric mean of (intent, policy, hallucination, output) scores,
 # then an asymmetric EMA against the stored trust — slow to build, fast to lose.
-LHI_WEIGHTS: Tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
+LHI_WEIGHTS: tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
 LHI_LAMBDA_UP = 0.95
 LHI_LAMBDA_DOWN = 0.70
 

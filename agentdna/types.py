@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List
+from typing import Any
 
 ACTOR_TYPE_AGENT = "agent"
 ACTOR_TYPE_HUMAN = "human"
@@ -60,7 +60,7 @@ class Envelope:
     signature: str = ""
 
     # List of issues being observered via CoCA or CBAC layers
-    issues: List[Issue] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
 
     # Previous envelope in the provenance chain.
     parent_envelope: Envelope | None = None

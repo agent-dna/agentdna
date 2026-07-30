@@ -2,19 +2,22 @@ import asyncio
 import base64
 import hashlib
 import json
-import pickle
-import requests
 import os
-
-from typing import Optional, Callable, Dict, Any, List, Tuple
-from pathlib import Path
+import pickle
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import requests
+from sentence_transformers import SentenceTransformer
 
 from agentdna.id import get_id
 from agentdna.provenance import Provenance
-from agentdna.types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
-
+from agentdna.types import MODEL_EMBEDDINGS_DIR, AgentCard, IntentWorkflow
+from cbac_service.chunking import chunk_body_text
 from cbac_service.config import (
     ALLOW_GAP,
     CONTRADICTION_THRESHOLD,
@@ -29,18 +32,12 @@ from cbac_service.config import (
     NLI_MODEL,
     TRUST_STORE_FILE,
 )
-from cbac_service.chunking import chunk_body_text
 from cbac_service.skills import (
     CBACResult,
     SkillsCard,
-    parse_skill_md,
     _intended_action_text,
+    parse_skill_md,
 )
-
-
-import numpy as np
-
-from sentence_transformers import SentenceTransformer
 
 
 def _policy_hash(policy: str) -> str:
@@ -50,10 +47,10 @@ def _policy_hash(policy: str) -> str:
     return hashlib.sha256(policy.encode()).hexdigest()
 
 
-def _flatten_mapping(mapping: Dict[str, Any]) -> List[str]:
+def _flatten_mapping(mapping: dict[str, Any]) -> list[str]:
     """Flatten a key→value mapping to "key: value" chunks — one per list item
     for list-valued keys, one per scalar otherwise. ``None`` values are skipped."""
-    chunks: List[str] = []
+    chunks: list[str] = []
     for key, value in mapping.items():
         if isinstance(value, list):
             chunks.extend(f"{key}: {item}" for item in value)
@@ -69,11 +66,11 @@ class CBAC:
         cbac_url: str = "https://cbac-admin.agentdna.io",
         encoder_name: str = ENCODER_MODEL,
         nli_model_name: str = NLI_MODEL,
-        llm_backend: Optional[Callable] = None,
+        llm_backend: Callable | None = None,
         allow_gap: float = ALLOW_GAP,
         deny_gap: float = DENY_GAP,
         hhem_model_name: str = HHEM_MODEL,
-        lhi_weights: Tuple[float, float, float, float] = LHI_WEIGHTS,
+        lhi_weights: tuple[float, float, float, float] = LHI_WEIGHTS,
         lhi_lambda_up: float = LHI_LAMBDA_UP,
         lhi_lambda_down: float = LHI_LAMBDA_DOWN,
     ):
@@ -92,7 +89,7 @@ class CBAC:
         self._encoder = None
         self._nli = None
         self._hhem = None
-        self._nli_labels: Dict[int, str] = {}
+        self._nli_labels: dict[int, str] = {}
 
         # Make embeddings config dir
         self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
@@ -142,7 +139,7 @@ class CBAC:
         model = self._get_hhem()
         return float(model.predict([(source_text, generated_text)])[0])
 
-    def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
+    def _nli_scores(self, premise: str, hypothesis: str) -> dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
 
         Returns a dict like {'entailment': 0.82, 'contradiction': 0.05, 'neutral': 0.13}.
@@ -151,7 +148,7 @@ class CBAC:
         """
         return self._nli_scores_batch([(premise, hypothesis)])[0]
 
-    def _nli_scores_batch(self, pairs: List[Tuple[str, str]]) -> List[Dict[str, float]]:
+    def _nli_scores_batch(self, pairs: list[tuple[str, str]]) -> list[dict[str, float]]:
         """Batched NLI over many (premise, hypothesis) pairs in one predict() call.
 
         Same per-pair result shape as calling :meth:`_nli_scores` in a loop,
@@ -176,7 +173,7 @@ class CBAC:
             for row in probs
         ]
 
-    def _flatten_policy_chunks(self, policy: Any) -> List[str]:
+    def _flatten_policy_chunks(self, policy: Any) -> list[str]:
         """Flatten a policy of any shape into a list of text chunks.
 
         Each YAML frontmatter (or dict) entry becomes "key: value" (one chunk
@@ -199,7 +196,7 @@ class CBAC:
             return _flatten_mapping(policy)
         return []
 
-    def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
+    def _classify_chunks(self, chunks: list[str]) -> tuple[list[str], list[str]]:
         """NLI-classify each chunk as allowed or forbidden.
 
         For every chunk we run two NLI queries:
@@ -212,14 +209,14 @@ class CBAC:
         """
         if not chunks:
             return [], []
-        pairs: List[Tuple[str, str]] = []
+        pairs: list[tuple[str, str]] = []
         for chunk in chunks:
             pairs.append((chunk, "This capability is permitted and allowed"))
             pairs.append((chunk, "This capability is prohibited and forbidden"))
         scores = self._nli_scores_batch(pairs)
 
-        allowed: List[str] = []
-        forbidden: List[str] = []
+        allowed: list[str] = []
+        forbidden: list[str] = []
         for i, chunk in enumerate(chunks):
             allow_e = scores[2 * i].get("entailment", 0.0)
             forbid_e = scores[2 * i + 1].get("entailment", 0.0)
@@ -252,12 +249,12 @@ class CBAC:
         digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
         return Path(self.embeddings_dir) / f"{digest}.pkl"
 
-    def _save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
+    def _save_to_embeddings_dir(self, agent_id: str, data: dict[str, Any]):
         path = self._get_embedding_file_path(agent_id)
         with path.open("wb") as f:
             pickle.dump(data, f)
 
-    def _load_from_embeddings_dir(self, agent_id: str) -> Optional[Dict[str, Any]]:
+    def _load_from_embeddings_dir(self, agent_id: str) -> dict[str, Any] | None:
         path = self._get_embedding_file_path(agent_id)
         if not path.exists():
             return None
@@ -267,7 +264,7 @@ class CBAC:
         except Exception:
             return None
 
-    def check_policy_embedding_exists(self, agent_id: str) -> Dict[str, Any] | None:
+    def check_policy_embedding_exists(self, agent_id: str) -> dict[str, Any] | None:
         """
         Checks if the embedding file for an agent is present or not
 
@@ -276,7 +273,7 @@ class CBAC:
         embedding = self._load_from_embeddings_dir(agent_id=agent_id)
         return embedding
 
-    async def precompute_policy(self, agent_id: str, skip_compute=True) -> Dict[str, Any]:
+    async def precompute_policy(self, agent_id: str, skip_compute=True) -> dict[str, Any]:
         """
         Precompute and cache policy vectors for an agent.  Call this once
         after deploying or updating the agent's policy card — not on every
@@ -318,7 +315,7 @@ class CBAC:
         forbidden_vecs = vecs[n_allowed:]
 
         policy_text = "\n".join(chunks)
-        payload: Dict[str, Any] = {
+        payload: dict[str, Any] = {
             "agent_id": agent_id,
             "allowed_chunks": allowed_chunks,
             "forbidden_chunks": forbidden_chunks,
@@ -338,7 +335,7 @@ class CBAC:
         self,
         user_intent: str,
         agent_action: str,
-    ) -> Tuple[Optional[Tuple[str, str]], float]:
+    ) -> tuple[tuple[str, str] | None, float]:
         """NLI drift check: does the agent's action contradict the user's intent?
 
         Returns ``((decision, reason), intent_score)`` if contradiction is
@@ -372,12 +369,12 @@ class CBAC:
         self,
         intent_text: str,
         intent_vec,
-        allowed_chunks: List[str],
-        forbidden_chunks: List[str],
+        allowed_chunks: list[str],
+        forbidden_chunks: list[str],
         allowed_vecs,
         forbidden_vecs,
         policy_text: str,
-    ) -> Tuple[str, str, Optional[float]]:
+    ) -> tuple[str, str, float | None]:
         """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM).
 
         Returns ``(decision, reason, policy_score)``. ``policy_score`` is a
@@ -460,7 +457,7 @@ class CBAC:
         self,
         agent_id: str,
         intended_action: Any,
-        user_intent: Optional[str] = None,
+        user_intent: str | None = None,
     ) -> CBACResult:
         """
         Semantic intent verification against the agent's on-chain policy.
@@ -508,7 +505,7 @@ class CBAC:
             )
 
         # Check 1: NLI drift — only runs when caller supplies the root user intent.
-        intent_score: Optional[float] = None
+        intent_score: float | None = None
         if user_intent:
             drift, intent_score = await self._check1_drift(user_intent, intent_text)
             if drift is not None:
@@ -539,8 +536,8 @@ class CBAC:
                     decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}"
                 )
 
-        allowed_chunks: List[str] = cached["allowed_chunks"]
-        forbidden_chunks: List[str] = cached["forbidden_chunks"]
+        allowed_chunks: list[str] = cached["allowed_chunks"]
+        forbidden_chunks: list[str] = cached["forbidden_chunks"]
         allowed_vecs: np.ndarray = cached["allowed_vecs"]
         forbidden_vecs: np.ndarray = cached["forbidden_vecs"]
         policy_text: str = cached["policy_text"]
@@ -633,14 +630,14 @@ class CBAC:
     def _trust_store_path(self) -> Path:
         return Path(self.provenance.config_dir) / TRUST_STORE_FILE
 
-    def _load_trust_store(self) -> Dict[str, Any]:
+    def _load_trust_store(self) -> dict[str, Any]:
         try:
             with self._trust_store_path.open("r") as f:
                 return json.load(f)
         except Exception:
             return {}
 
-    def _save_trust_store(self, store: Dict[str, Any]):
+    def _save_trust_store(self, store: dict[str, Any]):
         with self._trust_store_path.open("w") as f:
             json.dump(store, f, indent=2)
 
@@ -686,7 +683,7 @@ class CBAC:
 
         # TODO: should this be a geometric mean?
         s = 1.0
-        for value, weight in zip(scores.values(), self._lhi_weights):
+        for value, weight in zip(scores.values(), self._lhi_weights, strict=False):
             s *= value**weight
 
         store = self._load_trust_store()
