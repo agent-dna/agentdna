@@ -5,7 +5,6 @@ Usage:
     python scripts/start_mcp.py
 """
 
-import os
 import sys
 from pathlib import Path
 

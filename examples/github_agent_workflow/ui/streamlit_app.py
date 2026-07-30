@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import streamlit as st
 
-from app.agent_names import coordinator_name, worker_name
+from app.agent_names import coordinator_name
 from app.agents.graph import build_graph
 from app.constants import ANONYMOUS_USER_EMAIL
 from app.integrations.agentdna import UserSession, deploy_agent, deploy_user

@@ -1,8 +1,8 @@
-import json
 import hashlib
+import json
 from typing import overload
 
-from .types import Envelope, IntentWorkflow, Actor, Issue
+from .types import Actor, Envelope, IntentWorkflow, Issue
 
 
 def canonicalize_envelope(envelope: Envelope) -> str:

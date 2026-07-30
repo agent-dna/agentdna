@@ -5,7 +5,6 @@ tools as LangChain Tool objects the Worker LLM can call.
 
 from __future__ import annotations
 
-import os
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
 

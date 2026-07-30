@@ -1,0 +1,35 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      # The dev group pulls agent-dna[mcp], which pyright needs to resolve
+      # agentdna/cbac/mcp.py, and creates the .venv that [tool.pyright] points at.
+      - name: Install dev environment
+        run: uv sync
+
+      - name: ruff format
+        run: uv run ruff format --check agentdna cbac_service
+
+      - name: ruff check
+        run: uv run ruff check agentdna cbac_service
+
+      - name: pyright
+        run: uv run pyright

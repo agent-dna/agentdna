@@ -51,7 +51,7 @@ def make_verify_cbac(tmp_path, monkeypatch, policy_text="Agents may read pull re
 def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -71,9 +71,7 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
 def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
-            agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None
-        )
+        cbac.verify_cbac(agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None)
     )
     assert result.decision == "advise"
     assert result.hallucination_score is None
@@ -88,7 +86,7 @@ def test_hallucination_scoring_failure_does_not_change_decision(tmp_path, monkey
 
     monkeypatch.setattr(cbac, "hallucination_score", boom)
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -103,7 +101,7 @@ def test_intent_score_is_one_minus_contradiction(tmp_path, monkeypatch):
     monkeypatch.setattr(
         cbac, "_nli_scores", lambda premise, hypothesis: {"contradiction": 0.3, "entailment": 0.1}
     )
-    drift, intent_score = asyncio.run(cbac._CBAC__check1_drift("user intent", "agent action"))
+    drift, intent_score = asyncio.run(cbac._check1_drift("user intent", "agent action"))
     assert drift is None  # 0.3 < contradiction_threshold, no deny
     assert intent_score == pytest.approx(0.7)
 
@@ -115,7 +113,7 @@ def test_policy_score_normalized_on_tier1_decision(tmp_path, monkeypatch):
     forbidden_vecs = np.array([[0.0, 1.0]])  # cosine 0.0
 
     decision, _reason, policy_score = asyncio.run(
-        cbac._CBAC__tiered_decision(
+        cbac._tiered_decision(
             "intent text",
             intent_vec,
             ["allowed chunk"],
@@ -137,7 +135,7 @@ def test_hallucination_score_not_computed_on_early_hard_fail(tmp_path, monkeypat
         lambda *a, **k: pytest.fail("hallucination_score must not run on an early hard-fail"),
     )
     result = asyncio.run(
-        cbac.verify_agent_app_interaction(
+        cbac.verify_cbac(
             agent_id=AGENT_ID, intended_action="", user_intent="Please show me the pull requests"
         )
     )

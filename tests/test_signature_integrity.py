@@ -1,6 +1,3 @@
-from copy import deepcopy
-
-
 def test_payload_tampering(user, agent):
     """
     Ensures payload tampering invalidates

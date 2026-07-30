@@ -1,12 +1,11 @@
 import json
 import os
-
 from dataclasses import asdict
 from pathlib import Path
 
 from .types import (
-    ActorRegistryEntry,
     ACTOR_INFO_FILE,
+    ActorRegistryEntry,
 )
 
 
@@ -30,7 +29,7 @@ def load_actor_config(
     if not os.path.exists(actor_config_path):
         return []
 
-    with open(actor_config_path, "r", encoding="utf-8") as fp:
+    with open(actor_config_path, encoding="utf-8") as fp:
         data = json.load(fp)
 
     return [ActorRegistryEntry(**entry) for entry in data]

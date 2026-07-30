@@ -5,14 +5,12 @@ Eager AgentDNA initialization helpers.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Optional
 
 import structlog
 
 from app.agent_names import coordinator_name, set_agent_name, worker_name
-from app.constants import ANONYMOUS_USER_EMAIL
 
 from .registry import agentdna_registry, is_agentdna_enabled
 from .user_session import _get_or_make_user

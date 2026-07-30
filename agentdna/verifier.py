@@ -1,8 +1,6 @@
-from typing import List
-
-from .types import IntentWorkflow, VerificationResult, Issue
+from .helpers import get_latest_envelope, unwrap_workflow
 from .provenance import Provenance
-from .helpers import unwrap_workflow, get_latest_envelope
+from .types import IntentWorkflow, Issue, VerificationResult
 
 
 def verify_light(
@@ -15,7 +13,7 @@ def verify_light(
 
     envelope = get_latest_envelope(workflow)
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
 
     try:
         valid = provenance.verify_envelope(envelope)
@@ -59,7 +57,7 @@ def verify_heavy(
 
     chain_depth = len(envelopes)
 
-    issues: List[Issue] = []
+    issues: list[Issue] = []
 
     current_depth = 0
     for envelope in envelopes:
