@@ -2,22 +2,20 @@ import asyncio
 import base64
 import hashlib
 import json
-import pickle
-import re
 import requests
 import yaml
 import os
 
 from typing import (
-    Optional, Callable, Dict, 
+    Optional, Callable, Dict,
     Any, List, Tuple
 )
-from pathlib import Path
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 
 from .provenance import Provenance
-from .types import AgentCard, MODEL_EMBEDDINGS_DIR, IntentWorkflow
+from .storage import PolicyStore
+from .types import AgentCard, IntentWorkflow
 
 
 from sentence_transformers import SentenceTransformer
@@ -175,6 +173,7 @@ class CBAC:
         llm_backend: Optional[Callable] = None,
         allow_gap: float = _ALLOW_GAP_DEFAULT,
         deny_gap: float = _DENY_GAP_DEFAULT,
+        database_url: str = "",
     ):
         self.provenance = provenance
         self.cbac_url = cbac_url
@@ -188,18 +187,14 @@ class CBAC:
         self._nli = None
         self._nli_labels: Dict[int, str] = {}
 
-        # Make embeddings config dir
-        self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
-        os.makedirs(
-            self.embeddings_dir,
-            exist_ok=True
-        )
+        # pgvector-backed policy store
+        self.store = PolicyStore(database_url)
 
     def _get_encoder(self):
         if self._encoder is None:
             self._encoder = SentenceTransformer(self._encoder_name)
         return self._encoder
-    
+
     def _get_nli(self):
         if self._nli is None:
             from sentence_transformers.cross_encoder import CrossEncoder
@@ -217,7 +212,7 @@ class CBAC:
                 # Fallback for deberta NLI label order (contradiction/entailment/neutral)
                 self._nli_labels = {0: "contradiction", 1: "entailment", 2: "neutral"}
         return self._nli
-    
+
     def _nli_scores(self, premise: str, hypothesis: str) -> Dict[str, float]:
         """Run NLI cross-encoder on a (premise, hypothesis) pair.
 
@@ -268,7 +263,7 @@ class CBAC:
                     chunks.append(f"{key}: {value}")
             return chunks
         return []
-    
+
     def _classify_chunks(self, chunks: List[str]) -> Tuple[List[str], List[str]]:
         """NLI-classify each chunk as allowed or forbidden.
 
@@ -316,36 +311,14 @@ class CBAC:
                 f"agent {agent_id}: {exc}"
             ) from exc
 
-    def __get_embedding_file_path(self, agent_id: str) -> Path:
-        """Return the .pkl path for this agent's precomputed policy vectors."""
-        digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
-        return Path(self.embeddings_dir) / f"{digest}.pkl"
-    
-    def __save_to_embeddings_dir(self, agent_id: str, data: Dict[str, Any]):
-        path = self.__get_embedding_file_path(agent_id)
-        with path.open("wb") as f:
-            pickle.dump(data, f)
-
-    def __load_from_embeddings_dir(self, agent_id: str) -> Optional[Dict[str, Any]]:
-        path = self.__get_embedding_file_path(agent_id)
-        if not path.exists():
-            return None
-        try:
-            with path.open("rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None
-
-    def check_policy_embedding_exists(self, agent_id: str) -> Dict[str, Any] | None:
+    def check_policy_embedding_exists(self, agent_id: str) -> bool:
         """
-        Checks if the embedding file for an agent is present or not
-
-        Returns None if its not present
+        Checks if embeddings for an agent exist in pgvector.
+        Returns True if present, False otherwise.
         """
-        embedding = self.__load_from_embeddings_dir(agent_id=agent_id)
-        return embedding
+        return self.store.policy_exists(agent_id)
 
-    async def precompute_policy(self, agent_id: str, skip_compute=True) -> Dict[str, Any]:
+    async def precompute_policy(self, agent_id: str, skip_compute: bool = True) -> Dict[str, Any]:
         """
         Precompute and cache policy vectors for an agent.  Call this once
         after deploying or updating the agent's policy card — not on every
@@ -357,21 +330,20 @@ class CBAC:
         2. Flattens it to text chunks (unified key:value + body path).
         3. NLI-classifies each chunk into allowed / forbidden buckets.
         4. Encodes both buckets with the bi-encoder.
-        5. Persists everything to ``~/.agentdna/embedding_cache/<hash>.pkl``.
+        5. Persists chunks + vectors to pgvector.
 
-        Returns the cached payload so callers can inspect it.
+        Returns a metadata dict so callers can inspect the result.
         """
-        # Checks if embedding is present for a model locally.
-        # If it exists, then check if skip_compute is True.
-        # If its true, proceed to fetch the embeddings from local
-        local_embedding = self.check_policy_embedding_exists(agent_id)
-        if local_embedding and skip_compute:
-            return local_embedding
+        # Check if embeddings already exist in pgvector
+        if skip_compute:
+            meta = await asyncio.to_thread(self.store.get_policy_meta, agent_id)
+            if meta is not None:
+                return meta
 
         policy = self.__get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
-        
+
         chunks = self._flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
@@ -383,26 +355,49 @@ class CBAC:
         vecs = encoder.encode(to_encode, normalize_embeddings=True)
 
         n_allowed = len(allowed_chunks)
-        allowed_vecs = vecs[:n_allowed]
-        forbidden_vecs = vecs[n_allowed:]
 
-        policy_text = "\n".join(chunks)
-        payload: Dict[str, Any] = {
+        policy_hash = hashlib.sha256(policy.encode()).hexdigest()
+
+        # Build chunk records for pgvector storage
+        chunk_records: List[Dict[str, Any]] = []
+        for i, (text, vec) in enumerate(zip(allowed_chunks, vecs[:n_allowed])):
+            chunk_records.append({
+                "text": text,
+                "type": "allowed",
+                "embedding": vec.tolist(),
+                "section": "frontmatter" if ":" in text and not text.startswith(" ") else "body",
+                "index": i,
+            })
+        for i, (text, vec) in enumerate(zip(forbidden_chunks, vecs[n_allowed:])):
+            chunk_records.append({
+                "text": text,
+                "type": "forbidden",
+                "embedding": vec.tolist(),
+                "section": "frontmatter" if ":" in text and not text.startswith(" ") else "body",
+                "index": i,
+            })
+
+        # Persist to pgvector
+        await asyncio.to_thread(
+            self.store.save_policy_chunks,
+            agent_id,
+            chunk_records,
+            policy_hash,
+            self._encoder_name,
+            self._nli_model_name,
+        )
+
+        return {
             "agent_id": agent_id,
-            "allowed_chunks": allowed_chunks,
-            "forbidden_chunks": forbidden_chunks,
-            "allowed_vecs": allowed_vecs,
-            "forbidden_vecs": forbidden_vecs,
-            "policy_text": policy_text,
-            "policy_hash": hashlib.sha256(policy.encode()).hexdigest(),
+            "policy_hash": policy_hash,
+            "allowed_count": len(allowed_chunks),
+            "forbidden_count": len(forbidden_chunks),
+            "total_chunks": len(chunk_records),
             "cached_at": datetime.now(timezone.utc).isoformat(),
             "encoder": self._encoder_name,
             "nli_model": self._nli_model_name,
         }
 
-        await asyncio.to_thread(self.__save_to_embeddings_dir, agent_id, payload)
-        return payload
-    
     async def __check1_drift(
         self,
         user_intent: str,
@@ -421,14 +416,6 @@ class CBAC:
                 f"{agent_action!r} (NLI contradiction={contradiction:.2f})",
             )
         return None
-    
-    def _max_cosine(self, query_vec, chunk_vecs) -> float:
-        """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
-        import numpy as np
-        if chunk_vecs.shape[0] == 0:
-            return 0.0
-        sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
-        return float(np.max(sims))
 
     async def verify_agent_app_interaction(
         self,
@@ -453,9 +440,8 @@ class CBAC:
             score ≥ 0.60 → deny immediately.
 
         Tier 1 (cosine gap)
-            All policy chunks are NLI-classified into allowed / forbidden
-            buckets at query time.  Both buckets are encoded with the
-            bi-encoder.  ``gap = max_allowed_cosine - max_forbidden_cosine``.
+            pgvector finds the closest allowed and forbidden chunks by
+            cosine similarity.  ``gap = allowed_score - forbidden_score``.
             gap > +allow_gap → allow;  gap < -deny_gap → deny;  else → Tier 2.
 
         Tier 2 (NLI entailment)
@@ -470,12 +456,11 @@ class CBAC:
         Parameters
         ----------
         agent_id:
-            Used to fetch the agent's policy via :meth:`_get_policy`.
+            Used to fetch the agent's policy.
         intended_action:
             The action the agent wants to perform.  Any shape is accepted:
             a plain string, a dict with ``action``/``description``/``params``,
-            or an object — the same recursive flattener used by the lexical
-            path gathers the text.
+            or an object — the same recursive flattener gathers the text.
 
         Returns
         -------
@@ -483,8 +468,6 @@ class CBAC:
         Fail-closed: any unrecoverable error (no policy, empty content,
         model failure) resolves to ``deny``.
         """
-        import numpy as np
-
         intent_text = _intended_action_text(intended_action)
         if not intent_text.strip():
             return CBACResult(decision="deny", reason="Intended action carries no analysable content")
@@ -506,34 +489,31 @@ class CBAC:
 
         current_hash = hashlib.sha256(current_policy.encode()).hexdigest()
 
-        # Load local cache and validate against current policy hash.
-        cached = await asyncio.to_thread(self.__load_from_embeddings_dir, agent_id)
+        # Check pgvector cache validity against current on-chain policy hash.
+        meta = await asyncio.to_thread(self.store.get_policy_meta, agent_id)
 
-        if cached is None or cached.get("policy_hash") != current_hash:
+        if meta is None or meta.get("policy_hash") != current_hash:
             # Cache miss or policy updated on chain — recompute and persist.
             try:
-                cached = await self.precompute_policy(agent_id)
+                await self.precompute_policy(agent_id, skip_compute=False)
             except Exception as e:
                 return CBACResult(decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}")
-
-        allowed_chunks: List[str] = cached["allowed_chunks"]
-        forbidden_chunks: List[str] = cached["forbidden_chunks"]
-        allowed_vecs: np.ndarray = cached["allowed_vecs"]
-        forbidden_vecs: np.ndarray = cached["forbidden_vecs"]
-        policy_text: str = cached["policy_text"]
-
-        if not allowed_chunks and not forbidden_chunks:
-            return CBACResult(decision="deny", reason="Policy carries no analysable content")
 
         # Encode only the intent at runtime (~5 ms on CPU).
         encoder = self._get_encoder()
         intent_vec = await asyncio.to_thread(
             lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
         )
+        intent_vec_list = intent_vec.tolist()
 
-        # Tier 1: cosine gap.
-        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
-        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
+        # Tier 1: cosine gap via pgvector.
+        allowed_score, allowed_chunk = await asyncio.to_thread(
+            self.store.max_cosine_similarity, agent_id, "allowed", intent_vec_list
+        )
+        forbidden_score, _ = await asyncio.to_thread(
+            self.store.max_cosine_similarity, agent_id, "forbidden", intent_vec_list
+        )
+
         gap = allowed_score - forbidden_score
 
         if gap > self._allow_gap:
@@ -550,11 +530,10 @@ class CBAC:
             )
 
         # Tier 2: NLI entailment vs top allowed chunk.
-        if not allowed_chunks:
+        if not allowed_chunk:
             return CBACResult(decision="deny", reason="Tier 2: no allowed policy chunks found")
 
-        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
-        top_chunk = allowed_chunks[top_idx]
+        top_chunk = allowed_chunk  # already the closest from max_cosine_similarity
         t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
         entailment = t2_scores.get("entailment", 0.0)
         contradiction = t2_scores.get("contradiction", 0.0)
@@ -581,6 +560,12 @@ class CBAC:
                 ),
             )
 
+        # Fetch full policy text for LLM context
+        all_chunks = await asyncio.to_thread(
+            self.store.get_all_chunks, agent_id
+        )
+        policy_text = "\n".join(c["chunk_text"] for c in all_chunks)
+
         try:
             llm_decision = await self._llm_backend(intent_text, policy_text)
         except Exception as e:
@@ -592,7 +577,7 @@ class CBAC:
         if any(w in verdict for w in ("allow", "permit", "approve", "authorise", "authorize")):
             return CBACResult(decision="allow", reason=f"Tier 3 LLM: {llm_decision}")
         return CBACResult(decision="advise", reason=f"Tier 3 LLM inconclusive: {llm_decision}")
-    
+
     def authorise_agent_app_interaction(
         self,
         agent_id: str,
