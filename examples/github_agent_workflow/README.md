@@ -118,7 +118,7 @@ Set the following values for `openai` provider:
 ```
 OPENAI_API_KEY=
 OPENAI_MODEL=<name of the AI model>
-OPENAI_BASE_URL=https://llm.agentdna.io
+OPENAI_BASE_URL=<Optional argument, if you have an OpenAI proxy to rely on>
 ```
 
 You can get the API Key for OpenAI API [here](https://platform.openai.com/api-keys)
@@ -133,7 +133,7 @@ These represent the Host and Port information for the Github MCP server respecti
 
 - `AGENTDNA_API_KEY`
 
-Get your AgentDNA API Key by Signing Up on the [AgentDNA Dashboard](https://agentdna.dashboard.io).
+Get your AgentDNA API Key by Signing Up on the [AgentDNA Dashboard](https://dashboard.agentdna.io).
 
 ## Run Project Servers
 
