@@ -86,6 +86,21 @@ def test_trust_is_tracked_per_callee_edge(tmp_path):
     assert trust_other == pytest.approx(0.5)
 
 
+def test_same_name_different_type_are_separate_edges(tmp_path):
+    """callee_name + type is the unique key: the same name with a different
+    type is a distinct edge, so it starts a fresh trust/score history."""
+    cbac, _ = make_cbac(tmp_path)
+    cbac.compute_lhi("did:agent", "helper", "tool", **SCORES)
+    low = {k: 0.5 for k in SCORES}
+    trust_agent = cbac.compute_lhi("did:agent", "helper", "agent", **low)
+    assert trust_agent == pytest.approx(0.5)  # first interaction for helper:agent
+
+    callees = json.loads((tmp_path / "trust_scores.json").read_text())["did:agent"]["callees"]
+    assert set(callees) == {"helper:tool", "helper:agent"}
+    assert len(callees["helper:tool"]["scores"]) == 1
+    assert len(callees["helper:agent"]["scores"]) == 1
+
+
 def test_store_round_trips_across_instances(tmp_path):
     cbac, _ = make_cbac(tmp_path)
     prev = cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
@@ -96,10 +111,12 @@ def test_store_round_trips_across_instances(tmp_path):
     assert trust == pytest.approx(LHI_LAMBDA_UP * prev + (1 - LHI_LAMBDA_UP) * s)
 
     store = json.loads((tmp_path / "trust_scores.json").read_text())
-    entry = store["did:agent"]["callees"]["github_tool"]
+    entry = store["did:agent"]["callees"]["github_tool:tool"]
     assert entry["type"] == "tool"
     assert entry["trust"] == pytest.approx(trust)
-    assert set(entry["scores"]) == {"intent", "policy", "hallucination", "output"}
+    # scores is an appended history — one entry per interaction (two here).
+    assert len(entry["scores"]) == 2
+    assert set(entry["scores"][-1]) == {"intent", "policy", "hallucination", "output", "at"}
 
 
 def test_provenance_card_created_then_appended(tmp_path):
@@ -107,7 +124,7 @@ def test_provenance_card_created_then_appended(tmp_path):
     cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
     cbac.compute_lhi("did:agent", "slack_agent", "agent", **SCORES)
 
-    expected_card = get_id("did:agent:lhi")
+    expected_card = get_id("did:agent:cbac")
     assert [(op, card) for op, card, _ in calls] == [
         ("create", expected_card),
         ("append", expected_card),
@@ -129,7 +146,7 @@ def test_chain_failure_raises_but_keeps_local_update(tmp_path):
         cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
 
     store = json.loads((tmp_path / "trust_scores.json").read_text())
-    assert store["did:agent"]["callees"]["github_tool"]["trust"] == pytest.approx(
+    assert store["did:agent"]["callees"]["github_tool:tool"]["trust"] == pytest.approx(
         weighted_mean(**SCORES)
     )
 

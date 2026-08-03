@@ -635,20 +635,23 @@ class CBAC:
         return resp
 
     # The LHI trust store — one JSON object per agent, keyed by agent DID.
-    # `callees` holds one entry per (agent → callee) edge: the four component
-    # scores of the *latest* interaction, plus the EMA trust carried across all
-    # of them. The append-only history lives on the agent's LHI provenance card
-    # (`lhi_card_id`); this file is only the working copy of the current state.
+    # `callees` holds one entry per unique (callee_name + type) edge: the full
+    # history of per-interaction scores (appended each time) plus the EMA trust
+    # carried across them. The append-only chain history lives on the agent's
+    # CBAC provenance card (`{agent_id}:cbac`); this file is only the working
+    # copy of the current state.
     #
     #   {
     #     "<agent_did>": {
-    #       "lhi_card_id": "Qm...",                    # set on first write
     #       "callees": {
-    #         "<callee_name>": {
-    #           "type": "tool" | "agent" | "mcp",
-    #           "scores": {"intent": 0.9, "policy": 0.8,
-    #                      "hallucination": 0.95, "output": 1.0},
-    #           "trust": 0.87,                         # EMA over interactions
+    #         "<callee_name>:<type>": {              # unique edge identifier
+    #           "callee_name": "<callee_name>",
+    #           "type": "tool" | "agent" | "mcp" | "app",
+    #           "scores": [                          # appended per interaction
+    #             {"intent": 0.9, "policy": 0.8,
+    #              "hallucination": 0.95, "output": 1.0, "at": "<iso8601>"}
+    #           ],
+    #           "trust": 0.87,                       # EMA over interactions
     #           "updated_at": "<iso8601>"
     #         }
     #       }
@@ -656,8 +659,7 @@ class CBAC:
     #   }
     #
     # TODO:- Replace trust file by light db.
-    # Fix LHI store structure.
-    # Writen Action? 
+    # Write Action?
     @property
     def _trust_store_path(self) -> Path:
         return Path(self.provenance.config_dir) / TRUST_STORE_FILE
@@ -673,6 +675,7 @@ class CBAC:
         with self._trust_store_path.open("w") as f:
             json.dump(store, f, indent=2)
 
+    #TODO:- Verify writing provenance card. 
     def compute_lhi(
         self,
         agent_id: str,
@@ -701,9 +704,9 @@ class CBAC:
            drops fast). First interaction with a callee: ``T = s``.
 
         The full record (callee, all four scores, trust) is persisted locally
-        under the config dir and appended to a dedicated per-agent LHI card on
-        the Provenance Layer (created on first write), so the trust history is
-        independently verifiable on-chain. Trust never overrides the per-
+        under the config dir and appended to a dedicated per-agent CBAC card
+        (``{agent_id}:cbac``) on the Provenance Layer (created on first write),
+        so the trust history is independently verifiable on-chain. Trust never overrides the per-
         interaction allow/deny gates — it is read pre-execution only to
         arbitrate the inconclusive ("advise") band.
         """
@@ -722,8 +725,12 @@ class CBAC:
         )
 
         store = self._load_trust_store()
+        is_new_agent = agent_id not in store
         agent_entry = store.setdefault(agent_id, {"callees": {}})
-        prev_entry = agent_entry["callees"].get(callee_name)
+
+        # callee_name + type is the unique edge identifier.
+        edge_key = f"{callee_name}:{callee_type}"
+        prev_entry = agent_entry["callees"].get(edge_key)
 
         if prev_entry is None:
             trust = s
@@ -732,44 +739,45 @@ class CBAC:
             lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
             trust = lam * prev + (1 - lam) * s
 
+        updated_at = datetime.now(timezone.utc).isoformat()
         record = {
             "type": "lhi_record",
             "agent_id": agent_id,
             "callee": {"name": callee_name, "type": callee_type},
             "scores": scores,
             "trust": trust,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": updated_at,
         }
 
-        agent_entry["callees"][callee_name] = {
-            "type": callee_type,
-            "scores": scores,
-            "trust": trust,
-            "updated_at": record["updated_at"],
-        }
+        # New (callee_name + type) -> a fresh entry; existing one -> append this
+        # iteration's scores to its history and update the rolling trust.
+        entry = agent_entry["callees"].setdefault(
+            edge_key,
+            {"callee_name": callee_name, "type": callee_type, "scores": []},
+        )
+        entry["scores"].append({**scores, "at": updated_at})
+        entry["trust"] = trust
+        entry["updated_at"] = updated_at
 
         # Local store is the working copy; the chain is the audit log. Persist
         # locally first so a chain failure never loses the trust update.
-        lhi_card_id = agent_entry.get("lhi_card_id")
-        is_new_card = lhi_card_id is None
-        if is_new_card:
-            lhi_card_id = get_id(f"{agent_id}:lhi")
-            agent_entry["lhi_card_id"] = lhi_card_id
+        cbac_did = f"{agent_id}:cbac"
+        card_id = get_id(cbac_did)
         self._save_trust_store(store)
 
         try:
-            if is_new_card:
+            if is_new_agent:
                 self.provenance.create_new_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+                    card_id=card_id, card_info=json.dumps(record)
                 )
             else:
                 self.provenance.append_to_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+                    card_id=card_id, card_info=json.dumps(record)
                 )
         except Exception as exc:
             raise RuntimeError(
                 f"LHI record for agent {agent_id} saved locally but failed to "
-                f"write to provenance card {lhi_card_id}: {exc}"
+                f"write to provenance card {card_id}: {exc}"
             ) from exc
 
         return trust
