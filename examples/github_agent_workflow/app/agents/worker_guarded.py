@@ -40,10 +40,11 @@ from app.llm import make_llm
 from app.utils import serialize_workflow as serialize_state_workflow
 from fastmcp import FastMCP
 from langchain_core.messages import HumanMessage
+from langchain_core.tools import StructuredTool
 from langchain_mcp_adapters.client import MultiServerMCPClient
 from langgraph.prebuilt import create_react_agent
 
-from agentdna.cbac import cbac_context
+from agentdna.cbac import cbac_context, cbac_guard
 from agentdna.cbac.mcp import cbac_intercept
 from agentdna.helpers import get_latest_envelope, get_root_envelope
 
@@ -126,6 +127,20 @@ async def _get_guarded_tools() -> list:
     return await client.get_tools()
 
 
+# An in-process tool: runs in THIS process, not over MCP. Governed by the same
+# cbac_context as the MCP tools, but enforced by @cbac_guard (authorized
+# in-process) rather than the client interceptor.
+@cbac_guard(action_intent=lambda kw: f"repo:draft_summary:{kw['repo']}")
+async def draft_summary(repo: str, notes: str) -> dict:
+    """Condense raw notes into a short change summary for a repo.
+
+    Args:
+        repo: Repository in owner/name format.
+        notes: Raw notes to condense.
+    """
+    return {"status": "drafted", "repo": repo, "summary": " ".join(notes.split())[:280]}
+
+
 # ── Worker node ───────────────────────────────────────────────────────────────
 
 
@@ -166,7 +181,10 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
             "worker_messages": [],
         }
 
-    tools = await _get_guarded_tools()
+    tools = [
+        StructuredTool.from_function(coroutine=draft_summary),  # in-process, @cbac_guard
+        *await _get_guarded_tools(),  # MCP, cbac_intercept
+    ]
     agent = create_react_agent(make_llm(temperature=0.0), tools, prompt=WORKER_SYSTEM)
 
     root = get_root_envelope(handle_result.workflow)

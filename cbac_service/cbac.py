@@ -657,6 +657,7 @@ class CBAC:
     #
     # TODO:- Replace trust file by light db.
     # Fix LHI store structure.
+    # Writen Action? 
     @property
     def _trust_store_path(self) -> Path:
         return Path(self.provenance.config_dir) / TRUST_STORE_FILE

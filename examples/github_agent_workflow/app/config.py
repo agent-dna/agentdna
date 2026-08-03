@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     )
 
     # ── LLM ────────────────────────────────────────────────────────────────
-    llm_provider: str = Field(default="gemini")  # "gemini" | "ollama" | "openai"
+    llm_provider: str = Field(default="openai")  # "gemini" | "ollama" | "openai"
     gemini_api_key: str = Field(default="")
     gemini_model: str = Field(default="gemini-2.0-flash")
     gemini_temperature: float = Field(default=0.1)

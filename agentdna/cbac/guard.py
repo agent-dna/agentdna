@@ -275,6 +275,51 @@ async def _report_lhi(
         pass
 
 
+# ── Framework-agnostic call gate ──────────────────────────────────────────────
+#
+# The authorize/report flow every framework needs, split from any framework's
+# request/result types. A framework interceptor supplies only its own glue:
+# extract (name, args), execute, detect success, render a denial. See
+# `agentdna.cbac.mcp.cbac_intercept` for the MCP/LangChain adapter.
+
+
+async def authorize_tool_call(
+    callee_name: str,
+    args: dict[str, Any],
+) -> tuple[str, str, dict[str, float | None]]:
+    """Authorize one tool call against the ambient policy (decision only).
+
+    Returns ``(decision, detail, scores)``. ``decision`` is ``"allow"`` when
+    governance is off (no :func:`cbac_context`), so a caller can always
+    proceed on ``"allow"`` and short-circuit otherwise. Fail-closed: any
+    error resolves to ``"error"`` and never raises.
+    """
+    ctx = get_context()
+    if ctx is None:
+        return "allow", "", {}
+    intent = _default_intent(callee_name, args)
+    cfg = get_config()
+    try:
+        return await _authorize(ctx, intent, cfg)
+    except Exception as exc:
+        return "error", str(exc), {}
+
+
+async def report_tool_outcome(
+    callee_name: str,
+    scores: dict[str, float | None],
+    *,
+    ok: bool,
+    callee_type: str = "tool",
+) -> None:
+    """Fold a finished tool call's outcome into the trust score. No-op when
+    governance is off; never raises (mirrors :func:`_report_lhi`)."""
+    ctx = get_context()
+    if ctx is None:
+        return
+    await _report_lhi(ctx, callee_name, callee_type, scores, 1.0 if ok else 0.0, get_config())
+
+
 # ── The decorator ─────────────────────────────────────────────────────────────
 
 
