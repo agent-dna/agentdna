@@ -39,7 +39,8 @@ from cbac_service.skills import (
     parse_skill_md,
 )
 
-#TODO:- Fix return types in CBAC class
+# TODO:- Fix return types in CBAC class
+
 
 def _policy_hash(policy: str) -> str:
     """Content hash keying the embedding cache. The precompute side (writes it)
@@ -633,6 +634,27 @@ class CBAC:
 
         return resp
 
+    # The LHI trust store — one JSON object per agent, keyed by agent DID.
+    # `callees` holds one entry per (agent → callee) edge: the four component
+    # scores of the *latest* interaction, plus the EMA trust carried across all
+    # of them. The append-only history lives on the agent's LHI provenance card
+    # (`lhi_card_id`); this file is only the working copy of the current state.
+    #
+    #   {
+    #     "<agent_did>": {
+    #       "lhi_card_id": "Qm...",                    # set on first write
+    #       "callees": {
+    #         "<callee_name>": {
+    #           "type": "tool" | "agent" | "mcp",
+    #           "scores": {"intent": 0.9, "policy": 0.8,
+    #                      "hallucination": 0.95, "output": 1.0},
+    #           "trust": 0.87,                         # EMA over interactions
+    #           "updated_at": "<iso8601>"
+    #         }
+    #       }
+    #     }
+    #   }
+    #
     # TODO:- Replace trust file by light db.
     # Fix LHI store structure.
     @property

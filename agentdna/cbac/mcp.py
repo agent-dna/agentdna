@@ -35,17 +35,27 @@ Typical wiring (one import surface)::
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 
 from fastmcp.server.middleware import Middleware, MiddlewareContext
-from mcp.types import CallToolRequestParams
+from mcp.types import CallToolRequestParams, CallToolResult, TextContent
 
 # Re-exported so MCP users import the whole recipe from one place.
-from .guard import cbac_context, cbac_guard, get_context
+from .guard import (
+    _authorize,
+    _default_intent,
+    _report_lhi,
+    cbac_context,
+    cbac_guard,
+    get_config,
+    get_context,
+)
 
 __all__ = [
     "CBACMiddleware",
     "intent_interceptor",
+    "cbac_intercept",
     "INTENT_ARG",
     "cbac_guard",
     "cbac_context",
@@ -93,3 +103,41 @@ async def intent_interceptor(request, handler):
     if ctx is None:
         return await handler(request)
     return await handler(request.override(args={**request.args, INTENT_ARG: ctx.user_intent}))
+
+
+async def cbac_intercept(request, handler):
+    """Client-side tool interceptor that is itself the CBAC enforcement point.
+
+    Unlike :func:`intent_interceptor` -- which only ferries intent to a
+    *cooperating* server running :class:`CBACMiddleware` + ``@cbac_guard`` --
+    this authorizes each outgoing call on the client, so a third-party MCP
+    server you do not own (and cannot decorate) still gets governed.
+
+    Authorization is decision-only, so ``handler`` is the execute step: a
+    non-allow decision short-circuits and the call never leaves the client;
+    an allowed call is forwarded and its outcome folded into the trust
+    score. Requires an open :func:`cbac_context`; without one it is a
+    passthrough (governance opted out), mirroring ``@cbac_guard``.
+    """
+    ctx = get_context()
+    if ctx is None:
+        return await handler(request)
+
+    intent = _default_intent(request.name, request.args)
+    cfg = get_config()
+    try:
+        decision, detail, scores = await _authorize(ctx, intent, cfg)
+    except Exception as exc:
+        decision, detail, scores = "error", str(exc), {}
+
+    if decision != "allow":
+        # Readable denial, not a raised error -- mirrors @cbac_guard(on_deny="return")
+        # so the agent loop can see the block and adapt.
+        status = "denied" if decision == "deny" else "error"
+        body = json.dumps({"status": status, "error": detail})
+        return CallToolResult(content=[TextContent(type="text", text=body)], isError=False)
+
+    result = await handler(request)
+    output_score = 0.0 if getattr(result, "isError", False) else 1.0
+    await _report_lhi(ctx, request.name, "mcp", scores, output_score, cfg)
+    return result
