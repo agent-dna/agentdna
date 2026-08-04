@@ -2,7 +2,7 @@ import hashlib
 import json
 from typing import overload
 
-from .types import Actor, Envelope, IntentWorkflow, Issue
+from .types import Envelope, IntentWorkflow
 
 
 def canonicalize_envelope(envelope: Envelope) -> str:
@@ -11,10 +11,8 @@ def canonicalize_envelope(envelope: Envelope) -> str:
     for both signing and verification.
 
     Ancestor signatures are included.
-
-    Returns the SHA-256 hash of the envelope
+    Returns the SHA-256 hash of the envelope.
     """
-
     envelope_dict = _envelope_to_dict(envelope)
 
     envelope_dict_str = json.dumps(
@@ -26,112 +24,40 @@ def canonicalize_envelope(envelope: Envelope) -> str:
     return hashlib.sha256(envelope_dict_str).hexdigest()
 
 
-def get_latest_envelope(
-    workflow: IntentWorkflow,
-) -> Envelope:
-    """
-    Returns the latest envelope
-    from a workflow.
-    """
-
-    if workflow.envelope is None:
-        raise ValueError("workflow does not contain an envelope")
-
-    return workflow.envelope
-
-
-def get_root_envelope(
-    workflow: IntentWorkflow,
-) -> Envelope | None:
-    """
-    Returns the root envelope from a workflow.
-    """
-
-    if workflow.envelope is None:
-        raise ValueError("workflow does not contain an envelope")
-
-    current = parse_envelope(workflow.envelope)
-
-    while current.parent_envelope is not None:
-        current = parse_envelope(current.parent_envelope)
-
-    return current
-
-
-def get_envelope_depth(
-    envelope: Envelope | None,
-) -> int:
-    depth = 0
-
-    while envelope:
-        depth += 1
-        envelope = envelope.parent_envelope
-
-    return depth
-
-
-def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
-    """
-    Unwraps a workflow into a list of envelopes.
-
-    Returns envelopes in descending order:
-        [latest ... root]
-
-    Example:
-        E4(E3(E2(E1)))
-
-    becomes:
-        [E4, E3, E2, E1]
-    """
-    current = get_latest_envelope(workflow)
-    envelopes: list[Envelope] = []
-
-    while current is not None:
-        if isinstance(current, dict):
-            current = parse_envelope(current)
-        envelopes.append(current)
-        current = current.parent_envelope
-
-    return envelopes
-
-
 def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
     """
     Converts an envelope into a canonical dictionary.
-
-    Parent envelope signatures are always included.
-
-    `is_current` skips adding the signature attribute to the dict
-    if envelope is current.
-
-    This creates a chain-of-attestation where every
-    envelope commits to all previously signed envelopes.
+    
+    Performs FULL DEEP RECURSION. Every envelope embeds its complete 
+    historical lineage. 
     """
-
     result = {
-        "from_": {
-            "id": envelope.from_.id,
-            "name": envelope.from_.name,
-            "type": envelope.from_.type,
-            "metadata": envelope.from_.metadata,
-        },
-        "to": {
-            "id": envelope.to.id,
-            "name": envelope.to.name,
-            "type": envelope.to.type,
-            "metadata": envelope.to.metadata,
-        },
+        "from_": envelope.from_,
         "payload": envelope.payload,
-        "metadata": envelope.metadata,
         "epoch": envelope.epoch,
-        "issues": [{"depth": issue.depth, "reason": issue.reason} for issue in envelope.issues],
+        "code": envelope.code,
+        "run_id": envelope.run_id,
+        "to": envelope.to,
     }
 
+    # If this is a historical envelope, its signature is part of the sealed record
     if not is_current:
-        result["signature"] = envelope.signature
+        if hasattr(envelope, "signature") and envelope.signature:
+            result["signature"] = envelope.signature
 
-    if envelope.parent_envelope is not None:
-        result["parent_envelope"] = _envelope_to_dict(envelope.parent_envelope, is_current=False)
+    # DEEP RECURSION: We do NOT return early here. We process the entire chain.
+    if envelope.parent_envelope:
+        parent_dicts = [
+            _envelope_to_dict(parent, is_current=False) 
+            for parent in envelope.parent_envelope
+        ]
+        
+        # Sort to guarantee deterministic hashing at merge junctions
+        # We fallback to payload if signature is missing during test mock setups
+        result["parent_envelope"] = sorted(
+            parent_dicts, 
+            key=lambda p: p.get("signature", "") or p.get("payload", "")
+        )
 
     return result
 
@@ -149,8 +75,10 @@ def parse_envelope(data: dict | Envelope) -> Envelope: ...
 @overload
 def parse_envelope(data: None) -> None: ...
 def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
-    """Recursively turns a raw dict (and any nested dicts) into a
-    proper Envelope, including the parent_envelope chain."""
+    """
+    Recursively turns a raw dict into a proper Envelope,
+    safely handling the list of parent envelopes in the DAG.
+    """
     if data is None or isinstance(data, Envelope):
         return data
 
@@ -160,21 +88,30 @@ def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
     if "from" in data and "from_" not in data:
         data["from_"] = data.pop("from")
 
-    data["from_"] = parse_actor(data.get("from_"))
-    data["to"] = parse_actor(data.get("to"))
-    data["issues"] = [parse_issue(i) for i in data.get("issues", [])]
-    data["parent_envelope"] = parse_envelope(data.get("parent_envelope"))
+    # DAG REFACTOR: Handle the list of parent envelopes safely
+    parents_data = data.get("parent_envelope")
+    if parents_data:
+        # Fallback in case a legacy linear dictionary is passed
+        if isinstance(parents_data, dict):
+            parents_data = [parents_data]
+
+        data["parent_envelope"] = [parse_envelope(p) for p in parents_data if p]
+    else:
+        data["parent_envelope"] = None
+
+    # Safety: Remove any legacy keys (like 'issues') that might exist in old
+    # JSON payloads but aren't in our types.py struct anymore.
+    # This prevents TypeError: __init__() got an unexpected keyword argument
+    allowed_keys = {
+        "from_",
+        "payload",
+        "epoch",
+        "code",
+        "run_id",
+        "signature",
+        "parent_envelope",
+        "to",
+    }
+    data = {k: v for k, v in data.items() if k in allowed_keys}
 
     return Envelope(**data)
-
-
-def parse_actor(data: dict | Actor | None) -> Actor | None:
-    if data is None or isinstance(data, Actor):
-        return data
-    return Actor(**data)
-
-
-def parse_issue(data: dict | Issue) -> Issue:
-    if isinstance(data, Issue):
-        return data
-    return Issue(**data)

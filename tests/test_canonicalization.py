@@ -2,7 +2,7 @@ import copy
 
 from dataclasses import fields
 from agentdna.helpers import canonicalize_envelope, _envelope_to_dict
-from agentdna.types import Actor, Envelope, Issue
+from agentdna.types import Envelope
 
 
 def create_envelope():
@@ -11,28 +11,10 @@ def create_envelope():
     canonicalization tests.
     """
     return Envelope(
-        from_=Actor(
-            id="bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
-            name="Alice",
-            type="human",
-            metadata={
-                "department": "Engineering",
-            },
-        ),
-        to=Actor(
-            id="bafybeig7r4m2l6s3v5kq9x8c1n0pahf6wzj2e4t7y8u9m3n5q6r1s2v4ya",
-            name="Bob",
-            type="agent",
-            metadata={
-                "model": "gpt-5",
-            },
-        ),
+        from_="bafybeihdwdcefgh4dqkjv67uzcmw7ojee6xedzdetojuzjevtenxquvyku",
+        to="bafybeig7r4m2l6s3v5kq9x8c1n0pahf6wzj2e4t7y8u9m3n5q6r1s2v4ya",
         payload="Hello World",
         epoch=1,
-        metadata={
-            "workflow_id": "1234",
-        },
-        issues=[],
     )
 
 
@@ -63,21 +45,6 @@ def test_payload_change_changes_digest():
     assert digest1 != digest2
 
 
-def test_metadata_change_changes_digest():
-    """
-    Ensures metadata mutations affect the digest.
-    """
-    envelope = create_envelope()
-
-    digest1 = canonicalize_envelope(envelope)
-
-    envelope.metadata["version"] = "1"
-
-    digest2 = canonicalize_envelope(envelope)
-
-    assert digest1 != digest2
-
-
 def test_sender_change_changes_digest():
     """
     Ensures sender changes affect the digest.
@@ -86,7 +53,7 @@ def test_sender_change_changes_digest():
 
     digest1 = canonicalize_envelope(envelope)
 
-    envelope.from_.id = "mallory"
+    envelope.from_ = "mallory"
 
     digest2 = canonicalize_envelope(envelope)
 
@@ -101,7 +68,7 @@ def test_recipient_change_changes_digest():
 
     digest1 = canonicalize_envelope(envelope)
 
-    envelope.to.id = "charlie"
+    envelope.to = "charlie"
 
     digest2 = canonicalize_envelope(envelope)
 
@@ -133,7 +100,7 @@ def test_parent_signature_changes_digest():
     parent.signature = "parent-signature"
 
     child = create_envelope()
-    child.parent_envelope = parent
+    child.parent_envelope = [parent]
 
     digest1 = canonicalize_envelope(child)
 
@@ -152,7 +119,7 @@ def test_parent_payload_changes_digest():
     parent = create_envelope()
 
     child = create_envelope()
-    child.parent_envelope = parent
+    child.parent_envelope = [parent]
 
     digest1 = canonicalize_envelope(child)
 
@@ -185,10 +152,10 @@ def test_grandparent_signature_changes_digest():
 
     parent = create_envelope()
     parent.signature = "parent-signature"
-    parent.parent_envelope = grandparent
+    parent.parent_envelope = [grandparent]
 
     child = create_envelope()
-    child.parent_envelope = parent
+    child.parent_envelope = [parent]
 
     digest1 = canonicalize_envelope(child)
 
@@ -207,12 +174,6 @@ def test_canonicalization_contains_all_envelope_fields():
     serialized dictionary.
     """
     envelope = create_envelope()
-    envelope.issues = [
-        Issue(
-            depth=1,
-            reason="Test issue",
-        )
-    ]
 
     result = _envelope_to_dict(envelope)
 
@@ -227,13 +188,6 @@ def test_canonicalization_contains_all_envelope_fields():
     }
 
     assert set(result.keys()) == expected_envelope_fields
-
-    assert set(result["from_"].keys()) == {field.name for field in fields(Actor)}
-
-    assert set(result["to"].keys()) == {field.name for field in fields(Actor)}
-
-    assert set(result["issues"][0].keys()) == {field.name for field in fields(Issue)}
-
 
 def test_current_signature_not_serialized():
     """

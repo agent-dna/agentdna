@@ -25,6 +25,7 @@ credentials/
 .claude/
 
 uv.lock
+.ruff_cache
 
 # Example specific
 

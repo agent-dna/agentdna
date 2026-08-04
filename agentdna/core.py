@@ -16,24 +16,30 @@ from .config import (
     get_default_config_dir,
     upsert_actor_registry_entry,
 )
+from .error import (
+    COCA_VERIFICATION_FAILED_LIGHT,
+    RESULT_OK,
+    COCA_VERIFICATION_FAILED_BOUNDARY,
+    COCA_VERIFICATION_FAILED_HEAVY,
+)
 from .id import get_agent_card_id, get_user_card_id
+from .log import configure_logging, get_logger
 from .provenance import Provenance
 from .types import (
     ACTOR_TYPE_AGENT,
-    ACTOR_TYPE_HUMAN,
+    ACTOR_TYPE_USER,
     CURRENT_VERSION,
+    VERIFY_BOUNDARY,
     VERIFY_HEAVY,
     VERIFY_LIGHT,
-    Actor,
     AgentCard,
     Envelope,
-    HandleResult,
     IntentWorkflow,
-    VerificationResult,
     supported_actors,
     supported_verification_modes,
 )
 from .verifier import (
+    verify_boundary,
     verify_heavy,
     verify_light,
 )
@@ -51,6 +57,8 @@ class AgentDNA:
         verification_mode: str = VERIFY_LIGHT,
         agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
+        log_level: str = "INFO",
+        log_format: str = "text",
     ):
         if name == "":
             raise NameError("'name' attribute cannot be empty")
@@ -68,8 +76,10 @@ class AgentDNA:
                 f"{supported_verification_modes}"
             )
         self.verification_mode = verification_mode
-
         self.api_key = api_key
+
+        configure_logging(log_level, log_format)
+        self.logger = get_logger("agentdna").bind(actor_name=name, actor_type=type)
 
         self.config_dir = config_dir if config_dir else get_default_config_dir()
         os.makedirs(
@@ -82,7 +92,11 @@ class AgentDNA:
             provenance_url=provenance_layer_url,
             api_key=api_key,
             config_path=self.config_dir,
+            logger=self.logger,
+            actor_type=type,
         )
+
+        self.logger = self.provenance.logger
 
         self.type = type
         self.name = name
@@ -98,7 +112,7 @@ class AgentDNA:
 
         if entry is not None:
             self.card_id = entry.actor_card_id
-        elif self.type == ACTOR_TYPE_HUMAN:
+        elif self.type == ACTOR_TYPE_USER:
             self.card_id = self.create_user_card()
         else:
             self.card_id = ""
@@ -108,8 +122,10 @@ class AgentDNA:
             if self.type == ACTOR_TYPE_AGENT:
                 self.__register_agent()
 
-            if self.type == ACTOR_TYPE_HUMAN:
+            if self.type == ACTOR_TYPE_USER:
                 self.__register_user()
+
+        self.logger.info("agentdna.init.success", card_id=self.card_id)
 
     def __validate_api_key(self) -> None:
         if self.api_key == "":
@@ -123,23 +139,35 @@ class AgentDNA:
 
         self.__validate_api_key()
 
-        response = requests.post(
-            urljoin(self.provenance.provenance_url, "/core/v1/register-user"),
-            json={
-                "user_id": self.get_actor_id(),
-            },
-            headers={
-                "X-API-Key": self.api_key,
-            },
-            timeout=300,
-        )
+        try:
+            response = requests.post(
+                urljoin(self.provenance.provenance_url, "/core/v1/register-user"),
+                json={
+                    "user_id": self.get_actor_id(),
+                },
+                headers={
+                    "X-API-Key": self.api_key,
+                },
+                timeout=300,
+            )
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            self.logger.error(
+                "agentdna.register_user.failed",
+                status_code=getattr(exc.response, "status_code", None),
+                error=str(exc),
+            )
+            raise
 
         data = response.json()
 
         if not data.get("status"):
-            raise RuntimeError(f"user registration failed: {data.get('message', '')}")
+            error_msg = data.get("message", "")
+            self.logger.error("agentdna.register_user.failed", error=error_msg)
+            raise RuntimeError(f"user registration failed: {error_msg}")
+
+        self.logger.info("agentdna.register_user.success")
 
     def __register_agent(self) -> None:
         """
@@ -156,40 +184,57 @@ class AgentDNA:
         if not policy_path.exists():
             raise FileNotFoundError(f"policy file not found: {policy_path}")
 
-        with open(
-            policy_path,
-            "rb",
-        ) as fp:
-            response = requests.post(
-                urljoin(self.provenance.provenance_url, "/core/v1/register-agent"),
-                data={
-                    "agent_name": self.name,
-                    "agent_id": self.get_actor_id(),
-                },
-                files={
-                    "policy": (
-                        policy_path.name,
-                        fp,
-                    )
-                },
-                headers={
-                    "X-API-Key": self.api_key,
-                },
-                timeout=300,
-            )
+        try:
+            with open(
+                policy_path,
+                "rb",
+            ) as fp:
+                response = requests.post(
+                    urljoin(self.provenance.provenance_url, "/core/v1/register-agent"),
+                    data={
+                        "agent_name": self.name,
+                        "agent_id": self.get_actor_id(),
+                    },
+                    files={
+                        "policy": (
+                            policy_path.name,
+                            fp,
+                        )
+                    },
+                    headers={
+                        "X-API-Key": self.api_key,
+                    },
+                    timeout=300,
+                )
 
-        response.raise_for_status()
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            self.logger.error(
+                "agentdna.register_agent.failed",
+                policy_path=str(policy_path),
+                status_code=getattr(exc.response, "status_code", None),
+                error=str(exc),
+            )
+            raise
 
         data = response.json()
 
         if not data.get("status"):
-            raise RuntimeError(f"agent registration failed: {data.get('message', '')}")
+            error_msg = data.get("message", "")
+            self.logger.error(
+                "agentdna.register_agent.failed",
+                policy_path=str(policy_path),
+                error=error_msg,
+            )
+            raise RuntimeError(f"agent registration failed: {error_msg}")
+
+        self.logger.info("agentdna.register_agent.success", policy_path=str(policy_path))
 
     def get_actor_id(self) -> str:
         return self.provenance.provenance_id
 
     def create_user_card(self) -> str:
-        if self.type != ACTOR_TYPE_HUMAN:
+        if self.type != ACTOR_TYPE_USER:
             raise ValueError("only human actors can create user cards")
 
         user_card_id = get_user_card_id(self.get_actor_id())
@@ -206,10 +251,14 @@ class AgentDNA:
             user_id=self.get_actor_id(),
         )
 
-        self.provenance.create_new_provenance_card(
-            card_id=user_card_id,
-            card_info=json.dumps(payload),
-        )
+        try:
+            self.provenance.create_new_provenance_card(
+                card_id=user_card_id,
+                card_info=json.dumps(payload),
+            )
+        except Exception as exc:
+            self.logger.error("agentdna.create_user_card.failed", error=str(exc))
+            raise
 
         upsert_actor_registry_entry(
             self.config_dir,
@@ -220,6 +269,7 @@ class AgentDNA:
             ),
         )
 
+        self.logger.info("agentdna.create_user_card.success", card_id=user_card_id)
         return user_card_id
 
     def create_agent_card_by_id(self, agent_id: str, policy_file: str | Path) -> str:
@@ -232,7 +282,7 @@ class AgentDNA:
         It skips actor_info.json config update
         """
 
-        if self.type != ACTOR_TYPE_HUMAN:
+        if self.type != ACTOR_TYPE_USER:
             raise ValueError("only human actors can create agent cards")
 
         policy_path = Path(policy_file)
@@ -259,8 +309,18 @@ class AgentDNA:
                 card_info=json.dumps(payload),
             )
         except Exception as exc:
+            self.logger.error(
+                "agentdna.create_agent_card_by_id.failed",
+                agent_id=agent_id,
+                error=str(exc),
+            )
             raise Exception(f"failed to create agent card, err: {exc}") from exc
 
+        self.logger.info(
+            "agentdna.create_agent_card_by_id.success",
+            agent_id=agent_id,
+            card_id=agent_card_id,
+        )
         return agent_card_id
 
     def create_agent_card(
@@ -275,7 +335,7 @@ class AgentDNA:
         agent cards.
         """
 
-        if self.type != ACTOR_TYPE_HUMAN:
+        if self.type != ACTOR_TYPE_USER:
             raise ValueError("only human actors can create agent cards")
 
         if agent.type != ACTOR_TYPE_AGENT:
@@ -314,6 +374,11 @@ class AgentDNA:
                 card_info=json.dumps(payload),
             )
         except Exception as exc:
+            self.logger.error(
+                "agentdna.create_agent_card.failed",
+                agent_id=agent.get_actor_id(),
+                error=str(exc),
+            )
             raise Exception(f"failed to create agent card, err: {exc}") from exc
 
         agent.card_id = agent_card_id
@@ -327,10 +392,15 @@ class AgentDNA:
             ),
         )
 
+        self.logger.info(
+            "agentdna.create_agent_card.success",
+            agent_id=agent.get_actor_id(),
+            card_id=agent_card_id,
+        )
         return agent_card_id
 
     def update_agent_policy_by_id(self, agent_id: str, policy_file: str | Path):
-        if self.type != ACTOR_TYPE_HUMAN:
+        if self.type != ACTOR_TYPE_USER:
             raise ValueError("only human actors can update agent policies")
 
         policy_path = Path(policy_file)
@@ -360,6 +430,11 @@ class AgentDNA:
                 card_info=json.dumps(asdict(actor_card)),
             )
         except Exception as exc:
+            self.logger.error(
+                "agentdna.update_agent_policy.failed",
+                agent_id=agent_id,
+                error=str(exc),
+            )
             raise RuntimeError(f"failed to update agent {agent_id} policy: {exc}") from exc
 
     def update_agent_policy(
@@ -372,100 +447,96 @@ class AgentDNA:
 
         self.update_agent_policy_by_id(agent.get_actor_id(), policy_file=policy_file)
 
-    def create_workflow_provenance(
+    def record(
         self,
         workflow: IntentWorkflow,
     ) -> str:
-        if self.type != ACTOR_TYPE_HUMAN:
-            raise RuntimeError("only users can create workflow provenance")
-
-        if self.card_id == "":
-            raise ValueError("failed to create workflow provenance as user Card is not created")
-
         if workflow.envelope is None:
             raise ValueError("workflow does not contain an envelope")
 
+        root_user_id = workflow.get_root_envelope_actor()
+        user_card_id = get_user_card_id(user_id=root_user_id)
+
         try:
             workflow_card_id = self.provenance.create_new_child_provenance_card(
-                parent_card_id=self.card_id,
-                card_info=json.dumps(asdict(workflow)),
+                parent_card_id=user_card_id,
+                card_info=workflow.seralize(),
+            )
+
+            self.logger.info(
+                "agentdna.record.success",
+                actor_name=self.name,
+                actor_id=self.get_actor_id(),
+                user_card_id=user_card_id,
+                workflow_card_id=workflow_card_id,
             )
 
             return workflow_card_id
         except Exception as exc:
+            self.logger.error("agentdna.record.failed", error=str(exc))
             raise RuntimeError(f"failed create workflow provenance, err: {exc}") from exc
 
     def build(
         self,
-        recipient_actor_id: str,
-        recipient_actor_name: str,
-        recipient_actor_type: str,
         payload: str,
-        verification_result: VerificationResult | None = None,
-        workflow: IntentWorkflow | None = None,
-        remarks: str = "",
-        from_actor: Actor | None = None,
+        previous_workflows: IntentWorkflow | list[IntentWorkflow] | None = None,
+        recipient_id: str = "",
+        verification_code: int = RESULT_OK,
     ) -> IntentWorkflow:
         """
         Creates and signs a new envelope and
-        returns the IntentWorklow
+        returns the IntentWorkflow
         """
+        epoch = int(datetime.now(timezone.utc).timestamp())
 
-        if recipient_actor_type not in supported_actors:
-            raise ValueError(
-                f"unsupported actor type: {recipient_actor_type},"
-                f"supported actor types: {supported_actors}"
-            )
-
-        from_ = from_actor or Actor(
-            id=self.get_actor_id(),
-            name=self.name,
-            type=self.type,
+        self.logger.info(
+            "agentdna.build.start",
+            recipient_id=recipient_id,
+            code=verification_code,
+            epoch=epoch,
         )
 
-        to = Actor(
-            id=recipient_actor_id,
-            name=recipient_actor_name,
-            type=recipient_actor_type,
-        )
-
-        parent_envelope = None
-
-        if workflow:
-            parent_envelope = workflow.envelope
-
-        envelope = Envelope(
-            from_=from_,
-            to=to,
+        current_envelope = Envelope(
+            from_=self.get_actor_id(),
             payload=payload,
-            metadata=self.metadata or {},
-            parent_envelope=parent_envelope,
-            epoch=int(datetime.now(timezone.utc).timestamp()),
+            epoch=epoch,
+            run_id="",  # TODO: Define IdP integration logic
+            code=verification_code,
+            to=recipient_id,
         )
 
-        if verification_result:
-            envelope.issues = verification_result.issues
+        if previous_workflows:
+            if isinstance(previous_workflows, IntentWorkflow):
+                previous_workflows = [previous_workflows]
 
-        signature = self.provenance.sign_envelope(envelope)
+            for prev_workflow in previous_workflows:
+                if prev_workflow.envelope:
+                    current_envelope.add_envelope(prev_workflow.envelope)
 
-        envelope.signature = signature
+        signature = self.provenance.sign_envelope(
+            current_envelope
+        )
+        current_envelope.signature = signature
 
-        if workflow is None:
-            workflow = IntentWorkflow(
-                type="intent_workflow",
-                version=CURRENT_VERSION,
-                remarks=remarks,
-                envelope=envelope,
-            )
-        else:
-            workflow.envelope = envelope
+        new_workflow = IntentWorkflow(
+            type="intent_workflow",
+            version=CURRENT_VERSION,
+        )
+        new_workflow.set_envelope(current_envelope)
 
-        return workflow
+        self.logger.info(
+            "agentdna.build.success",
+            recipient_id=recipient_id,
+            code=verification_code,
+            epoch=epoch,
+        )
 
-    def handle(
+        return new_workflow
+
+    def verify(
         self,
         workflow: IntentWorkflow,
-    ) -> HandleResult:
+    ) -> int:
         """
         Verifies an incoming workflow and returns
         the latest envelope.
@@ -478,16 +549,41 @@ class AgentDNA:
                 self.provenance,
                 workflow,
             )
+            if not verification:
+                self.logger.warning(
+                    "agentdna.verify.failed",
+                    verification_mode=self.verification_mode,
+                    code=COCA_VERIFICATION_FAILED_LIGHT,
+                )
+                return COCA_VERIFICATION_FAILED_LIGHT
+
         elif self.verification_mode == VERIFY_HEAVY:
             verification = verify_heavy(
                 self.provenance,
                 workflow,
             )
+            if not verification:
+                self.logger.warning(
+                    "agentdna.verify.failed",
+                    verification_mode=self.verification_mode,
+                    code=COCA_VERIFICATION_FAILED_HEAVY,
+                )
+                return COCA_VERIFICATION_FAILED_HEAVY
+
+        elif self.verification_mode == VERIFY_BOUNDARY:
+            verification = verify_boundary(
+                self.provenance,
+                workflow,
+            )
+            if not verification:
+                self.logger.warning(
+                    "agentdna.verify.failed",
+                    verification_mode=self.verification_mode,
+                    code=COCA_VERIFICATION_FAILED_BOUNDARY,
+                )
+                return COCA_VERIFICATION_FAILED_BOUNDARY
         else:
             raise ValueError(f"unsupported verification mode {self.verification_mode}")
 
-        return HandleResult(
-            workflow=workflow,
-            envelope=workflow.envelope,
-            verification=verification,
-        )
+        self.logger.info("agentdna.verify.success", verification_mode=self.verification_mode)
+        return RESULT_OK
