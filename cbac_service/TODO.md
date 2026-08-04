@@ -70,3 +70,4 @@ after the core is validated against real workflows.
       (`interaction_id` → cached scores) if the threat model tightens.
 - [ ] No CI for `cbac_service/tests/` — the root workflow only runs the
       library's `tests/`.
+- [ ] Add Readme

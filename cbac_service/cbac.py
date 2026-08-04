@@ -12,6 +12,7 @@ from typing import Any
 
 import numpy as np
 import requests
+import structlog
 from sentence_transformers import SentenceTransformer
 
 from agentdna.id import get_id
@@ -40,6 +41,8 @@ from cbac_service.skills import (
 )
 
 # TODO:- Fix return types in CBAC class
+
+logger = structlog.get_logger("cbac_service.cbac")
 
 
 def _policy_hash(policy: str) -> str:
@@ -192,7 +195,7 @@ class CBAC:
                 try:
                     return self._flatten_policy_chunks(parse_skill_md(policy))
                 except Exception:
-                    pass
+                    logger.debug("policy frontmatter unparseable, chunking as plain text")
             return chunk_body_text(policy)
         if isinstance(policy, dict):
             return _flatten_mapping(policy)
@@ -264,6 +267,7 @@ class CBAC:
             with path.open("rb") as f:
                 return pickle.load(f)
         except Exception:
+            logger.warning("policy embedding cache unreadable", path=str(path), exc_info=True)
             return None
 
     def check_policy_embedding_exists(self, agent_id: str) -> dict[str, Any] | None:
@@ -580,6 +584,7 @@ class CBAC:
                     self.hallucination_score, user_intent, intent_text
                 )
             except Exception:
+                logger.warning("hallucination scoring failed", decision=decision, exc_info=True)
                 hallucination = None
 
         return CBACResult(
@@ -675,7 +680,8 @@ class CBAC:
         with self._trust_store_path.open("w") as f:
             json.dump(store, f, indent=2)
 
-    #TODO:- Verify writing provenance card. 
+    # TODO:- Verify writing provenance card.
+    # Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously
     def compute_lhi(
         self,
         agent_id: str,

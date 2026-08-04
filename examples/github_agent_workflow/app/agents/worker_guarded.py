@@ -188,6 +188,7 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
     agent = create_react_agent(make_llm(temperature=0.0), tools, prompt=WORKER_SYSTEM)
 
     root = get_root_envelope(handle_result.workflow)
+    
     with cbac_context(agent_id=dna.get_actor_id(), user_intent=(root.payload if root else "")):
         result = await agent.ainvoke({"messages": [HumanMessage(content=task_spec)]})
 

@@ -16,6 +16,13 @@ app that the library's guard calls over HTTP. All the ML deps live here;
   `ENCODER_MODEL`, `LHI_WEIGHTS`, …). Change a value here and redeploy.
 - `chunking.py` — structure-aware policy-text chunking (`chunk_body_text`).
 - `skills.py` — `skill.md` parsing + the CBAC result dataclasses.
+- `logging_config.py` — `setup_logging()`: structlog + stdlib both render as
+  one JSON object per line (uvicorn's access/error logs included). Level from
+  `CBAC_SERVICE_LOG_LEVEL` (default `INFO`). `main.py` calls it at import and
+  binds `request_id` / `agent_id` into `structlog.contextvars` per request, so
+  every line the pipeline emits while handling that request carries them —
+  don't thread those through call signatures. `uvicorn.run` passes
+  `log_config=None` so uvicorn doesn't re-install its own handlers.
 - **Not published as a wheel** (`[tool.uv] package = false`). Deployed from a
   checkout: `uvicorn cbac_service.main:app`.
 - One endpoint: **`POST /authorize-cbac`**. Returns the reason as the body and
