@@ -17,13 +17,14 @@ from .config import (
     upsert_actor_registry_entry,
 )
 from .error import (
-    COCA_VERIFICATION_FAILED_LIGHT,
-    RESULT_OK,
     COCA_VERIFICATION_FAILED_BOUNDARY,
     COCA_VERIFICATION_FAILED_HEAVY,
+    COCA_VERIFICATION_FAILED_LIGHT,
+    RESULT_OK,
 )
 from .id import get_agent_card_id, get_user_card_id
 from .log import configure_logging, get_logger
+from .origination import originate
 from .provenance import Provenance
 from .types import (
     ACTOR_TYPE_AGENT,
@@ -57,6 +58,7 @@ class AgentDNA:
         verification_mode: str = VERIFY_LIGHT,
         agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
+        run_id: str = "",
         log_level: str = "INFO",
         log_format: str = "text",
     ):
@@ -101,6 +103,7 @@ class AgentDNA:
         self.type = type
         self.name = name
         self.metadata = metadata or {}
+        self.run_id = run_id
         self.__agent_policy_path = agent_policy_file
 
         # Check from local config dir, if the actor card
@@ -126,6 +129,24 @@ class AgentDNA:
                 self.__register_user()
 
         self.logger.info("agentdna.init.success", card_id=self.card_id)
+
+    @classmethod
+    def login(
+        cls,
+        *,
+        api_key: str | None = None,
+        auth_server_url: str | None = None,
+        timeout: float = 300,
+        **kwargs,
+    ) -> "AgentDNA":
+        """
+        Log in a human actor via the identity-binding-service (IBS) and return an AgentDNA instance.
+
+        """
+        run_id, email = originate(auth_server_url=auth_server_url, timeout=timeout)
+        if api_key is None:
+            api_key = os.environ.get("AGENTDNA_API_KEY", "")
+        return cls(name=email, type=ACTOR_TYPE_USER, api_key=api_key, run_id=run_id, **kwargs)
 
     def __validate_api_key(self) -> None:
         if self.api_key == "":
@@ -500,7 +521,6 @@ class AgentDNA:
             from_=self.get_actor_id(),
             payload=payload,
             epoch=epoch,
-            run_id="",  # TODO: Define IdP integration logic
             code=verification_code,
             to=recipient_id,
         )
@@ -512,6 +532,11 @@ class AgentDNA:
             for prev_workflow in previous_workflows:
                 if prev_workflow.envelope:
                     current_envelope.add_envelope(prev_workflow.envelope)
+
+        if current_envelope.parent_envelope:
+            current_envelope.run_id = current_envelope.parent_envelope[0].run_id
+        else:
+            current_envelope.run_id = self.run_id
 
         signature = self.provenance.sign_envelope(
             current_envelope
