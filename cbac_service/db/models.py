@@ -28,9 +28,7 @@ class PolicyChunk(Base):
     section: Mapped[str | None] = mapped_column(String, nullable=True)
     chunk_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
-    __table_args__ = (
-        Index("ix_policy_chunks_agent_hash", "agent_id", "policy_hash"),
-    )
+    __table_args__ = (Index("ix_policy_chunks_agent_hash", "agent_id", "policy_hash"),)
 
     def __repr__(self) -> str:
         return (
@@ -63,9 +61,7 @@ class PolicyMeta(Base):
         default=lambda: datetime.now(timezone.utc),
     )
 
-    __table_args__ = (
-        UniqueConstraint("agent_id", name="uq_policy_meta_agent_id"),
-    )
+    __table_args__ = (UniqueConstraint("agent_id", name="uq_policy_meta_agent_id"),)
 
     def __repr__(self) -> str:
         return (

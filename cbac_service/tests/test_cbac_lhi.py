@@ -9,10 +9,6 @@ from agentdna.id import get_id
 from cbac_service.cbac import CBAC
 from cbac_service.config import LHI_LAMBDA_DOWN, LHI_LAMBDA_UP, LHI_WEIGHTS
 
-_LHI_WEIGHTS = LHI_WEIGHTS
-_LHI_LAMBDA_UP = LHI_LAMBDA_UP
-_LHI_LAMBDA_DOWN = LHI_LAMBDA_DOWN
-
 SCORES = {
     "intent_score": 0.9,
     "policy_score": 0.8,
@@ -21,12 +17,9 @@ SCORES = {
 }
 
 
-def geometric_mean(intent_score, policy_score, hallucination_score, output_score):
+def weighted_mean(intent_score, policy_score, hallucination_score, output_score):
     values = (intent_score, policy_score, hallucination_score, output_score)
-    s = 1.0
-    for value, weight in zip(values, _LHI_WEIGHTS, strict=False):
-        s *= value**weight
-    return s
+    return sum(value * weight for value, weight in zip(values, LHI_WEIGHTS, strict=True))
 
 
 def make_cbac(tmp_path):
@@ -43,10 +36,10 @@ def make_cbac(tmp_path):
     return CBAC(provenance=provenance), calls  # type: ignore[arg-type]
 
 
-def test_first_interaction_returns_geometric_mean(tmp_path):
+def test_first_interaction_returns_weighted_mean(tmp_path):
     cbac, _ = make_cbac(tmp_path)
     trust = cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
-    assert trust == pytest.approx(geometric_mean(**SCORES))
+    assert trust == pytest.approx(weighted_mean(**SCORES))
 
 
 def test_improving_scores_raise_trust_slowly(tmp_path):
@@ -54,8 +47,8 @@ def test_improving_scores_raise_trust_slowly(tmp_path):
     low = {k: 0.5 for k in SCORES}
     prev = cbac.compute_lhi("did:agent", "github_tool", "tool", **low)
     trust = cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
-    s = geometric_mean(**SCORES)
-    assert trust == pytest.approx(_LHI_LAMBDA_UP * prev + (1 - _LHI_LAMBDA_UP) * s)
+    s = weighted_mean(**SCORES)
+    assert trust == pytest.approx(LHI_LAMBDA_UP * prev + (1 - LHI_LAMBDA_UP) * s)
     assert prev < trust < s
 
 
@@ -64,14 +57,18 @@ def test_degrading_scores_drop_trust_fast(tmp_path):
     prev = cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
     low = {k: 0.2 for k in SCORES}
     trust = cbac.compute_lhi("did:agent", "github_tool", "tool", **low)
-    assert trust == pytest.approx(_LHI_LAMBDA_DOWN * prev + (1 - _LHI_LAMBDA_DOWN) * 0.2)
+    assert trust == pytest.approx(LHI_LAMBDA_DOWN * prev + (1 - LHI_LAMBDA_DOWN) * 0.2)
     assert trust < prev
 
 
-def test_zero_component_zeroes_instantaneous_score(tmp_path):
+def test_zero_component_costs_exactly_its_weight(tmp_path):
+    """A failed call (output=0) lowers s by w_output, not to 0 — a transient
+    tool failure must not annihilate an otherwise compliant interaction."""
     cbac, _ = make_cbac(tmp_path)
-    scores = dict(SCORES, policy_score=0.0)
-    assert cbac.compute_lhi("did:agent", "github_tool", "tool", **scores) == 0.0
+    failed = dict(SCORES, output_score=0.0)
+    trust = cbac.compute_lhi("did:agent", "github_tool", "tool", **failed)
+    assert trust == pytest.approx(weighted_mean(**SCORES) - LHI_WEIGHTS[3] * 1.0)
+    assert trust > 0.0
 
 
 def test_out_of_range_score_raises(tmp_path):
@@ -89,20 +86,37 @@ def test_trust_is_tracked_per_callee_edge(tmp_path):
     assert trust_other == pytest.approx(0.5)
 
 
+def test_same_name_different_type_are_separate_edges(tmp_path):
+    """callee_name + type is the unique key: the same name with a different
+    type is a distinct edge, so it starts a fresh trust/score history."""
+    cbac, _ = make_cbac(tmp_path)
+    cbac.compute_lhi("did:agent", "helper", "tool", **SCORES)
+    low = {k: 0.5 for k in SCORES}
+    trust_agent = cbac.compute_lhi("did:agent", "helper", "agent", **low)
+    assert trust_agent == pytest.approx(0.5)  # first interaction for helper:agent
+
+    callees = json.loads((tmp_path / "trust_scores.json").read_text())["did:agent"]["callees"]
+    assert set(callees) == {"helper:tool", "helper:agent"}
+    assert len(callees["helper:tool"]["scores"]) == 1
+    assert len(callees["helper:agent"]["scores"]) == 1
+
+
 def test_store_round_trips_across_instances(tmp_path):
     cbac, _ = make_cbac(tmp_path)
     prev = cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
 
     fresh, _ = make_cbac(tmp_path)
     trust = fresh.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
-    s = geometric_mean(**SCORES)
-    assert trust == pytest.approx(_LHI_LAMBDA_UP * prev + (1 - _LHI_LAMBDA_UP) * s)
+    s = weighted_mean(**SCORES)
+    assert trust == pytest.approx(LHI_LAMBDA_UP * prev + (1 - LHI_LAMBDA_UP) * s)
 
     store = json.loads((tmp_path / "trust_scores.json").read_text())
-    entry = store["did:agent"]["callees"]["github_tool"]
+    entry = store["did:agent"]["callees"]["github_tool:tool"]
     assert entry["type"] == "tool"
     assert entry["trust"] == pytest.approx(trust)
-    assert set(entry["scores"]) == {"intent", "policy", "hallucination", "output"}
+    # scores is an appended history — one entry per interaction (two here).
+    assert len(entry["scores"]) == 2
+    assert set(entry["scores"][-1]) == {"intent", "policy", "hallucination", "output", "at"}
 
 
 def test_provenance_card_created_then_appended(tmp_path):
@@ -110,7 +124,7 @@ def test_provenance_card_created_then_appended(tmp_path):
     cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
     cbac.compute_lhi("did:agent", "slack_agent", "agent", **SCORES)
 
-    expected_card = get_id("did:agent:lhi")
+    expected_card = get_id("did:agent:cbac")
     assert [(op, card) for op, card, _ in calls] == [
         ("create", expected_card),
         ("append", expected_card),
@@ -118,7 +132,7 @@ def test_provenance_card_created_then_appended(tmp_path):
     record = json.loads(calls[1][2])
     assert record["type"] == "lhi_record"
     assert record["callee"] == {"name": "slack_agent", "type": "agent"}
-    assert record["trust"] == pytest.approx(geometric_mean(**SCORES))
+    assert record["trust"] == pytest.approx(weighted_mean(**SCORES))
 
 
 def test_chain_failure_raises_but_keeps_local_update(tmp_path):
@@ -132,8 +146,8 @@ def test_chain_failure_raises_but_keeps_local_update(tmp_path):
         cbac.compute_lhi("did:agent", "github_tool", "tool", **SCORES)
 
     store = json.loads((tmp_path / "trust_scores.json").read_text())
-    assert store["did:agent"]["callees"]["github_tool"]["trust"] == pytest.approx(
-        geometric_mean(**SCORES)
+    assert store["did:agent"]["callees"]["github_tool:tool"]["trust"] == pytest.approx(
+        weighted_mean(**SCORES)
     )
 
 

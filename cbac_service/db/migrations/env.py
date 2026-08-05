@@ -5,12 +5,10 @@ import sys
 from logging.config import fileConfig
 from pathlib import Path
 
+from alembic import context
 from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
-
-from alembic import context
-
 
 _repo_root = str(Path(__file__).resolve().parents[3])
 if _repo_root not in sys.path:

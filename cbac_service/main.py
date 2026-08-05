@@ -1,7 +1,9 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
+from uuid import uuid4
 
+import structlog
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -9,8 +11,12 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from agentdna.provenance import Provenance
 from cbac_service.cbac import CBAC
 from cbac_service.db.engine import close_db, get_session, init_db
+from cbac_service.logging_config import setup_logging
 
 # ── App lifecycle ──────────────────────────────────────────────────────────────
+
+setup_logging()
+logger = structlog.get_logger("cbac_service.api")
 
 _cbac: CBAC | None = None
 
@@ -26,6 +32,16 @@ def _get_cbac() -> CBAC:
     return _cbac
 
 
+def _bind_request_context(body: dict) -> None:
+    """Bind the request identity so every log line from the decision pipeline
+    below carries it without threading it through the call chain."""
+    structlog.contextvars.clear_contextvars()
+    structlog.contextvars.bind_contextvars(
+        request_id=uuid4().hex[:12],
+        agent_id=body.get("agent_id", ""),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup: init DB engine. Shutdown: close connection pool."""
@@ -35,7 +51,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
-
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
@@ -61,6 +76,7 @@ async def authorize_cbac(request: Request) -> PlainTextResponse:
     ``/compute-lhi`` once it knows whether the action succeeded.
     """
     body = await request.json()
+    _bind_request_context(body)
 
     headers = {}
     try:
@@ -79,8 +95,17 @@ async def authorize_cbac(request: Request) -> PlainTextResponse:
         ):
             if score is not None:
                 headers[header] = str(score)
+        logger.info(
+            "cbac decision",
+            decision=decision,
+            reason=reason,
+            intent_score=result.intent_score,
+            policy_score=result.policy_score,
+            hallucination_score=result.hallucination_score,
+        )
     except Exception as exc:
         decision, reason = "error", str(exc)
+        logger.exception("cbac authorization failed")
 
     return PlainTextResponse(reason, headers={"X-CBAC-Decision": decision, **headers})
 
@@ -94,6 +119,7 @@ async def compute_lhi(request: Request) -> JSONResponse:
     from whether the action actually succeeded.
     """
     body = await request.json()
+    _bind_request_context(body)
 
     try:
         # compute_lhi is sync and writes to the Provenance Layer — off the loop.
@@ -108,8 +134,10 @@ async def compute_lhi(request: Request) -> JSONResponse:
             output_score=body.get("output_score"),
         )
     except Exception as exc:
+        logger.exception("lhi update failed", callee_name=body.get("callee_name", ""))
         return JSONResponse({"error": str(exc)}, status_code=500)
 
+    logger.info("lhi trust updated", callee_name=body.get("callee_name", ""), trust=trust)
     return JSONResponse({"trust": trust})
 
 
@@ -143,4 +171,6 @@ if __name__ == "__main__":
         app,
         host=os.environ.get("CBAC_SERVICE_HOST", "127.0.0.1"),
         port=int(os.environ.get("CBAC_SERVICE_PORT", "8767")),
+        # None = keep our JSON config; uvicorn's default would re-add its own handlers.
+        log_config=None,
     )

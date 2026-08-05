@@ -2,8 +2,6 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
-import pickle
 from collections.abc import Callable
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -12,6 +10,7 @@ from typing import Any
 
 import numpy as np
 import requests
+import structlog
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,6 +45,10 @@ from cbac_service.skills import (
     _intended_action_text,
     parse_skill_md,
 )
+
+# TODO:- Fix return types in CBAC class
+
+logger = structlog.get_logger("cbac_service.cbac")
 
 
 def _policy_hash(policy: str) -> str:
@@ -198,7 +201,7 @@ class CBAC:
                 try:
                     return self._flatten_policy_chunks(parse_skill_md(policy))
                 except Exception:
-                    pass
+                    logger.debug("policy frontmatter unparseable, chunking as plain text")
             return chunk_body_text(policy)
         if isinstance(policy, dict):
             return _flatten_mapping(policy)
@@ -272,9 +275,7 @@ class CBAC:
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
 
-        allowed_chunks, forbidden_chunks = await asyncio.to_thread(
-            self._classify_chunks, chunks
-        )
+        allowed_chunks, forbidden_chunks = await asyncio.to_thread(self._classify_chunks, chunks)
 
         # Encode all chunks.
         all_chunks = allowed_chunks + forbidden_chunks
@@ -528,6 +529,7 @@ class CBAC:
                     self.hallucination_score, user_intent, intent_text
                 )
             except Exception:
+                logger.warning("hallucination scoring failed", decision=decision, exc_info=True)
                 hallucination = None
 
         return CBACResult(
@@ -582,8 +584,32 @@ class CBAC:
 
         return resp
 
+    # The LHI trust store — one JSON object per agent, keyed by agent DID.
+    # `callees` holds one entry per unique (callee_name + type) edge: the full
+    # history of per-interaction scores (appended each time) plus the EMA trust
+    # carried across them. The append-only chain history lives on the agent's
+    # CBAC provenance card (`{agent_id}:cbac`); this file is only the working
+    # copy of the current state.
+    #
+    #   {
+    #     "<agent_did>": {
+    #       "callees": {
+    #         "<callee_name>:<type>": {              # unique edge identifier
+    #           "callee_name": "<callee_name>",
+    #           "type": "tool" | "agent" | "mcp" | "app",
+    #           "scores": [                          # appended per interaction
+    #             {"intent": 0.9, "policy": 0.8,
+    #              "hallucination": 0.95, "output": 1.0, "at": "<iso8601>"}
+    #           ],
+    #           "trust": 0.87,                       # EMA over interactions
+    #           "updated_at": "<iso8601>"
+    #         }
+    #       }
+    #     }
+    #   }
+    #
     # TODO:- Replace trust file by light db.
-    # Fix LHI store structure.
+    # Write Action?
     @property
     def _trust_store_path(self) -> Path:
         return Path(self.provenance.config_dir) / TRUST_STORE_FILE
@@ -599,6 +625,8 @@ class CBAC:
         with self._trust_store_path.open("w") as f:
             json.dump(store, f, indent=2)
 
+    # TODO:- Verify writing provenance card.
+    # Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously
     def compute_lhi(
         self,
         agent_id: str,
@@ -609,23 +637,27 @@ class CBAC:
         hallucination_score: float,
         output_score: float,
     ) -> float:
-        """Update and return the LHI trust score for one (agent → callee) edge.
+        """Update and return the LHI (Local Heuristic Intelligence) trust
+        score for one (agent → callee) edge.
 
         Called *after* the interaction executed, once all four per-interaction
         scores (each in [0, 1], higher is better) are known:
 
-        1. Instantaneous quality ``s`` = weighted geometric mean of the four
-           scores — non-compensatory, so a single near-zero component drags
-           ``s`` toward zero regardless of the others.
+        1. Instantaneous quality ``s`` = weighted **arithmetic** mean of the
+           four scores — the expected quality of the interaction. Deliberately
+           compensatory: hard constraints are already enforced by the
+           allow/deny gates *before* execution, and this update only ever sees
+           interactions that passed them, so the reputation's job is unbiased
+           longitudinal estimation, not constraint enforcement.
         2. Asymmetric EMA against the stored trust for this edge:
            ``T = λ·T_prev + (1−λ)·s`` with λ = ``lhi_lambda_up`` when improving
            (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
            drops fast). First interaction with a callee: ``T = s``.
 
         The full record (callee, all four scores, trust) is persisted locally
-        under the config dir and appended to a dedicated per-agent LHI card on
-        the Provenance Layer (created on first write), so the trust history is
-        independently verifiable on-chain. Trust never overrides the per-
+        under the config dir and appended to a dedicated per-agent CBAC card
+        (``{agent_id}:cbac``) on the Provenance Layer (created on first write),
+        so the trust history is independently verifiable on-chain. Trust never overrides the per-
         interaction allow/deny gates — it is read pre-execution only to
         arbitrate the inconclusive ("advise") band.
         """
@@ -639,14 +671,17 @@ class CBAC:
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{key}_score must be in [0, 1], got {value}")
 
-        # TODO: should this be a geometric mean?
-        s = 1.0
-        for value, weight in zip(scores.values(), self._lhi_weights, strict=False):
-            s *= value**weight
+        s = sum(
+            value * weight for value, weight in zip(scores.values(), self._lhi_weights, strict=True)
+        )
 
         store = self._load_trust_store()
+        is_new_agent = agent_id not in store
         agent_entry = store.setdefault(agent_id, {"callees": {}})
-        prev_entry = agent_entry["callees"].get(callee_name)
+
+        # callee_name + type is the unique edge identifier.
+        edge_key = f"{callee_name}:{callee_type}"
+        prev_entry = agent_entry["callees"].get(edge_key)
 
         if prev_entry is None:
             trust = s
@@ -655,44 +690,45 @@ class CBAC:
             lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
             trust = lam * prev + (1 - lam) * s
 
+        updated_at = datetime.now(timezone.utc).isoformat()
         record = {
             "type": "lhi_record",
             "agent_id": agent_id,
             "callee": {"name": callee_name, "type": callee_type},
             "scores": scores,
             "trust": trust,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": updated_at,
         }
 
-        agent_entry["callees"][callee_name] = {
-            "type": callee_type,
-            "scores": scores,
-            "trust": trust,
-            "updated_at": record["updated_at"],
-        }
+        # New (callee_name + type) -> a fresh entry; existing one -> append this
+        # iteration's scores to its history and update the rolling trust.
+        entry = agent_entry["callees"].setdefault(
+            edge_key,
+            {"callee_name": callee_name, "type": callee_type, "scores": []},
+        )
+        entry["scores"].append({**scores, "at": updated_at})
+        entry["trust"] = trust
+        entry["updated_at"] = updated_at
 
         # Local store is the working copy; the chain is the audit log. Persist
         # locally first so a chain failure never loses the trust update.
-        lhi_card_id = agent_entry.get("lhi_card_id")
-        is_new_card = lhi_card_id is None
-        if is_new_card:
-            lhi_card_id = get_id(f"{agent_id}:lhi")
-            agent_entry["lhi_card_id"] = lhi_card_id
+        cbac_did = f"{agent_id}:cbac"
+        card_id = get_id(cbac_did)
         self._save_trust_store(store)
 
         try:
-            if is_new_card:
+            if is_new_agent:
                 self.provenance.create_new_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+                    card_id=card_id, card_info=json.dumps(record)
                 )
             else:
                 self.provenance.append_to_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+                    card_id=card_id, card_info=json.dumps(record)
                 )
         except Exception as exc:
             raise RuntimeError(
                 f"LHI record for agent {agent_id} saved locally but failed to "
-                f"write to provenance card {lhi_card_id}: {exc}"
+                f"write to provenance card {card_id}: {exc}"
             ) from exc
 
         return trust

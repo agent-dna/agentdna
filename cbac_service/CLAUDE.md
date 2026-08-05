@@ -17,8 +17,6 @@ app that the library's guard calls over HTTP. All the ML deps live here;
   redeploy.
 - `chunking.py` — structure-aware policy-text chunking (`chunk_body_text`).
 - `skills.py` — `skill.md` parsing + the CBAC result dataclasses.
-- `db/` — SQLAlchemy ORM models, async engine, repository layer, and search
-  functions (pgvector + pg_textsearch).
 - **Not published as a wheel** (`[tool.uv] package = false`). Deployed from a
   checkout: `uvicorn cbac_service.main:app`.
 - Endpoints:
@@ -84,7 +82,8 @@ install it. Work from inside `cbac_service/`:
 - `uv sync` — dev install. `[tool.uv.sources]` resolves `agent-dna` from the
   sibling checkout (`path = "..", editable`), so library edits are picked up live.
 - `uv sync --no-sources` — deploy install, resolving `agent-dna` from PyPI.
-- `uv run pytest` — runs `tests/`.
+- `uv run pytest` — runs `tests/` (its own `[tool.pytest.ini_options]`,
+  `pythonpath = [".."]`). The root `pytest` does not reach these tests.
 - `transformers` is pinned `<5` on purpose — HHEM-2.1's remote code
   (`hallucination_score`) breaks on transformers 5.x. Don't loosen it.
 
@@ -135,5 +134,5 @@ Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
   (`lhi_weights`), then folds it into a stored trust value via an **asymmetric
   EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**. Any
   zero component zeroes the instantaneous score. Trust is tracked **per
-  caller→callee edge** and persisted in `trust_store_file` under the config dir
-  + appended to a provenance card on-chain.
+  caller→callee edge** and persisted in `trust_store_file` under the config dir. The LHI math is covered by `tests/test_cbac_lhi.py`; score
+  attachment by `tests/test_cbac_verify.py` — keep both green when touching it.

@@ -5,6 +5,7 @@ venv/
 .DS_Store
 .vscode/
 .venv/
+.ruff_cache/
 
 dist/
 build/

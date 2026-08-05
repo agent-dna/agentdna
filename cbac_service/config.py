@@ -33,8 +33,10 @@ DENY_GAP = 0.08
 ENTAILMENT_THRESHOLD = 0.55
 CONTRADICTION_THRESHOLD = 0.60
 
-# LHI: weighted geometric mean of (intent, policy, hallucination, output) scores,
-# then an asymmetric EMA against the stored trust — slow to build, fast to lose.
+# LHI (Local Heuristic Intelligence): weighted arithmetic mean of the
+# (intent, policy, hallucination, output) scores — expected interaction quality;
+# the allow/deny gates already enforce the hard constraints pre-execution —
+# then an asymmetric EMA against the stored trust: slow to build, fast to lose.
 LHI_WEIGHTS: tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
 LHI_LAMBDA_UP = 0.95
 LHI_LAMBDA_DOWN = 0.70

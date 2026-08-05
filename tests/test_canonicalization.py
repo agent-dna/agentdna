@@ -1,7 +1,7 @@
 import copy
-
 from dataclasses import fields
-from agentdna.helpers import canonicalize_envelope, _envelope_to_dict
+
+from agentdna.helpers import _envelope_to_dict, canonicalize_envelope
 from agentdna.types import Actor, Envelope, Issue
 
 
