@@ -1,5 +1,24 @@
 # Tunables for the CBAC decision pipeline (cbac_service/cbac.py).
 
+import os
+
+# ── Database ──────────────────────────────────────────────────────────────────
+# Async Postgres connection string (asyncpg driver).
+# Override via environment variable for deployment.
+DATABASE_URL: str = os.environ.get(
+    "DATABASE_URL",
+    "postgresql+asyncpg://madhavbaidya@localhost:5432/cbac",
+)
+
+# pgvector index type: "hnsw" (low-latency, moderate data) or "ivfflat" (large scale).
+VECTOR_INDEX_TYPE: str = os.environ.get("VECTOR_INDEX_TYPE", "hnsw")
+
+# Hybrid search: enable BM25 fusion alongside vector cosine.
+HYBRID_SEARCH_ENABLED: bool = os.environ.get("HYBRID_SEARCH_ENABLED", "true").lower() == "true"
+
+# Reciprocal Rank Fusion constant (higher = less aggressive re-ranking).
+RRF_K: int = int(os.environ.get("RRF_K", "60"))
+
 # Models
 ENCODER_MODEL = "BAAI/bge-small-en-v1.5"  # bi-encoder for Tier 1 cosine
 NLI_MODEL = "cross-encoder/nli-deberta-v3-small"  # NLI for classify + Tier 2
