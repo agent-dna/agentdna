@@ -538,9 +538,7 @@ class AgentDNA:
         else:
             current_envelope.run_id = self.run_id
 
-        signature = self.provenance.sign_envelope(
-            current_envelope
-        )
+        signature = self.provenance.sign_envelope(current_envelope)
         current_envelope.signature = signature
 
         new_workflow = IntentWorkflow(
