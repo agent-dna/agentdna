@@ -45,36 +45,7 @@ This provides:
 
 ## Core Data Structures
 
-AgentDNA revolves around three core data structures.
-
-### Actor
-
-Every participant in a workflow is represented by an `Actor`.
-
-An Actor represents the digital identity of a participant involved in a workflow. AgentDNA currently supports three Actor types:
-
-* `human`
-* `agent`
-* `app`
-
-Each Actor contains:
-
-```json
-{
-  "id": "bafybmifqa6ctol2tl5lksiufnnijfpcwhnocukud5bncbd55bbsfvn7upy",
-  "name": "CoordinatorAgent",
-  "type": "agent",
-  "metadata": {}
-}
-```
-
-| Field      | Description                      |
-| ---------- | -------------------------------- |
-| `id`       | Globally unique Actor identifier |
-| `name`     | Human-readable Actor name        |
-| `type`     | `human`, `agent` or `app`        |
-| `metadata` | Optional Actor-specific metadata |
-
+AgentDNA revolves around the following core Data Structures.
 
 ### Envelope
 
@@ -84,37 +55,24 @@ Every Envelope is digitally signed by the sender and references its parent Envel
 
 ```json
 {
-  "from": {
-    "id": "...",
-    "name": "CoordinatorAgent",
-    "type": "agent",
-    "metadata": {}
-  },
-  "to": {
-    "id": "...",
-    "name": "WorkerAgent",
-    "type": "agent",
-    "metadata": {}
-  },
+  "from": "ID of the actor building the envelope",
+  "to": "(Optional) ID of the actor who is recieving the envelope",
   "payload": "{\"action\":\"produce_task_spec\"}",
-  "epoch": 1782668362,
-  "metadata": {},
-  "signature": "3046022100...",
-  "issues": [],
-  "parent_envelope": { ... }
+  "epoch": "Unix timestamp of Envelope formation",
+  "code": "Represents the status code for errors occured while the envelope was formed",
+  "signature": "Hex encoded signature by the actor building the envelope",
+  "parent_envelope": "List of Envelopes upon which the current envelope is being built upon"
 }
 ```
 
-| Field             | Description                                |
-| ----------------- | ------------------------------------------ |
-| `from`            | Sender Actor                               |
-| `to`              | Recipient Actor                            |
-| `payload`         | Action or message exchanged between Actors |
-| `epoch`           | Unix timestamp                             |
-| `metadata`        | Optional metadata                          |
-| `signature`       | Digital signature over the Envelope        |
-| `issues`          | Verification or authorization findings     |
-| `parent_envelope` | Previous Envelope in the workflow          |
+Following are the supported status code:
+
+| Codes      | Description                                             |
+| ---------- | ------------------------------------------------------- |
+| 1000       | No issues found                                         |
+| 2001       | Envelope verification failed under `light` mode         |
+| 2002       | Envelope verification failed under `heavy` mode         |
+| 2003       | Envelope verification failed under `boundary` mode      |
 
 ---
 
@@ -133,44 +91,22 @@ For example:
   "remarks": "",
   "info": {},
   "envelope": {
-    "from": {
-      "id": "worker_actor_id",
-      "name": "WorkerAgent",
-      "type": "agent",
-      "metadata": {}
-    },
-    "to": {
-      "id": "coordinator_actor_id",
-      "name": "CoordinatorAgent",
-      "type": "agent",
-      "metadata": {}
-    },
+    "from": "worker_actor_id",
+    "to": "coordinator_actor_id",
     "payload": "{\"status\":\"completed\"}",
     "epoch": 1782668370,
-    "metadata": {},
+    "code": {},
     "signature": "...",
-    "issues": [],
-    "parent_envelope": {
-      "from": {
-        "id": "coordinator_actor_id",
-        "name": "CoordinatorAgent",
-        "type": "agent",
-        "metadata": {}
-      },
-      "to": {
-        "id": "worker_actor_id",
-        "name": "WorkerAgent",
-        "type": "agent",
-        "metadata": {}
-      },
+    "parent_envelope": [{
+      "from": "coordinator_actor_id",
+      "to": "worker_actor_id",
       "payload": "{\"action\":\"produce_task_spec\"}",
       "epoch": 1782668362,
-      "metadata": {},
+      "code": {},
       "signature": "...",
-      "issues": [],
-      "parent_envelope": {
+      "parent_envelope": [{
         "... previous envelope ..."
-      }
+      }]
     }
   }
 }
@@ -271,11 +207,11 @@ Every participant in a workflow is represented by an `AgentDNA` instance.
 For this example, we'll create one Human and one AI Agent.
 
 ```python
-from agentdna import AgentDNA
+from agentdna.core import AgentDNA
 
-human = AgentDNA(
+user = AgentDNA(
     name="Alice",
-    type="human",
+    type="user",
     api_key="<Optional, only required for Beta (Explained later)>"
 )
 
@@ -298,9 +234,6 @@ Alice creates the first signed `Envelope` and sends it to the Assistant.
 
 ```python
 workflow = human.build(
-    recipient_actor_id=assistant.get_actor_id(),
-    recipient_actor_name=assistant.name,
-    recipient_actor_type="agent",
     payload='{"request":"Summarize this document."}'
 )
 ```
@@ -316,9 +249,9 @@ Alice ─────────▶ Assistant
 Before processing the request, the Assistant verifies the workflow.
 
 ```python
-result = assistant.handle(workflow)
+result = assistant.verify(workflow)
 
-if not result.verification.valid:
+if not result:
     return
 ```
 
@@ -332,11 +265,8 @@ Once the summary has been generated, the Assistant appends its own signed Envelo
 
 ```python
 workflow = assistant.build(
-    recipient_actor_id=human.get_actor_id(),
-    recipient_actor_name=human.name,
-    recipient_actor_type="human",
     payload='{"summary":"..."}',
-    workflow=workflow,
+    previous_workflows=workflow,
 )
 ```
 
@@ -356,7 +286,7 @@ Notice that the original request is preserved. The Assistant simply appends a ne
 After the interaction is complete, the workflow can be committed to the Provenance Layer.
 
 ```python
-workflow_card_id = human.create_workflow_provenance(
+workflow_card_id = user.record(
     workflow
 )
 ```
