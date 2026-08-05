@@ -27,9 +27,9 @@ def canonicalize_envelope(envelope: Envelope) -> str:
 def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
     """
     Converts an envelope into a canonical dictionary.
-    
-    Performs FULL DEEP RECURSION. Every envelope embeds its complete 
-    historical lineage. 
+
+    Performs FULL DEEP RECURSION. Every envelope embeds its complete
+    historical lineage.
     """
     result = {
         "from_": envelope.from_,
@@ -48,15 +48,13 @@ def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
     # DEEP RECURSION: We do NOT return early here. We process the entire chain.
     if envelope.parent_envelope:
         parent_dicts = [
-            _envelope_to_dict(parent, is_current=False) 
-            for parent in envelope.parent_envelope
+            _envelope_to_dict(parent, is_current=False) for parent in envelope.parent_envelope
         ]
-        
+
         # Sort to guarantee deterministic hashing at merge junctions
         # We fallback to payload if signature is missing during test mock setups
         result["parent_envelope"] = sorted(
-            parent_dicts, 
-            key=lambda p: p.get("signature", "") or p.get("payload", "")
+            parent_dicts, key=lambda p: p.get("signature", "") or p.get("payload", "")
         )
 
     return result
