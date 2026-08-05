@@ -16,7 +16,6 @@ supported_verification_modes = [
 ]
 
 ACTOR_INFO_FILE = "actor_info.json"
-#MODEL_EMBEDDINGS_DIR = "embeddings_cache" Since embeddings now live in Postgres (the policy_chunks table), there's no ~/.agentdna/embeddings_cache/ directory being created or read. The constant was dead code — no file in the entire codebase imported or referenced it (the grep confirmed zero matches).
 
 CURRENT_VERSION = "1.0"
 SUPPORTED_VERSIONS = ["1.0"]

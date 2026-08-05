@@ -64,7 +64,6 @@ async def save_policy_chunks(
     # 2. Insert new chunks.
     rows = []
     for i, (text, ctype, section) in enumerate(zip(chunks, chunk_types, sections, strict=True)):
-
         row = PolicyChunk(
             agent_id=agent_id,
             chunk_text=text,
