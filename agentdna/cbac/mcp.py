@@ -109,7 +109,13 @@ async def cbac_intercept(request, handler):
     just its own equally thin adapter. Requires an open :func:`cbac_context`;
     without one it is a passthrough.
     """
-    decision, detail, scores = await authorize_tool_call(request.name, request.args)
+    # MCPToolCallRequest (verified ≤0.3.0 and upstream main) carries no tool
+    # description — only name/args/server_name/headers/runtime — so this reads
+    # None today and the de-snaked tool name becomes the verb phrase. The
+    # getattr keeps the pass-through wired for an adapter version that does
+    # expose it on the request.
+    description = getattr(request, "description", None)
+    decision, detail, scores = await authorize_tool_call(request.name, request.args, description)
     if decision != "allow":
         return _denied_result(decision, detail)
 

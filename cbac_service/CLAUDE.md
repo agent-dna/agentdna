@@ -38,8 +38,18 @@ install it. Work from inside `cbac_service/`:
 - `uv sync` — dev install. `[tool.uv.sources]` resolves `agent-dna` from the
   sibling checkout (`path = "..", editable`), so library edits are picked up live.
 - `uv sync --no-sources` — deploy install, resolving `agent-dna` from PyPI.
-- `uv run pytest` — runs `tests/` (its own `[tool.pytest.ini_options]`,
-  `pythonpath = [".."]`). The root `pytest` does not reach these tests.
+- **Run these tests scoped to this package — never from the repo root.** From
+  the root, `pytest` collects the *library's* suite (including its own
+  `test_cbac_guard.py` / `test_cbac_intercept.py` — the guard side, a different
+  thing), so `-k cbac` there matches the wrong tests. Always use
+  `uv --directory cbac_service run pytest` (its own `[tool.pytest.ini_options]`,
+  `pythonpath = [".."]`).
+- **Don't run the full suite by default — run only the CBAC tests relevant to
+  your change**, e.g. `uv --directory cbac_service run pytest -k cbac`
+  (`test_cbac_lhi.py`, `test_cbac_verify.py`) or append
+  `tests/test_score_evaluation.py`. The score-evaluation tests load real
+  NLI/embedding models and are slow; skip `test_logging.py` /
+  `test_main_endpoints.py` unless you touched them.
 - `transformers` is pinned `<5` on purpose — HHEM-2.1's remote code
   (`hallucination_score`) breaks on transformers 5.x. Don't loosen it.
 

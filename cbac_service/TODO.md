@@ -22,6 +22,25 @@ carry the reasoning from the design discussion so it isn't re-litigated.
       Touches: `compute_lhi` (Optional params + renormalize), `_report_lhi`
       skip condition, `tests/test_cbac_lhi.py`.
 
+- [x] **Render actions as natural language before scoring them.** Measured on
+      14 realistic agent cases (2026-08-03): both Check-1 NLI and HHEM degrade
+      badly on flattened `tool k=v` intent text. NLI missed direct opposites
+      hidden in snake_case tool names (`close_pull_request` vs "do not close
+      anything" → contradiction 0.01, caught at 0.95 as prose), and HHEM
+      scores every tool-syntax string as ungrounded.
+      **Implemented (2026-08-03):** the guard's `_default_intent` renders
+      "The agent wants to <verb phrase>, with k = v, …" — verb phrase = the
+      wrapped function's docstring first line, else the de-snaked tool name.
+      All three scorers receive this one full-prose string; no wire change.
+      **Decision:** HHEM scores the params too (they are the LLM-generated
+      content). Accepted tradeoff, measured: with params in view, legitimate
+      params_added calls (HHEM 0.09) are inseparable from hijacks (0.05), so
+      hallucination thresholds must stay advisory. The verb-only view
+      (faithful 0.53 / params_added 0.62 vs hijack 0.04) remains a one-line
+      switch in `verify_cbac` — `intent_text.split(", with ", 1)[0]` — via
+      the `_action_summary` helper kept in guard.py, if separation matters
+      later.
+
 - [ ] **Record violation / denial evidence.** A denied call writes nothing
       (correct — nothing executed), so an agent probing forbidden actions 50
       times keeps pristine trust. Needs a separate per-edge negative-evidence

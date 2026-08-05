@@ -82,6 +82,29 @@ def test_allow_forwards_and_reports_lhi(posts):
     ]
 
 
+def test_request_description_becomes_verb_phrase(posts):
+    """A request that carries a tool description (future adapter versions)
+    gets it as the rendered verb phrase."""
+    handler = make_handler()
+    req = SimpleNamespace(
+        name="create_pr", args={"repo": "acme/x"}, description="Create a pull request."
+    )
+    run(req, handler)
+
+    assert posts[0][1]["intended_action"] == (
+        "The agent wants to create a pull request, with repo = acme/x."
+    )
+
+
+def test_without_description_verb_phrase_is_desnaked_name(posts):
+    """Current adapter requests have no description — the de-snaked tool
+    name is the verb phrase."""
+    handler = make_handler()
+    run(request(repo="acme/x"), handler)
+
+    assert posts[0][1]["intended_action"] == "The agent wants to create pr, with repo = acme/x."
+
+
 def test_deny_short_circuits_without_forwarding(posts):
     posts_headers = {**ALLOW_HEADERS, "X-CBAC-Decision": "deny"}
     requests.post.headers = posts_headers  # served by the fake_post closure
