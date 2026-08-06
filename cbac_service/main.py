@@ -1,5 +1,6 @@
 import asyncio
 import os
+from contextlib import asynccontextmanager
 from uuid import uuid4
 
 import structlog
@@ -9,9 +10,10 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from agentdna.provenance import Provenance
 from cbac_service.cbac import CBAC
+from cbac_service.db.engine import close_db, get_session, init_db
 from cbac_service.logging_config import setup_logging
 
-# ── HTTP boundary ──────────────────────────────────────────────────────────────
+# ── App lifecycle ──────────────────────────────────────────────────────────────
 
 setup_logging()
 logger = structlog.get_logger("cbac_service.api")
@@ -40,7 +42,28 @@ def _bind_request_context(body: dict) -> None:
     )
 
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup: init DB engine. Shutdown: close connection pool."""
+    await init_db()
+    yield
+    await close_db()
+
+
+app = FastAPI(lifespan=lifespan)
+
+# ── Endpoints ──────────────────────────────────────────────────────────────────
+
+
+@app.get("/health")
+async def health():
+    """Basic healthcheck — verifies DB connectivity."""
+    try:
+        async for session in get_session():
+            await session.execute("SELECT 1")  # type: ignore
+        return JSONResponse({"status": "ok"})
+    except Exception as exc:
+        return JSONResponse({"status": "error", "detail": str(exc)}, status_code=503)
 
 
 @app.post("/authorize-cbac")
@@ -57,11 +80,13 @@ async def authorize_cbac(request: Request) -> PlainTextResponse:
 
     headers = {}
     try:
-        result = await _get_cbac().verify_cbac(
-            agent_id=body.get("agent_id", ""),
-            intended_action=body.get("intended_action"),
-            user_intent=body.get("user_intent"),
-        )
+        async for session in get_session():
+            result = await _get_cbac().verify_cbac(
+                session=session,
+                agent_id=body.get("agent_id", ""),
+                intended_action=body.get("intended_action"),
+                user_intent=body.get("user_intent"),
+            )
         decision, reason = result.decision, result.reason
         for header, score in (
             ("X-CBAC-Intent-Score", result.intent_score),
@@ -91,10 +116,7 @@ async def compute_lhi(request: Request) -> JSONResponse:
 
     The four component scores are supplied by the caller: the first three
     come back from its own ``/authorize-cbac`` response, ``output_score``
-    from whether the action actually succeeded. Nothing here re-verifies
-    them, so a caller that fabricates scores can inflate its own
-    reputation — the guard is already trusted to make the authorize call
-    at all, and this endpoint inherits exactly that much trust.
+    from whether the action actually succeeded.
     """
     body = await request.json()
     _bind_request_context(body)
@@ -117,6 +139,31 @@ async def compute_lhi(request: Request) -> JSONResponse:
 
     logger.info("lhi trust updated", callee_name=body.get("callee_name", ""), trust=trust)
     return JSONResponse({"trust": trust})
+
+
+@app.post("/precompute-policy")
+async def precompute_policy(request: Request) -> JSONResponse:
+    """Precompute and cache policy embeddings for an agent.
+
+    Call this after deploying or updating an agent's policy card.
+    """
+    body = await request.json()
+    agent_id = body.get("agent_id", "")
+
+    if not agent_id:
+        return JSONResponse({"error": "agent_id is required"}, status_code=400)
+
+    try:
+        async for session in get_session():
+            count = await _get_cbac().precompute_policy(
+                session=session,
+                agent_id=agent_id,
+                skip_compute=body.get("skip_compute", False),
+            )
+    except Exception as exc:
+        return JSONResponse({"error": str(exc)}, status_code=500)
+
+    return JSONResponse({"agent_id": agent_id, "chunks_stored": count})
 
 
 if __name__ == "__main__":

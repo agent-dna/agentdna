@@ -10,26 +10,70 @@ app that the library's guard calls over HTTP. All the ML deps live here;
 `agentdna/` imports **none** of them.
 
 - `main.py` — the HTTP boundary: `app = FastAPI()`, the lazy `CBAC` singleton,
-  and the `__main__` uvicorn runner (`CBAC_SERVICE_HOST` / `CBAC_SERVICE_PORT`).
+  DB lifecycle via lifespan, and the `__main__` uvicorn runner.
 - `cbac.py` — the decision engine (class `CBAC`), no HTTP.
 - `config.py` — pipeline tunables as module-level constants (`ALLOW_GAP`,
-  `ENCODER_MODEL`, `LHI_WEIGHTS`, …). Change a value here and redeploy.
+  `ENCODER_MODEL`, `LHI_WEIGHTS`, `DATABASE_URL`, …). Change a value here and
+  redeploy.
 - `chunking.py` — structure-aware policy-text chunking (`chunk_body_text`).
 - `skills.py` — `skill.md` parsing + the CBAC result dataclasses.
-- `logging_config.py` — `setup_logging()`: structlog + stdlib both render as
-  one JSON object per line (uvicorn's access/error logs included). Level from
-  `CBAC_SERVICE_LOG_LEVEL` (default `INFO`). `main.py` calls it at import and
-  binds `request_id` / `agent_id` into `structlog.contextvars` per request, so
-  every line the pipeline emits while handling that request carries them —
-  don't thread those through call signatures. `uvicorn.run` passes
-  `log_config=None` so uvicorn doesn't re-install its own handlers.
 - **Not published as a wheel** (`[tool.uv] package = false`). Deployed from a
   checkout: `uvicorn cbac_service.main:app`.
-- One endpoint: **`POST /authorize-cbac`**. Returns the reason as the body and
-  the decision in the `X-CBAC-Decision` header.
+- Endpoints:
+  - **`POST /authorize-cbac`** — main decision gate.
+  - **`POST /compute-lhi`** — fold interaction scores into trust.
+  - **`POST /precompute-policy`** — explicitly trigger embedding precomputation.
+  - **`GET /health`** — DB connectivity check.
 - Depends on `agent-dna` (for `Provenance`, `AgentCard`, `IntentWorkflow`, `id`).
 
-## Environment — separate from the library
+## Architecture
+
+```
+Guard (agentdna/cbac) --HTTP--> cbac_service (FastAPI)
+                                     |
+                                PostgreSQL 18
+                                ├── pgvector 0.8.6 (semantic search)
+                                ├── pg_textsearch 1.4.0 (BM25 keyword search)
+                                ├── policy_chunks table (embeddings + text)
+                                └── policy_meta table (cache invalidation)
+```
+
+## Database
+
+The service uses **PostgreSQL 18** with two extensions:
+- **pgvector** — stores 384-dim embeddings, HNSW index for cosine similarity.
+- **pg_textsearch** — BM25 ranked keyword search on chunk text.
+
+### Tables
+
+**`policy_chunks`** — one row per chunk per agent:
+- `agent_id` — who this belongs to
+- `chunk_text` — the original text (needed for Tier 2 NLI)
+- `chunk_type` — `allowed` or `forbidden`
+- `embedding` — vector(384), the searchable embedding
+- `policy_hash` — for cache invalidation
+- `section` / `chunk_index` — ordering and provenance
+
+**`policy_meta`** — one row per agent, lightweight cache check:
+- `policy_hash` — compared against on-chain hash at runtime
+- `encoder_model` / `nli_model` — detect if models changed
+- `chunk_count` / `cached_at` — operational metadata
+
+### Indexes
+- `policy_chunks_embedding_idx` — HNSW (vector_cosine_ops)
+- `policy_chunks_bm25_idx` — BM25 (text_config='english')
+- `ix_policy_chunks_agent_hash` — B-tree (agent_id, policy_hash)
+- `ix_policy_chunks_agent_id` — B-tree (agent_id)
+
+### Schema management
+Schema is managed via **Alembic** (async). Models are defined in
+`db/models.py`; migrations live in `db/migrations/versions/`. Run:
+```bash
+cd cbac_service
+alembic upgrade head
+```
+
+## Environment
 
 This package has its **own `.venv` and its own `uv.lock`**. It is *not* a uv
 workspace member, so `uv sync --all-packages` from the repo root does **not**
@@ -38,54 +82,57 @@ install it. Work from inside `cbac_service/`:
 - `uv sync` — dev install. `[tool.uv.sources]` resolves `agent-dna` from the
   sibling checkout (`path = "..", editable`), so library edits are picked up live.
 - `uv sync --no-sources` — deploy install, resolving `agent-dna` from PyPI.
-- **Run these tests scoped to this package — never from the repo root.** From
-  the root, `pytest` collects the *library's* suite (including its own
-  `test_cbac_guard.py` / `test_cbac_intercept.py` — the guard side, a different
-  thing), so `-k cbac` there matches the wrong tests. Always use
-  `uv --directory cbac_service run pytest` (its own `[tool.pytest.ini_options]`,
-  `pythonpath = [".."]`).
-- **Don't run the full suite by default — run only the CBAC tests relevant to
-  your change**, e.g. `uv --directory cbac_service run pytest -k cbac`
-  (`test_cbac_lhi.py`, `test_cbac_verify.py`) or append
-  `tests/test_score_evaluation.py`. The score-evaluation tests load real
-  NLI/embedding models and are slow; skip `test_logging.py` /
-  `test_main_endpoints.py` unless you touched them.
+- `uv run pytest` — runs `tests/` (its own `[tool.pytest.ini_options]`,
+  `pythonpath = [".."]`). The root `pytest` does not reach these tests.
 - `transformers` is pinned `<5` on purpose — HHEM-2.1's remote code
   (`hallucination_score`) breaks on transformers 5.x. Don't loosen it.
 
+### Required environment variables
+
+See `.env.sample` for the full list. Key ones:
+- `DATABASE_URL` — async Postgres connection string
+- `AGENTDNA_API_KEY` — Provenance Layer access
+- `CBAC_SERVICE_HOST` / `CBAC_SERVICE_PORT` — binding
+- `HYBRID_SEARCH_ENABLED` — toggle BM25 fusion (default: true)
+
 ## The decision pipeline (`cbac.py`)
 
-Class `CBAC`. On each request it fetches the agent's latest policy from the
-Provenance Layer, flattens it to chunks (structure-aware: paragraphs / list
-items, split past `chunk_max_words`), NLI-classifies chunks into
-allowed/forbidden, and runs three tiers:
+Class `CBAC`. On each request:
 
-1. **Tier 1** — cosine gap `max_allowed − max_forbidden` (allow > `allow_gap`,
-   deny < −`deny_gap`, else escalate), with an optional Check-1 NLI drift test
-   vs the root user intent.
-2. **Tier 2** — NLI entailment vs the top allowed chunk (`entailment_threshold`
-   → allow, `contradiction_threshold` → deny).
-3. **Tier 3** — optional LLM backend; absent → `"advise"`.
+1. **Check 1 — NLI drift** (when `user_intent` supplied): NLI cross-encoder
+   checks if the agent's intended action contradicts the user intent.
+   Contradiction ≥ 0.60 → immediate deny.
 
-Every threshold and model name above is a constant in `config.py` — read the
-values from there, not from this file.
+2. **Policy fetch + cache check**: Fetches the agent's latest policy from the
+   Provenance Layer. Compares the policy hash against `policy_meta` in Postgres.
+   If stale or missing → `precompute_policy` (chunk, classify, encode, store).
+
+3. **Tier 1 — Cosine gap** (via pgvector): Encodes the intent, runs
+   `vector_search(allowed)` and `vector_search(forbidden)`. If
+   `max_allowed − max_forbidden > allow_gap` → allow. If gap < −deny_gap → deny.
+   Otherwise escalate.
+
+4. **Tier 2 — NLI entailment**: Uses `hybrid_search` (pgvector + pg_textsearch
+   RRF fusion) to find the best allowed chunk candidate, then runs the NLI
+   cross-encoder. Entailment ≥ 0.55 → allow, contradiction ≥ 0.60 → deny.
+
+5. **Tier 3 — LLM backend** (optional): If configured, sends intent + full
+   policy text to an LLM for judgment. Otherwise returns `"advise"`.
+
+6. **Hallucination score** (HHEM): Attached after the decision, never gates it.
 
 Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
-(any error → `deny`). Policy embeddings are cached as pickles under
-`~/.agentdna/embeddings_cache/`, keyed by policy hash.
+(any error → `deny`).
 
 ## Scoring attached to a decision
 
 - **Hallucination score (HHEM):** when a decision is reached with a user intent
   present, `CBAC.hallucination_score` (vectara HHEM model, 1 = grounded,
   0 = hallucinated) is attached to the result.
-- **LHI trust (Local Heuristic Intelligence):** `compute_lhi` combines four
-  component scores (intent, policy, hallucination, output) as a **weighted
-  arithmetic mean** (`lhi_weights`) — expected interaction quality, deliberately
-  compensatory because the allow/deny gates already enforce the hard constraints
-  pre-execution — then folds it into a stored trust value via an **asymmetric
-  EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**.
-  (Not a geometric mean: the binary output score would zero the whole
-  interaction on any transient tool failure.) Trust is tracked **per
+- **LHI trust:** `compute_lhi` combines four component scores
+  (intent, policy, hallucination, output) as a weighted geometric mean
+  (`lhi_weights`), then folds it into a stored trust value via an **asymmetric
+  EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**. Any
+  zero component zeroes the instantaneous score. Trust is tracked **per
   caller→callee edge** and persisted in `trust_store_file` under the config dir. The LHI math is covered by `tests/test_cbac_lhi.py`; score
   attachment by `tests/test_cbac_verify.py` — keep both green when touching it.

@@ -35,3 +35,6 @@ examples/github_agent_workflow/agent_names.json
 # Tests
 
 tests/temp
+
+docs
+tests
