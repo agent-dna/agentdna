@@ -109,7 +109,7 @@ Class `CBAC`. On each request:
 
 3. **Tier 1 — Cosine gap** (via pgvector): Encodes the intent, runs
    `vector_search(allowed)` and `vector_search(forbidden)`. If
-   `max_allowed − max_forbidden > allow_gap` → allow. If gap < −deny_gap → deny.
+   `max_allowed − max_forbidden > ALLOW_GAP` → allow. If gap < −`DENY_GAP` → deny.
    Otherwise escalate.
 
 4. **Tier 2 — NLI entailment**: Uses `hybrid_search` (pgvector + pg_textsearch
@@ -130,9 +130,14 @@ Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
   present, `CBAC.hallucination_score` (vectara HHEM model, 1 = grounded,
   0 = hallucinated) is attached to the result.
 - **LHI trust:** `compute_lhi` combines four component scores
-  (intent, policy, hallucination, output) as a weighted geometric mean
-  (`lhi_weights`), then folds it into a stored trust value via an **asymmetric
-  EMA — slow to build (`lhi_lambda_up`), fast to lose (`lhi_lambda_down`)**. Any
-  zero component zeroes the instantaneous score. Trust is tracked **per
-  caller→callee edge** and persisted in `trust_store_file` under the config dir. The LHI math is covered by `tests/test_cbac_lhi.py`; score
-  attachment by `tests/test_cbac_verify.py` — keep both green when touching it.
+  (intent, policy, hallucination, output) as a **weighted arithmetic mean**
+  (`LHI_WEIGHTS`) — deliberately compensatory, since the allow/deny gates
+  already enforce the hard constraints *before* execution — then folds it into a
+  stored trust value via an **asymmetric EMA — slow to build (`LHI_LAMBDA_UP`),
+  fast to lose (`LHI_LAMBDA_DOWN`)**. A zero component costs only its weight, not
+  the whole score (a transient tool failure must not annihilate an
+  otherwise-compliant interaction). Trust is tracked **per caller→callee edge**
+  and persisted in `TRUST_STORE_FILE` (`trust_scores.json`) under the config dir
+  — not in Postgres, which holds only policy chunks/embeddings. The LHI math is
+  covered by `tests/test_cbac_lhi.py`; score attachment by
+  `tests/test_cbac_verify.py` — keep both green when touching it.

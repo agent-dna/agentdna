@@ -7,6 +7,7 @@ import pytest
 
 pytest.importorskip("sentence_transformers")
 
+import cbac_service.cbac as cbac_mod
 from cbac_service.cbac import CBAC
 
 AGENT_ID = "did:agent"
@@ -45,6 +46,23 @@ def make_verify_cbac(tmp_path, monkeypatch, policy_text="Agents may read pull re
     monkeypatch.setattr(
         cbac, "_nli_scores", lambda premise, hypothesis: {"contradiction": 0.0, "entailment": 0.0}
     )
+
+    # DB search layer stubbed to in-memory so the pipeline runs without Postgres:
+    # cache always fresh, one dummy chunk, and equal allowed/forbidden scores
+    # (gap 0) so Tier 1 escalates to Tier 2, which — NLI stubbed — reaches Tier 3.
+    async def _hash_matches(session, agent_id, policy_hash):
+        return True
+
+    async def _get_chunks(session, agent_id):
+        return ["allowed chunk"]
+
+    async def _search(session, agent_id, intent_vec, *args, chunk_type="allowed", **kwargs):
+        return [SimpleNamespace(score=0.5, chunk_text="allowed chunk")]
+
+    monkeypatch.setattr(cbac_mod, "policy_hash_matches", _hash_matches)
+    monkeypatch.setattr(cbac_mod, "get_policy_chunks", _get_chunks)
+    monkeypatch.setattr(cbac_mod, "vector_search", _search)
+    monkeypatch.setattr(cbac_mod, "hybrid_search", _search)
     return cbac
 
 
@@ -52,6 +70,7 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
         cbac.verify_cbac(
+            session=None,
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -71,7 +90,9 @@ def test_hallucination_score_attached_when_reached(tmp_path, monkeypatch):
 def test_hallucination_score_none_without_user_intent(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
     result = asyncio.run(
-        cbac.verify_cbac(agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None)
+        cbac.verify_cbac(
+            session=None, agent_id=AGENT_ID, intended_action="read pull requests", user_intent=None
+        )
     )
     assert result.decision == "advise"
     assert result.hallucination_score is None
@@ -87,6 +108,7 @@ def test_hallucination_scoring_failure_does_not_change_decision(tmp_path, monkey
     monkeypatch.setattr(cbac, "hallucination_score", boom)
     result = asyncio.run(
         cbac.verify_cbac(
+            session=None,
             agent_id=AGENT_ID,
             intended_action="read pull requests",
             user_intent="Please show me the pull requests",
@@ -108,20 +130,16 @@ def test_intent_score_is_one_minus_contradiction(tmp_path, monkeypatch):
 
 def test_policy_score_normalized_on_tier1_decision(tmp_path, monkeypatch):
     cbac = make_verify_cbac(tmp_path, monkeypatch)
-    intent_vec = np.array([1.0, 0.0])
-    allowed_vecs = np.array([[1.0, 0.0]])  # cosine 1.0 -> gap = 1.0, clamps above allow_gap
-    forbidden_vecs = np.array([[0.0, 1.0]])  # cosine 0.0
+
+    # Tier-1 search: allowed cosine 1.0, forbidden 0.0 -> gap 1.0, clamps above allow_gap.
+    async def _vsearch(session, agent_id, intent_vec, *args, chunk_type="allowed", **kwargs):
+        score = 1.0 if chunk_type == "allowed" else 0.0
+        return [SimpleNamespace(score=score, chunk_text=f"{chunk_type} chunk")]
+
+    monkeypatch.setattr(cbac_mod, "vector_search", _vsearch)
 
     decision, _reason, policy_score = asyncio.run(
-        cbac._tiered_decision(
-            "intent text",
-            intent_vec,
-            ["allowed chunk"],
-            [],
-            allowed_vecs,
-            forbidden_vecs,
-            "policy text",
-        )
+        cbac._tiered_decision(None, AGENT_ID, "intent text", np.array([1.0, 0.0]))
     )
     assert decision == "allow"
     assert policy_score == pytest.approx(1.0)
@@ -136,7 +154,10 @@ def test_hallucination_score_not_computed_on_early_hard_fail(tmp_path, monkeypat
     )
     result = asyncio.run(
         cbac.verify_cbac(
-            agent_id=AGENT_ID, intended_action="", user_intent="Please show me the pull requests"
+            session=None,
+            agent_id=AGENT_ID,
+            intended_action="",
+            user_intent="Please show me the pull requests",
         )
     )
     assert result.decision == "deny"

@@ -10,10 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbac_service.config import RRF_K
+
+from .models import PolicyChunk
 
 
 @dataclass
@@ -49,31 +51,26 @@ async def vector_search(
     top_k : how many results to return
     chunk_type : 'allowed', 'forbidden', or None for both
     """
-    embedding_str = "[" + ",".join(str(float(x)) for x in query_embedding) + "]"
+    distance = PolicyChunk.embedding.cosine_distance(query_embedding)
 
-    type_filter = ""
+    stmt = (
+        select(
+            PolicyChunk.id,
+            PolicyChunk.agent_id,
+            PolicyChunk.chunk_text,
+            PolicyChunk.chunk_type,
+            PolicyChunk.chunk_index,
+            PolicyChunk.section,
+            (1 - distance).label("similarity"),
+        )
+        .where(PolicyChunk.agent_id == agent_id)
+        .order_by(distance)
+        .limit(top_k)
+    )
     if chunk_type is not None:
-        type_filter = "AND chunk_type = :chunk_type"
+        stmt = stmt.where(PolicyChunk.chunk_type == chunk_type)
 
-    query = text(f"""
-        SELECT id, agent_id, chunk_text, chunk_type, chunk_index, section,
-               1 - (embedding <=> :embedding) AS similarity
-        FROM policy_chunks
-        WHERE agent_id = :agent_id {type_filter}
-        ORDER BY embedding <=> :embedding
-        LIMIT :top_k
-    """)
-
-    params: dict = {
-        "agent_id": agent_id,
-        "embedding": embedding_str,
-        "top_k": top_k,
-    }
-    if chunk_type is not None:
-        params["chunk_type"] = chunk_type
-
-    result = await session.execute(query, params)
-    rows = result.fetchall()
+    result = await session.execute(stmt)
 
     return [
         SearchResult(
@@ -85,7 +82,7 @@ async def vector_search(
             chunk_index=row.chunk_index,
             section=row.section,
         )
-        for row in rows
+        for row in result
     ]
 
 

@@ -417,7 +417,7 @@ class CBAC:
 
         # Gather policy text for LLM context.
         all_chunks = await get_policy_chunks(session, agent_id)
-        policy_text = "\n".join(c.chunk_text for c in all_chunks)
+        policy_text = "\n".join(all_chunks)
 
         try:
             llm_decision = await self._llm_backend(intent_text, policy_text)
@@ -540,50 +540,6 @@ class CBAC:
             policy_score=policy_score,
         )
 
-    # TODO:- Remove
-    def authorise_agent_app_interaction(
-        self,
-        agent_id: str,
-        action_intent: str,
-        envelope: IntentWorkflow,
-        app_url: str,
-        app_method: str = "POST",
-        app_headers: dict | None = None,
-        app_body: str | dict | None = None,
-        app_timeout: float = 100.0,
-    ) -> requests.Response:
-        if isinstance(app_body, dict):
-            app_body = json.dumps(app_body)
-            app_headers = {"Content-Type": "application/json", **(app_headers or {})}
-
-        envelope_dict = asdict(envelope)
-        payload = {
-            "agent_id": agent_id,
-            "action_intent": action_intent,
-            "envelope": envelope_dict,
-            "app_request": {
-                "url": app_url,
-                "method": app_method,
-                "headers": app_headers or {},
-                "body": app_body or "",
-            },
-        }
-
-        resp = requests.post(
-            f"{self.cbac_url.rstrip('/')}/agent-admin/v1/authorize-action",
-            json=payload,
-            timeout=app_timeout,
-        )
-
-        decision = resp.headers.get("X-CBAC-Decision")
-
-        if decision == "deny":
-            raise PermissionError(resp.text)
-        if decision == "error":
-            raise RuntimeError(resp.text)
-
-        return resp
-
     # The LHI trust store — one JSON object per agent, keyed by agent DID.
     # `callees` holds one entry per unique (callee_name + type) edge: the full
     # history of per-interaction scores (appended each time) plus the EMA trust
@@ -626,7 +582,8 @@ class CBAC:
             json.dump(store, f, indent=2)
 
     # TODO:- Verify writing provenance card.
-    # Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously
+    # TODO:- Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously\
+    # TODO:- Add trust score history?
     def compute_lhi(
         self,
         agent_id: str,

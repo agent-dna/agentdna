@@ -7,10 +7,11 @@ import structlog
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from sqlalchemy import text
 
 from agentdna.provenance import Provenance
 from cbac_service.cbac import CBAC
-from cbac_service.db.engine import close_db, get_session, init_db
+from cbac_service.db.engine import close_db, get_session
 from cbac_service.logging_config import setup_logging
 
 # ── App lifecycle ──────────────────────────────────────────────────────────────
@@ -44,8 +45,7 @@ def _bind_request_context(body: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: init DB engine. Shutdown: close connection pool."""
-    await init_db()
+    """Shutdown: close the connection pool. The engine builds itself lazily."""
     yield
     await close_db()
 
@@ -59,8 +59,8 @@ app = FastAPI(lifespan=lifespan)
 async def health():
     """Basic healthcheck — verifies DB connectivity."""
     try:
-        async for session in get_session():
-            await session.execute("SELECT 1")  # type: ignore
+        async with get_session() as session:
+            await session.execute(text("SELECT 1"))
         return JSONResponse({"status": "ok"})
     except Exception as exc:
         return JSONResponse({"status": "error", "detail": str(exc)}, status_code=503)
@@ -80,7 +80,7 @@ async def authorize_cbac(request: Request) -> PlainTextResponse:
 
     headers = {}
     try:
-        async for session in get_session():
+        async with get_session() as session:
             result = await _get_cbac().verify_cbac(
                 session=session,
                 agent_id=body.get("agent_id", ""),
@@ -154,7 +154,7 @@ async def precompute_policy(request: Request) -> JSONResponse:
         return JSONResponse({"error": "agent_id is required"}, status_code=400)
 
     try:
-        async for session in get_session():
+        async with get_session() as session:
             count = await _get_cbac().precompute_policy(
                 session=session,
                 agent_id=agent_id,

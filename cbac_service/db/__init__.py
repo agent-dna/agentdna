@@ -1,7 +1,7 @@
 """Database package for cbac_service — async SQLAlchemy engine, models, repository, and search."""
 
 from .base import Base
-from .engine import close_db, get_session, init_db
+from .engine import close_db, get_session
 from .models import PolicyChunk, PolicyMeta
 from .repository import (
     delete_policy_chunks,
@@ -30,7 +30,6 @@ __all__ = [
     "get_policy_meta",
     "get_session",
     "hybrid_search",
-    "init_db",
     "policy_hash_matches",
     "save_policy_chunks",
     "upsert_policy_meta",

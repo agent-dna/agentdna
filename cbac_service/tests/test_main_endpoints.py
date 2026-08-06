@@ -1,5 +1,6 @@
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
@@ -20,11 +21,19 @@ def stub_request(body):
 def install_cbac(monkeypatch, **attrs):
     cbac = SimpleNamespace(**attrs)
     monkeypatch.setattr(main, "_get_cbac", lambda: cbac)
+
+    # The authorize/precompute endpoints open get_session(); yield a dummy
+    # session so they run without a real DB (the stubbed cbac ignores it).
+    @asynccontextmanager
+    async def _fake_get_session():
+        yield SimpleNamespace()
+
+    monkeypatch.setattr(main, "get_session", _fake_get_session)
     return cbac
 
 
 def authorizing(result):
-    async def verify_cbac(agent_id, intended_action, user_intent):
+    async def verify_cbac(session, agent_id, intended_action, user_intent):
         return result
 
     return verify_cbac
@@ -85,7 +94,7 @@ def test_authorize_omits_headers_for_missing_scores(monkeypatch):
 
 
 def test_authorize_failure_sends_no_score_headers(monkeypatch):
-    async def boom(agent_id, intended_action, user_intent):
+    async def boom(session, agent_id, intended_action, user_intent):
         raise RuntimeError("policy lookup failed")
 
     install_cbac(monkeypatch, verify_cbac=boom)

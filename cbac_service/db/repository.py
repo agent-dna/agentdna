@@ -8,10 +8,10 @@ plain data (models, booleans, or None).
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timezone
 
 import numpy as np
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbac_service.config import ENCODER_MODEL, NLI_MODEL
@@ -95,15 +95,15 @@ async def get_policy_chunks(
     session: AsyncSession,
     agent_id: str,
     chunk_type: str | None = None,
-) -> Sequence[PolicyChunk]:
-    """Load all policy chunks for an agent, ordered by chunk_index.
+) -> Sequence[str]:
+    """Load the text of all policy chunks for an agent, ordered by chunk_index.
 
-    Optionally filter by chunk_type ('allowed' or 'forbidden').
-    Embeddings come back as Python lists — convert to numpy in the caller
-    if needed.
+    Optionally filter by chunk_type ('allowed' or 'forbidden'). Only the text
+    is selected — no caller reads the embeddings, and fetching them costs 384
+    floats per row.
     """
     stmt = (
-        select(PolicyChunk)
+        select(PolicyChunk.chunk_text)
         .where(PolicyChunk.agent_id == agent_id)
         .order_by(PolicyChunk.chunk_index)
     )
@@ -133,28 +133,26 @@ async def upsert_policy_meta(
     chunk_count: int = 0,
 ) -> PolicyMeta:
     """Insert or update the policy_meta row for an agent."""
-    stmt = select(PolicyMeta).where(PolicyMeta.agent_id == agent_id)
+    stmt = insert(PolicyMeta).values(
+        agent_id=agent_id,
+        policy_hash=policy_hash,
+        encoder_model=encoder_model,
+        nli_model=nli_model,
+        chunk_count=chunk_count,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["agent_id"],
+        set_={
+            "policy_hash": stmt.excluded.policy_hash,
+            "encoder_model": stmt.excluded.encoder_model,
+            "nli_model": stmt.excluded.nli_model,
+            "chunk_count": stmt.excluded.chunk_count,
+            "cached_at": func.now(),
+        },
+    ).returning(PolicyMeta)
+
     result = await session.execute(stmt)
-    meta = result.scalar_one_or_none()
-
-    if meta is None:
-        meta = PolicyMeta(
-            agent_id=agent_id,
-            policy_hash=policy_hash,
-            encoder_model=encoder_model,
-            nli_model=nli_model,
-            chunk_count=chunk_count,
-            cached_at=datetime.now(timezone.utc),
-        )
-        session.add(meta)
-    else:
-        meta.policy_hash = policy_hash
-        meta.encoder_model = encoder_model
-        meta.nli_model = nli_model
-        meta.chunk_count = chunk_count
-        meta.cached_at = datetime.now(timezone.utc)
-
-    return meta
+    return result.scalar_one()
 
 
 async def delete_policy_chunks(

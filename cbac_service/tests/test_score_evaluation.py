@@ -25,10 +25,12 @@ import asyncio
 from types import SimpleNamespace
 from typing import NamedTuple
 
+import numpy as np
 import pytest
 
 pytest.importorskip("sentence_transformers")
 
+import cbac_service.cbac as cbac_mod
 from cbac_service.cbac import CBAC
 
 # (category, user_intent, action as the guard renders it)
@@ -163,6 +165,10 @@ class Scored(NamedTuple):
 def scores(tmp_path_factory):
     """One inference pass over the whole dataset; tests assert off the result.
 
+    The DB search layer is mocked to run cosine in-memory over the pre-encoded
+    policy vectors (top_k=1 == the old max-cosine), so this stays a semantic-
+    scorer eval — the decisions are the model's, not the database's.
+
     Skips the module when the models can't be loaded (offline CI).
     """
     cbac = CBAC(provenance=SimpleNamespace(config_dir=str(tmp_path_factory.mktemp("eval"))))  # type: ignore[arg-type]
@@ -171,26 +177,35 @@ def scores(tmp_path_factory):
         encoder = cbac._get_encoder()
         allowed_vecs = encoder.encode(POLICY_ALLOWED, normalize_embeddings=True)
         forbidden_vecs = encoder.encode(POLICY_FORBIDDEN, normalize_embeddings=True)
-        policy_text = "\n".join(POLICY_ALLOWED + POLICY_FORBIDDEN)
 
-        for category, user_intent, action in EVAL_CASES:
-            _, intent_score = asyncio.run(cbac._check1_drift(user_intent, action))
-            hhem = cbac.hallucination_score(user_intent, action)
-            intent_vec = encoder.encode([action], normalize_embeddings=True)[0]
-            decision, _, policy_score = asyncio.run(
-                cbac._tiered_decision(
-                    action,
-                    intent_vec,
-                    POLICY_ALLOWED,
-                    POLICY_FORBIDDEN,
-                    allowed_vecs,
-                    forbidden_vecs,
-                    policy_text,
+        def _search(intent_vec, chunk_type, top_k):
+            vecs = allowed_vecs if chunk_type == "allowed" else forbidden_vecs
+            texts = POLICY_ALLOWED if chunk_type == "allowed" else POLICY_FORBIDDEN
+            sims = vecs @ intent_vec  # rows are L2-normalised -> cosine similarity
+            order = np.argsort(-sims)[:top_k]
+            return [SimpleNamespace(score=float(sims[i]), chunk_text=texts[i]) for i in order]
+
+        async def fake_vector_search(session, agent_id, intent_vec, top_k=1, chunk_type="allowed"):
+            return _search(intent_vec, chunk_type, top_k)
+
+        async def fake_hybrid_search(
+            session, agent_id, intent_vec, intent_text, top_k=1, chunk_type="allowed"
+        ):
+            return _search(intent_vec, chunk_type, top_k)
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(cbac_mod, "vector_search", fake_vector_search)
+            mp.setattr(cbac_mod, "hybrid_search", fake_hybrid_search)
+            for category, user_intent, action in EVAL_CASES:
+                _, intent_score = asyncio.run(cbac._check1_drift(user_intent, action))
+                hhem = cbac.hallucination_score(user_intent, action)
+                intent_vec = encoder.encode([action], normalize_embeddings=True)[0]
+                decision, _, policy_score = asyncio.run(
+                    cbac._tiered_decision(None, "did:agent", action, intent_vec)
                 )
-            )
-            results.setdefault(category, []).append(
-                Scored(intent_score, decision, policy_score, hhem, action)
-            )
+                results.setdefault(category, []).append(
+                    Scored(intent_score, decision, policy_score, hhem, action)
+                )
     except Exception as exc:
         pytest.skip(f"scoring models unavailable: {exc}")
     return results
