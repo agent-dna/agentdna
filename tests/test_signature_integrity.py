@@ -1,4 +1,6 @@
 from agentdna.error import RESULT_OK
+from agentdna.types import VERIFY_BOUNDARY, VERIFY_HEAVY
+
 
 def test_payload_tampering(user, agent):
     """
@@ -46,6 +48,7 @@ def test_recipient_to_tampering(user, agent):
     result = agent.verify(workflow)
 
     assert not result is RESULT_OK
+
 
 def test_signature_tampering(user, agent):
     """
@@ -98,9 +101,13 @@ def test_parent_signature_tampering(user, agent):
 
     workflow.envelope.parent_envelope[0].signature = "Vulture"
 
-    result = user.verify(workflow)
+    for verify_method in [VERIFY_BOUNDARY, VERIFY_HEAVY]:
+        user.verification_mode = verify_method
+        result = user.verify(workflow)
 
-    assert not result is RESULT_OK
+        assert result is not RESULT_OK, (
+            f"failed to detect signature tampering for method: {verify_method}"
+        )
 
 
 def test_parent_payload_tampering(user, agent):

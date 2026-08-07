@@ -59,7 +59,7 @@ Every Envelope is digitally signed by the sender and references its parent Envel
   "to": "(Optional) ID of the actor who is recieving the envelope",
   "payload": "{\"action\":\"produce_task_spec\"}",
   "epoch": "Unix timestamp of Envelope formation",
-  "code": "Represents the status code for errors occured while the envelope was formed",
+  "status_code": "Represents the status code for errors occured while the envelope was formed",
   "signature": "Hex encoded signature by the actor building the envelope",
   "parent_envelope": "List of Envelopes upon which the current envelope is being built upon"
 }
@@ -95,14 +95,14 @@ For example:
     "to": "coordinator_actor_id",
     "payload": "{\"status\":\"completed\"}",
     "epoch": 1782668370,
-    "code": {},
+    "status_code": {},
     "signature": "...",
     "parent_envelope": [{
       "from": "coordinator_actor_id",
       "to": "worker_actor_id",
       "payload": "{\"action\":\"produce_task_spec\"}",
       "epoch": 1782668362,
-      "code": {},
+      "status_code": {},
       "signature": "...",
       "parent_envelope": [{
         "... previous envelope ..."
@@ -224,7 +224,7 @@ assistant = AgentDNA(
 
 Supported Actor types are:
 
-* `human`
+* `user`
 * `agent`
 * `app`
 
@@ -299,7 +299,7 @@ The same pattern scales naturally to Multi-Agent Systems. Every participant foll
 Receive workflow
         │
         ▼
-    handle()
+    verify()
         │
 Perform work
         │

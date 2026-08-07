@@ -65,6 +65,7 @@ def worker_1_agent():
         config_dir=CONFIG_DIR,
     )
 
+
 @pytest.fixture
 def worker_2_agent():
     return AgentDNA(
@@ -77,6 +78,7 @@ def worker_2_agent():
         config_dir=CONFIG_DIR,
     )
 
+
 @pytest.fixture
 def orchestrator_agent():
     return AgentDNA(
@@ -88,5 +90,3 @@ def orchestrator_agent():
         agent_policy_file=TEST_POLICY_FILE,
         config_dir=CONFIG_DIR,
     )
-
-

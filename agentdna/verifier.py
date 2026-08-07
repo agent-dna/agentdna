@@ -1,3 +1,4 @@
+from .helpers import _hash_content
 from .provenance import Provenance
 from .types import IntentWorkflow
 
@@ -21,7 +22,18 @@ def verify_light(
                 epoch=envelope.epoch,
                 position="tip",
             )
-        return result
+            return False
+
+        if envelope.parent_envelope:
+            for parent in envelope.parent_envelope:
+                if parent.hash != _hash_content(parent):
+                    logger.warning(
+                        "verify.light.parent_integrity_failed",
+                        reason="parent content hash mismatch",
+                    )
+                    return False
+
+        return True
     except Exception as ex:
         logger.error(
             "verify.light.error",

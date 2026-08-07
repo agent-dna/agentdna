@@ -3,6 +3,7 @@ import pytest
 from agentdna.types import VERIFY_LIGHT, VERIFY_HEAVY
 from agentdna.error import RESULT_OK
 
+
 def test_simple_build_verify_ideal_flow(user, agent):
     workflow = user.build(
         payload="MFA is mandatory",
@@ -14,8 +15,8 @@ def test_simple_build_verify_ideal_flow(user, agent):
 
 
 def test_orchestrator_pattern_build_verify_success(
-        user, orchestrator_agent, worker_1_agent, worker_2_agent
-    ):
+    user, orchestrator_agent, worker_1_agent, worker_2_agent
+):
     user_workflow = user.build(
         payload="Perform some stuff",
     )
@@ -103,6 +104,7 @@ def test_two_step_build_verify_failure(user, agent):
 
     assert not result == RESULT_OK
     assert workflow.envelope.parent_envelope[0].payload == "MFA is mandatory"
+
 
 def test_two_step_build_verify_success(user, agent):
     workflow = user.build(

@@ -2,64 +2,60 @@ import hashlib
 import json
 from typing import overload
 
+from .log import get_logger
 from .types import Envelope, IntentWorkflow
 
+logger = get_logger("agentdna.helpers")
 
-def canonicalize_envelope(envelope: Envelope) -> str:
+
+def _hash_content(envelope: Envelope) -> str:
     """
-    Produces the canonical representation used
-    for both signing and verification.
-
-    Ancestor signatures are included.
-    Returns the SHA-256 hash of the envelope.
+    Extracts and hashes ONLY the intrinsic fields of the
+    current envelope. Explicitly ignores 'hash', 'signature', and 'parent_envelope'.
     """
-    envelope_dict = _envelope_to_dict(envelope)
-
-    envelope_dict_str = json.dumps(
-        envelope_dict,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-
-    return hashlib.sha256(envelope_dict_str).hexdigest()
-
-
-def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
-    """
-    Converts an envelope into a canonical dictionary.
-    
-    Performs FULL DEEP RECURSION. Every envelope embeds its complete 
-    historical lineage. 
-    """
-    result = {
+    content = {
         "from_": envelope.from_,
         "payload": envelope.payload,
         "epoch": envelope.epoch,
-        "code": envelope.code,
+        "status_code": envelope.status_code,
         "run_id": envelope.run_id,
         "to": envelope.to,
     }
 
-    # If this is a historical envelope, its signature is part of the sealed record
-    if not is_current:
-        if hasattr(envelope, "signature") and envelope.signature:
-            result["signature"] = envelope.signature
+    content_str = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-    # DEEP RECURSION: We do NOT return early here. We process the entire chain.
-    if envelope.parent_envelope:
-        parent_dicts = [
-            _envelope_to_dict(parent, is_current=False) 
-            for parent in envelope.parent_envelope
-        ]
-        
-        # Sort to guarantee deterministic hashing at merge junctions
-        # We fallback to payload if signature is missing during test mock setups
-        result["parent_envelope"] = sorted(
-            parent_dicts, 
-            key=lambda p: p.get("signature", "") or p.get("payload", "")
-        )
+    return hashlib.sha256(content_str).hexdigest()
 
-    return result
+
+def canonicalize_envelope(envelope: Envelope) -> str:
+    """
+    Combines the content hash with the parent hashes
+    to create a strict, flat canonical hash for signing.
+    """
+    content_hash = _hash_content(envelope)
+
+    if not envelope.hash:
+        envelope.hash = content_hash
+
+    if not envelope.parent_envelope or len(envelope.parent_envelope) == 0:
+        return content_hash
+
+    parent_hashes = []
+    for parent in envelope.parent_envelope:
+        if parent.hash == "":
+            error_msg = f"Parent envelope {parent} lacks hash; cannot canonicalize."
+            logger.error("agentdna.helpers.canonicalize_envelope", msg=error_msg)
+            raise ValueError(error_msg)
+
+        parent_hashes.append(parent.hash)
+
+    parent_hashes.sort()  # To ensure deterministic ordering of parent hashes
+
+    combined_msg = {"content_hash": content_hash, "parents": parent_hashes}
+
+    combined_str = json.dumps(combined_msg, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    return hashlib.sha256(combined_str).hexdigest()
 
 
 def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
@@ -84,33 +80,28 @@ def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
 
     data = dict(data)  # don't mutate caller's dict
 
-    # handle "from" alias
     if "from" in data and "from_" not in data:
         data["from_"] = data.pop("from")
 
-    # DAG REFACTOR: Handle the list of parent envelopes safely
     parents_data = data.get("parent_envelope")
     if parents_data:
-        # Fallback in case a legacy linear dictionary is passed
         if isinstance(parents_data, dict):
             parents_data = [parents_data]
-
         data["parent_envelope"] = [parse_envelope(p) for p in parents_data if p]
     else:
         data["parent_envelope"] = None
 
-    # Safety: Remove any legacy keys (like 'issues') that might exist in old
-    # JSON payloads but aren't in our types.py struct anymore.
-    # This prevents TypeError: __init__() got an unexpected keyword argument
+    # Safety check: Allow "hash" to pass through deserialization
     allowed_keys = {
         "from_",
         "payload",
         "epoch",
-        "code",
+        "status_code",
         "run_id",
+        "to",
+        "hash",
         "signature",
         "parent_envelope",
-        "to",
     }
     data = {k: v for k, v in data.items() if k in allowed_keys}
 

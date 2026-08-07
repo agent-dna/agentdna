@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field, asdict
+from dataclasses import asdict, dataclass, field
 from typing import Any
+
 from .error import RESULT_OK
 
 ACTOR_TYPE_AGENT = "agent"
@@ -12,7 +13,7 @@ supported_actors = [ACTOR_TYPE_AGENT, ACTOR_TYPE_USER, ACTOR_TYPE_APP]
 
 VERIFY_LIGHT = "light"
 VERIFY_HEAVY = "heavy"
-VERIFY_BOUNDARY = "hybrid"
+VERIFY_BOUNDARY = "boundary"
 supported_verification_modes = [
     VERIFY_LIGHT,
     VERIFY_HEAVY,
@@ -45,7 +46,7 @@ class Envelope:
 
     # Code represents the error category during an
     # envelope formation event
-    code: int = RESULT_OK
+    status_code: int = RESULT_OK
 
     # run_id acts as a reference for access token
     run_id: str = ""
@@ -58,6 +59,9 @@ class Envelope:
 
     # To whom the envelope is forwared to explicity
     to: str = ""
+
+    # Hash of the envelope for integrity verification
+    hash: str = ""
 
     def add_envelope(self, new_envelope: Envelope | None):
         if new_envelope is None:
@@ -140,22 +144,21 @@ class IntentWorkflow:
         if not self.envelope:
             return []
 
-        unwrapped = []
-        visited_ids = set()
+        unwrapped: list[Envelope] = []
+        visited_hashes = set()
         queue = [self.envelope]
 
         while queue:
             current = queue.pop(0)
 
-            # Use memory ID to avoid processing the same ancestor multiple times
-            if id(current) not in visited_ids:
-                visited_ids.add(id(current))
+            if current.hash not in visited_hashes:
+                visited_hashes.add(current.hash)
                 unwrapped.append(current)
 
-                # Add parents to the queue to continue traversal
                 if current.parent_envelope:
                     queue.extend(current.parent_envelope)
 
+        unwrapped.sort(key=lambda env: (env.epoch, env.hash), reverse=True)
         return unwrapped
 
 

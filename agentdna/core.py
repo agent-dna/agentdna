@@ -17,11 +17,12 @@ from .config import (
     upsert_actor_registry_entry,
 )
 from .error import (
-    COCA_VERIFICATION_FAILED_LIGHT,
-    RESULT_OK,
     COCA_VERIFICATION_FAILED_BOUNDARY,
     COCA_VERIFICATION_FAILED_HEAVY,
+    COCA_VERIFICATION_FAILED_LIGHT,
+    RESULT_OK,
 )
+from .helpers import _hash_content
 from .id import get_agent_card_id, get_user_card_id
 from .log import configure_logging, get_logger
 from .provenance import Provenance
@@ -54,7 +55,7 @@ class AgentDNA:
         api_key: str = "",
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
-        verification_mode: str = VERIFY_LIGHT,
+        verification_mode: str = VERIFY_BOUNDARY,
         agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
         log_level: str = "INFO",
@@ -501,7 +502,7 @@ class AgentDNA:
             payload=payload,
             epoch=epoch,
             run_id="",  # TODO: Define IdP integration logic
-            code=verification_code,
+            status_code=verification_code,
             to=recipient_id,
         )
 
@@ -513,9 +514,9 @@ class AgentDNA:
                 if prev_workflow.envelope:
                     current_envelope.add_envelope(prev_workflow.envelope)
 
-        signature = self.provenance.sign_envelope(
-            current_envelope
-        )
+        current_envelope.hash = _hash_content(current_envelope)
+
+        signature = self.provenance.sign_envelope(current_envelope)
         current_envelope.signature = signature
 
         new_workflow = IntentWorkflow(

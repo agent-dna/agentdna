@@ -9,7 +9,7 @@ from rubix.signer import Signer
 from structlog.typing import FilteringBoundLogger
 
 from .config import get_default_config_dir
-from .helpers import canonicalize_envelope
+from .helpers import _hash_content, canonicalize_envelope
 from .id import get_agent_card_id
 from .log import configure_logging, get_logger
 from .types import Envelope
@@ -283,10 +283,9 @@ class Provenance:
         envelope: Envelope,
     ) -> bool:
         """
-        Verifies an envelope signature
-        against the supplied actor DID.
+        Verifies an envelope signature against the supplied actor DID,
+        and validates its intrinsic Merkle hash.
         """
-
         try:
             if envelope.from_ == "":
                 self.logger.error(
@@ -304,8 +303,18 @@ class Provenance:
                 )
                 return False
 
-            signature_bytes = bytes.fromhex(envelope.signature)
+            expected_hash = _hash_content(envelope)
 
+            if envelope.hash != expected_hash:
+                self.logger.error(
+                    "envelope.verify.hash_mismatch",
+                    envelope_from=envelope.from_,
+                    expected=expected_hash,
+                    actual=envelope.hash,
+                )
+                return False
+
+            signature_bytes = bytes.fromhex(envelope.signature)
         except ValueError:
             self.logger.error(
                 "envelope.verify.invalid_signature_format",

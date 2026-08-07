@@ -1,7 +1,8 @@
 import copy
-
 from dataclasses import fields
-from agentdna.helpers import canonicalize_envelope, _envelope_to_dict
+import pytest
+
+from agentdna.helpers import canonicalize_envelope
 from agentdna.types import Envelope
 
 
@@ -19,57 +20,41 @@ def create_envelope():
 
 
 def test_same_envelope_produces_same_digest():
-    """
-    Ensures canonicalization is deterministic.
-    """
+    """Ensures canonicalization is deterministic."""
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
     digest2 = canonicalize_envelope(envelope)
-
     assert digest1 == digest2
 
 
 def test_payload_change_changes_digest():
-    """
-    Ensures payload mutations affect the digest.
-    """
+    """Ensures payload mutations affect the digest."""
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
 
     envelope.payload = "Modified"
-
     digest2 = canonicalize_envelope(envelope)
 
     assert digest1 != digest2
 
 
 def test_sender_change_changes_digest():
-    """
-    Ensures sender changes affect the digest.
-    """
+    """Ensures sender changes affect the digest."""
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
 
     envelope.from_ = "mallory"
-
     digest2 = canonicalize_envelope(envelope)
 
     assert digest1 != digest2
 
 
 def test_recipient_change_changes_digest():
-    """
-    Ensures recipient changes affect the digest.
-    """
+    """Ensures recipient changes affect the digest."""
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
 
     envelope.to = "charlie"
-
     digest2 = canonicalize_envelope(envelope)
 
     assert digest1 != digest2
@@ -81,31 +66,29 @@ def test_current_signature_does_not_change_digest():
     from canonicalization.
     """
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
 
     envelope.signature = "abcdef"
-
     digest2 = canonicalize_envelope(envelope)
 
     assert digest1 == digest2
 
 
-def test_parent_signature_changes_digest():
+def test_parent_hash_changes_digest():
     """
-    Ensures ancestor signatures are included in the
-    canonical representation.
+    Ensures that modifying a parent's hash invalidates
+    the child's Merkle digest.
     """
     parent = create_envelope()
-    parent.signature = "parent-signature"
+    parent.hash = canonicalize_envelope(parent)
 
     child = create_envelope()
     child.parent_envelope = [parent]
 
     digest1 = canonicalize_envelope(child)
 
-    parent.signature = "tampered"
-
+    # Tamper with the parent's hash directly
+    parent.hash = "tampered-hash"
     digest2 = canonicalize_envelope(child)
 
     assert digest1 != digest2
@@ -113,90 +96,108 @@ def test_parent_signature_changes_digest():
 
 def test_parent_payload_changes_digest():
     """
-    Ensures parent payload mutations invalidate the
-    child digest.
+    Ensures parent payload mutations invalidate the child digest,
+    mirroring a real cryptographic cascade.
     """
     parent = create_envelope()
+    parent.hash = canonicalize_envelope(parent)
 
     child = create_envelope()
     child.parent_envelope = [parent]
-
     digest1 = canonicalize_envelope(child)
 
+    # 1. Tamper with parent payload
     parent.payload = "Tampered"
+
+    # 2. In a Merkle DAG, this recalculates the parent's hash
+    parent.hash = canonicalize_envelope(parent)
+
+    # 3. Which immediately breaks the child's hash!
     digest2 = canonicalize_envelope(child)
 
     assert digest1 != digest2
 
 
 def test_deep_copy_produces_same_digest():
-    """
-    Ensures equivalent envelopes always produce the
-    same digest.
-    """
+    """Ensures equivalent envelopes always produce the same digest."""
     envelope = create_envelope()
-
     digest1 = canonicalize_envelope(envelope)
     digest2 = canonicalize_envelope(copy.deepcopy(envelope))
-
     assert digest1 == digest2
 
 
-def test_grandparent_signature_changes_digest():
+def test_grandparent_hash_changes_digest():
     """
-    Ensures grandparent signatures are recursively
-    included in the canonical representation.
+    Ensures tampering at the root of the graph cascades
+    all the way to the tip of the Merkle DAG.
     """
+    # 1. Setup Grandparent
     grandparent = create_envelope()
-    grandparent.signature = "grandparent-signature"
+    grandparent.hash = canonicalize_envelope(grandparent)
 
+    # 2. Setup Parent
     parent = create_envelope()
-    parent.signature = "parent-signature"
     parent.parent_envelope = [grandparent]
+    parent.hash = canonicalize_envelope(parent)
 
+    # 3. Setup Child
     child = create_envelope()
     child.parent_envelope = [parent]
-
     digest1 = canonicalize_envelope(child)
 
-    # Tamper with the grandparent signature.
-    grandparent.signature = "tampered"
+    # 4. Tamper with the grandparent!
+    grandparent.payload = "tampered"
+
+    # 5. The Cascade: GP changes -> P changes -> C breaks
+    grandparent.hash = canonicalize_envelope(grandparent)
+    parent.hash = canonicalize_envelope(parent)
 
     digest2 = canonicalize_envelope(child)
 
     assert digest1 != digest2
 
 
-def test_canonicalization_contains_all_envelope_fields():
+def test_missing_parent_hash_raises_error():
     """
-    Ensures every Envelope, Actor and Issue field
-    intended for canonicalization is present in the
-    serialized dictionary.
+    Validates the safety mechanism that prevents canonicalizing
+    a child if its parent hasn't been properly hashed yet.
     """
-    envelope = create_envelope()
+    parent = create_envelope()
+    parent.hash = ""  # Explicitly empty
 
-    result = _envelope_to_dict(envelope)
+    child = create_envelope()
+    child.parent_envelope = [parent]
 
-    expected_envelope_fields = {
-        field.name
-        for field in fields(Envelope)
-        if field.name
-        not in {
-            "signature",
-            "parent_envelope",
-        }
-    }
+    with pytest.raises(ValueError, match="lacks hash; cannot canonicalize"):
+        canonicalize_envelope(child)
 
-    assert set(result.keys()) == expected_envelope_fields
 
-def test_current_signature_not_serialized():
+def test_all_intrinsic_fields_affect_digest():
     """
-    Ensures the current envelope signature is
-    excluded from canonicalization.
+    Dynamically tests the Envelope struct to ensure EVERY intrinsic
+    field affects the final hash (replacing the old _envelope_to_dict check).
     """
-    envelope = create_envelope()
-    envelope.signature = "sample"
+    base = create_envelope()
+    base_digest = canonicalize_envelope(base)
 
-    result = _envelope_to_dict(envelope)
+    # These fields are metadata or DAG edges, not intrinsic content.
+    ignored_fields = {"hash", "signature", "parent_envelope"}
 
-    assert "signature" not in result
+    for field in fields(Envelope):
+        if field.name in ignored_fields:
+            continue
+
+        env = copy.deepcopy(base)
+        current_val = getattr(env, field.name)
+
+        # Mutate the field based on its type
+        if isinstance(current_val, int):
+            setattr(env, field.name, current_val + 1)
+        else:
+            setattr(env, field.name, str(current_val) + "_mutated")
+
+        new_digest = canonicalize_envelope(env)
+
+        # If this fails, it means you added a new field to types.py
+        # but forgot to add it to `_hash_content` in helpers.py!
+        assert new_digest != base_digest, f"Field '{field.name}' did not affect canonicalization!"
