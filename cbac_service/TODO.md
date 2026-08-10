@@ -75,9 +75,14 @@ after the core is validated against real workflows.
 
 ## Engineering
 
-- [ ] **Replace the trust JSON file with a light DB** (`cbac.py:636`). The
-      store is read-modify-write per interaction with no locking — concurrent
-      requests can lose updates, and it pins the service to a single instance.
+- [x] **Replace the trust JSON file with a light DB** (done 2026-08-07). LHI
+      now lives in the `lhi_records` Postgres table — append-only, one row per
+      interaction, so the full trust history per edge is kept (no more
+      last-value-wins) and current trust = the edge's latest row. Migration
+      `7b21c9e4d3a8`. Remaining narrower race: two concurrent updates for the
+      *same edge* can read the same prev trust before both insert — fix with
+      `SELECT ... FOR UPDATE` on the latest row or a serializable transaction
+      if concurrent per-edge traffic becomes real.
 - [ ] **Fix return types in the `CBAC` class** (`cbac.py:42`).
 - [ ] **Remove `authorise_agent_app_interaction`** (`cbac.py:592`) — superseded
       by the guard + `/authorize-cbac`; it also makes the engine an HTTP

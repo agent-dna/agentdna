@@ -1,4 +1,3 @@
-import asyncio
 import os
 from contextlib import asynccontextmanager
 from uuid import uuid4
@@ -116,23 +115,24 @@ async def compute_lhi(request: Request) -> JSONResponse:
 
     The four component scores are supplied by the caller: the first three
     come back from its own ``/authorize-cbac`` response, ``output_score``
-    from whether the action actually succeeded.
+    from whether the action actually succeeded. Every call appends one
+    ``lhi_records`` row, so the edge's full trust history is preserved.
     """
     body = await request.json()
     _bind_request_context(body)
 
     try:
-        # compute_lhi is sync and writes to the Provenance Layer — off the loop.
-        trust = await asyncio.to_thread(
-            _get_cbac().compute_lhi,
-            agent_id=body.get("agent_id", ""),
-            callee_name=body.get("callee_name", ""),
-            callee_type=body.get("callee_type", ""),
-            intent_score=body.get("intent_score"),
-            policy_score=body.get("policy_score"),
-            hallucination_score=body.get("hallucination_score"),
-            output_score=body.get("output_score"),
-        )
+        async with get_session() as session:
+            trust = await _get_cbac().compute_lhi(
+                session=session,
+                agent_id=body.get("agent_id", ""),
+                callee_name=body.get("callee_name", ""),
+                callee_type=body.get("callee_type", ""),
+                intent_score=body.get("intent_score"),
+                policy_score=body.get("policy_score"),
+                hallucination_score=body.get("hallucination_score"),
+                output_score=body.get("output_score"),
+            )
     except Exception as exc:
         logger.exception("lhi update failed", callee_name=body.get("callee_name", ""))
         return JSONResponse({"error": str(exc)}, status_code=500)

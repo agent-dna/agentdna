@@ -41,7 +41,6 @@ LHI_WEIGHTS: tuple[float, float, float, float] = (0.3, 0.3, 0.2, 0.2)
 LHI_LAMBDA_UP = 0.95
 LHI_LAMBDA_DOWN = 0.70
 
-TRUST_STORE_FILE = "trust_scores.json"
 
 # Structure-aware chunking: paragraphs / list items are the primary unit,
 # split further only past this word-count budget (~1.3 tokens/word for English).

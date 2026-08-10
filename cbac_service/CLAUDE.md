@@ -137,7 +137,13 @@ Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed**
   fast to lose (`LHI_LAMBDA_DOWN`)**. A zero component costs only its weight, not
   the whole score (a transient tool failure must not annihilate an
   otherwise-compliant interaction). Trust is tracked **per caller→callee edge**
-  and persisted in `TRUST_STORE_FILE` (`trust_scores.json`) under the config dir
-  — not in Postgres, which holds only policy chunks/embeddings. The LHI math is
-  covered by `tests/test_cbac_lhi.py`; score attachment by
-  `tests/test_cbac_verify.py` — keep both green when touching it.
+  — the edge key is (`agent_id`, `callee_name`, `callee_type`) — and stored in
+  the **`lhi_records` table, one row per interaction**. The table *is* the trust
+  history: rows are append-only, an edge's current trust is its latest row
+  (`repository.get_latest_trust`), and `get_trust_history` reads the series.
+  Each record is also appended to the agent's `{agent_id}:cbac` provenance card,
+  so the history is verifiable on-chain. `compute_lhi` is **async and takes an
+  `AsyncSession`** like the rest of the pipeline. The LHI math is covered by
+  `tests/test_cbac_lhi.py` (repository functions faked in-memory, no DB needed);
+  score attachment by `tests/test_cbac_verify.py` — keep both green when
+  touching it.

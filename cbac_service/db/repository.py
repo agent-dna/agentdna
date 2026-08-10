@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from cbac_service.config import ENCODER_MODEL, NLI_MODEL
 
-from .models import PolicyChunk, PolicyMeta
+from .models import LHIRecord, PolicyChunk, PolicyMeta
 
 
 async def policy_hash_matches(
@@ -164,3 +164,87 @@ async def delete_policy_chunks(
     await session.execute(delete(PolicyMeta).where(PolicyMeta.agent_id == agent_id))
     await session.commit()
     return result.rowcount  # type: ignore[return-value]
+
+
+# ── LHI trust records ──────────────────────────────────────────────────────────
+
+
+async def get_latest_trust(
+    session: AsyncSession,
+    agent_id: str,
+    callee_name: str,
+    callee_type: str,
+) -> float | None:
+    """Current trust for one agent→callee edge: the latest record's value.
+
+    None when the edge has no history yet (first interaction).
+    """
+    stmt = (
+        select(LHIRecord.trust)
+        .where(
+            LHIRecord.agent_id == agent_id,
+            LHIRecord.callee_name == callee_name,
+            LHIRecord.callee_type == callee_type,
+        )
+        .order_by(LHIRecord.id.desc())
+        .limit(1)
+    )
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none()
+
+
+async def agent_has_lhi_records(session: AsyncSession, agent_id: str) -> bool:
+    """Whether any LHI record exists for this agent (any edge) — decides
+    create-vs-append for the agent's provenance card."""
+    stmt = select(LHIRecord.id).where(LHIRecord.agent_id == agent_id).limit(1)
+    result = await session.execute(stmt)
+    return result.scalar_one_or_none() is not None
+
+
+async def insert_lhi_record(
+    session: AsyncSession,
+    agent_id: str,
+    callee_name: str,
+    callee_type: str,
+    intent_score: float,
+    policy_score: float,
+    hallucination_score: float,
+    output_score: float,
+    trust: float,
+) -> LHIRecord:
+    """Append one interaction's scores + resulting trust. Commits."""
+    record = LHIRecord(
+        agent_id=agent_id,
+        callee_name=callee_name,
+        callee_type=callee_type,
+        intent_score=intent_score,
+        policy_score=policy_score,
+        hallucination_score=hallucination_score,
+        output_score=output_score,
+        trust=trust,
+    )
+    session.add(record)
+    await session.commit()
+    return record
+
+
+async def get_trust_history(
+    session: AsyncSession,
+    agent_id: str,
+    callee_name: str,
+    callee_type: str,
+    limit: int = 100,
+) -> Sequence[LHIRecord]:
+    """Trust history for one edge, newest first."""
+    stmt = (
+        select(LHIRecord)
+        .where(
+            LHIRecord.agent_id == agent_id,
+            LHIRecord.callee_name == callee_name,
+            LHIRecord.callee_type == callee_type,
+        )
+        .order_by(LHIRecord.id.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return result.scalars().all()

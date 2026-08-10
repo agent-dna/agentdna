@@ -107,7 +107,7 @@ def test_authorize_failure_sends_no_score_headers(monkeypatch):
 def test_compute_lhi_forwards_all_scores(monkeypatch):
     calls = []
 
-    def compute_lhi(**kwargs):
+    async def compute_lhi(session, **kwargs):
         calls.append(kwargs)
         return 0.87
 
@@ -120,7 +120,7 @@ def test_compute_lhi_forwards_all_scores(monkeypatch):
 
 
 def test_compute_lhi_error_returns_500(monkeypatch):
-    def boom(**kwargs):
+    async def boom(session, **kwargs):
         raise ValueError("intent_score must be in [0, 1], got 1.2")
 
     install_cbac(monkeypatch, compute_lhi=boom)

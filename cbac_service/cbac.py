@@ -3,20 +3,16 @@ import base64
 import hashlib
 import json
 from collections.abc import Callable
-from dataclasses import asdict
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import requests
 import structlog
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentdna.id import get_id
 from agentdna.provenance import Provenance
-from agentdna.types import AgentCard, IntentWorkflow
+from agentdna.types import AgentCard
 from cbac_service.chunking import chunk_body_text
 from cbac_service.config import (
     ALLOW_GAP,
@@ -31,10 +27,12 @@ from cbac_service.config import (
     LHI_WEIGHTS,
     NLI_BATCH_SIZE,
     NLI_MODEL,
-    TRUST_STORE_FILE,
 )
 from cbac_service.db.repository import (
+    agent_has_lhi_records,
+    get_latest_trust,
     get_policy_chunks,
+    insert_lhi_record,
     policy_hash_matches,
     save_policy_chunks,
 )
@@ -540,52 +538,11 @@ class CBAC:
             policy_score=policy_score,
         )
 
-    # The LHI trust store — one JSON object per agent, keyed by agent DID.
-    # `callees` holds one entry per unique (callee_name + type) edge: the full
-    # history of per-interaction scores (appended each time) plus the EMA trust
-    # carried across them. The append-only chain history lives on the agent's
-    # CBAC provenance card (`{agent_id}:cbac`); this file is only the working
-    # copy of the current state.
-    #
-    #   {
-    #     "<agent_did>": {
-    #       "callees": {
-    #         "<callee_name>:<type>": {              # unique edge identifier
-    #           "callee_name": "<callee_name>",
-    #           "type": "tool" | "agent" | "mcp" | "app",
-    #           "scores": [                          # appended per interaction
-    #             {"intent": 0.9, "policy": 0.8,
-    #              "hallucination": 0.95, "output": 1.0, "at": "<iso8601>"}
-    #           ],
-    #           "trust": 0.87,                       # EMA over interactions
-    #           "updated_at": "<iso8601>"
-    #         }
-    #       }
-    #     }
-    #   }
-    #
-    # TODO:- Replace trust file by light db.
-    # Write Action?
-    @property
-    def _trust_store_path(self) -> Path:
-        return Path(self.provenance.config_dir) / TRUST_STORE_FILE
-
-    def _load_trust_store(self) -> dict[str, Any]:
-        try:
-            with self._trust_store_path.open("r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _save_trust_store(self, store: dict[str, Any]):
-        with self._trust_store_path.open("w") as f:
-            json.dump(store, f, indent=2)
-
     # TODO:- Verify writing provenance card.
     # TODO:- Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously\
-    # TODO:- Add trust score history?
-    def compute_lhi(
+    async def compute_lhi(
         self,
+        session: AsyncSession,
         agent_id: str,
         callee_name: str,
         callee_type: str,
@@ -611,12 +568,15 @@ class CBAC:
            (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
            drops fast). First interaction with a callee: ``T = s``.
 
-        The full record (callee, all four scores, trust) is persisted locally
-        under the config dir and appended to a dedicated per-agent CBAC card
-        (``{agent_id}:cbac``) on the Provenance Layer (created on first write),
-        so the trust history is independently verifiable on-chain. Trust never overrides the per-
-        interaction allow/deny gates — it is read pre-execution only to
-        arbitrate the inconclusive ("advise") band.
+        Storage: one ``lhi_records`` row per interaction — the table is the
+        full trust history for every edge ((agent, callee_name, callee_type)),
+        and the current trust is simply the edge's latest row (see
+        ``repository.get_latest_trust`` / ``get_trust_history``). The record
+        is also appended to a dedicated per-agent CBAC card
+        (``{agent_id}:cbac``) on the Provenance Layer (created on the agent's
+        first record), so the history is independently verifiable on-chain.
+        Trust never overrides the per-interaction allow/deny gates — it is
+        read pre-execution only to arbitrate the inconclusive ("advise") band.
         """
         scores = {
             "intent": intent_score,
@@ -632,55 +592,54 @@ class CBAC:
             value * weight for value, weight in zip(scores.values(), self._lhi_weights, strict=True)
         )
 
-        store = self._load_trust_store()
-        is_new_agent = agent_id not in store
-        agent_entry = store.setdefault(agent_id, {"callees": {}})
-
-        # callee_name + type is the unique edge identifier.
-        edge_key = f"{callee_name}:{callee_type}"
-        prev_entry = agent_entry["callees"].get(edge_key)
-
-        if prev_entry is None:
+        prev = await get_latest_trust(session, agent_id, callee_name, callee_type)
+        if prev is None:
             trust = s
         else:
-            prev = prev_entry["trust"]
             lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
             trust = lam * prev + (1 - lam) * s
 
-        updated_at = datetime.now(timezone.utc).isoformat()
+        # First record for this agent (any edge) -> its CBAC card doesn't
+        # exist yet. Checked before the insert commits.
+        is_new_agent = not await agent_has_lhi_records(session, agent_id)
+
+        # DB is the working copy; the chain is the audit log. Commit first so
+        # a chain failure never loses the trust update.
+        db_record = await insert_lhi_record(
+            session,
+            agent_id=agent_id,
+            callee_name=callee_name,
+            callee_type=callee_type,
+            intent_score=intent_score,
+            policy_score=policy_score,
+            hallucination_score=hallucination_score,
+            output_score=output_score,
+            trust=trust,
+        )
+
         record = {
             "type": "lhi_record",
             "agent_id": agent_id,
             "callee": {"name": callee_name, "type": callee_type},
             "scores": scores,
             "trust": trust,
-            "updated_at": updated_at,
+            "updated_at": db_record.created_at.isoformat(),
         }
-
-        # New (callee_name + type) -> a fresh entry; existing one -> append this
-        # iteration's scores to its history and update the rolling trust.
-        entry = agent_entry["callees"].setdefault(
-            edge_key,
-            {"callee_name": callee_name, "type": callee_type, "scores": []},
-        )
-        entry["scores"].append({**scores, "at": updated_at})
-        entry["trust"] = trust
-        entry["updated_at"] = updated_at
-
-        # Local store is the working copy; the chain is the audit log. Persist
-        # locally first so a chain failure never loses the trust update.
-        cbac_did = f"{agent_id}:cbac"
-        card_id = get_id(cbac_did)
-        self._save_trust_store(store)
+        card_id = get_id(f"{agent_id}:cbac")
 
         try:
+            # Chain writes are sync network calls — off the event loop.
             if is_new_agent:
-                self.provenance.create_new_provenance_card(
-                    card_id=card_id, card_info=json.dumps(record)
+                await asyncio.to_thread(
+                    self.provenance.create_new_provenance_card,
+                    card_id=card_id,
+                    card_info=json.dumps(record),
                 )
             else:
-                self.provenance.append_to_provenance_card(
-                    card_id=card_id, card_info=json.dumps(record)
+                await asyncio.to_thread(
+                    self.provenance.append_to_provenance_card,
+                    card_id=card_id,
+                    card_info=json.dumps(record),
                 )
         except Exception as exc:
             raise RuntimeError(
