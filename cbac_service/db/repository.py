@@ -151,7 +151,9 @@ async def upsert_policy_meta(
         },
     ).returning(PolicyMeta)
 
-    result = await session.execute(stmt)
+    # populate_existing: RETURNING maps onto any instance already in the identity
+    # map, and without this it keeps that instance's stale attribute values.
+    result = await session.execute(stmt, execution_options={"populate_existing": True})
     return result.scalar_one()
 
 
