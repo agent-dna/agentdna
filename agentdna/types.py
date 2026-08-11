@@ -16,7 +16,6 @@ supported_verification_modes = [
 ]
 
 ACTOR_INFO_FILE = "actor_info.json"
-MODEL_EMBEDDINGS_DIR = "embeddings_cache"
 
 CURRENT_VERSION = "1.0"
 SUPPORTED_VERSIONS = ["1.0"]

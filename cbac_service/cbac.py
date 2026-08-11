@@ -2,21 +2,17 @@ import asyncio
 import base64
 import hashlib
 import json
-import os
-import pickle
 from collections.abc import Callable
-from dataclasses import asdict
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-import requests
+import structlog
 from sentence_transformers import SentenceTransformer
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentdna.id import get_id
 from agentdna.provenance import Provenance
-from agentdna.types import MODEL_EMBEDDINGS_DIR, AgentCard, IntentWorkflow
+from agentdna.types import AgentCard
 from cbac_service.chunking import chunk_body_text
 from cbac_service.config import (
     ALLOW_GAP,
@@ -25,19 +21,32 @@ from cbac_service.config import (
     ENCODER_MODEL,
     ENTAILMENT_THRESHOLD,
     HHEM_MODEL,
+    HYBRID_SEARCH_ENABLED,
     LHI_LAMBDA_DOWN,
     LHI_LAMBDA_UP,
     LHI_WEIGHTS,
     NLI_BATCH_SIZE,
     NLI_MODEL,
-    TRUST_STORE_FILE,
 )
+from cbac_service.db.repository import (
+    agent_has_lhi_records,
+    get_latest_trust,
+    get_policy_chunks,
+    insert_lhi_record,
+    policy_hash_matches,
+    save_policy_chunks,
+)
+from cbac_service.db.search import hybrid_search, vector_search
 from cbac_service.skills import (
     CBACResult,
     SkillsCard,
     _intended_action_text,
     parse_skill_md,
 )
+
+# TODO:- Fix return types in CBAC class
+
+logger = structlog.get_logger("cbac_service.cbac")
 
 
 def _policy_hash(policy: str) -> str:
@@ -91,9 +100,7 @@ class CBAC:
         self._hhem = None
         self._nli_labels: dict[int, str] = {}
 
-        # Make embeddings config dir
-        self.embeddings_dir = os.path.join(self.provenance.config_dir, MODEL_EMBEDDINGS_DIR)
-        os.makedirs(self.embeddings_dir, exist_ok=True)
+    # ── Model accessors (lazy-loaded) ─────────────────────────────────────────
 
     def _get_encoder(self):
         if self._encoder is None:
@@ -107,7 +114,7 @@ class CBAC:
             self._nli = CrossEncoder(self._nli_model_name)
             try:
                 if not self._nli.model:
-                    raise ValueError("NLI model is not initialsed")
+                    raise ValueError("NLI model is not initialised")
                 id2label = self._nli.model.config.id2label
 
                 if id2label is None:
@@ -129,12 +136,12 @@ class CBAC:
             )
         return self._hhem
 
+    # ── Scoring helpers ───────────────────────────────────────────────────────
+
     def hallucination_score(self, source_text: str, generated_text: str) -> float:
         """Score how well ``generated_text`` is grounded in ``source_text``.
 
-        Runs the HHEM cross-encoder on the (premise, hypothesis) pair and
-        returns a score in [0, 1]: 1 = fully supported by the source,
-        0 = hallucinated. Higher is better.
+        Returns a score in [0, 1]: 1 = fully supported, 0 = hallucinated.
         """
         model = self._get_hhem()
         return float(model.predict([(source_text, generated_text)])[0])
@@ -173,6 +180,8 @@ class CBAC:
             for row in probs
         ]
 
+    # ── Policy processing ─────────────────────────────────────────────────────
+
     def _flatten_policy_chunks(self, policy: Any) -> list[str]:
         """Flatten a policy of any shape into a list of text chunks.
 
@@ -190,23 +199,14 @@ class CBAC:
                 try:
                     return self._flatten_policy_chunks(parse_skill_md(policy))
                 except Exception:
-                    pass
+                    logger.debug("policy frontmatter unparseable, chunking as plain text")
             return chunk_body_text(policy)
         if isinstance(policy, dict):
             return _flatten_mapping(policy)
         return []
 
     def _classify_chunks(self, chunks: list[str]) -> tuple[list[str], list[str]]:
-        """NLI-classify each chunk as allowed or forbidden.
-
-        For every chunk we run two NLI queries:
-          premise = chunk, hypothesis = "This capability is permitted"
-          premise = chunk, hypothesis = "This capability is prohibited"
-        The chunk goes into the forbidden bucket only when the prohibition
-        entailment clearly beats the permission entailment. All 2*len(chunks)
-        queries are sent to the cross-encoder in one batched call instead of
-        one pair at a time.
-        """
+        """NLI-classify each chunk as allowed or forbidden."""
         if not chunks:
             return [], []
         pairs: list[tuple[str, str]] = []
@@ -226,110 +226,77 @@ class CBAC:
                 allowed.append(chunk)
         return allowed, forbidden
 
-    def _get_latest_agent_policy(
-        self,
-        agent_id: str,
-    ) -> str:
-        """
-        Returns the latest decoded policy
-        associated with an agent.
-        """
-
+    def _get_latest_agent_policy(self, agent_id: str) -> str:
+        """Returns the latest decoded policy associated with an agent."""
         actor_card_dict = self.provenance.get_latest_provenance_record(actor_id=agent_id)
-
         actor_card = AgentCard(**actor_card_dict)
-
         try:
             return base64.b64decode(actor_card.policy).decode("utf-8")
         except Exception as exc:
             raise RuntimeError(f"failed to decode policy for agent {agent_id}: {exc}") from exc
 
-    def _get_embedding_file_path(self, agent_id: str) -> Path:
-        """Return the .pkl path for this agent's precomputed policy vectors."""
-        digest = hashlib.sha256(agent_id.encode()).hexdigest()[:32]
-        return Path(self.embeddings_dir) / f"{digest}.pkl"
+    # ── Precompute (DB-backed) ────────────────────────────────────────────────
 
-    def _save_to_embeddings_dir(self, agent_id: str, data: dict[str, Any]):
-        path = self._get_embedding_file_path(agent_id)
-        with path.open("wb") as f:
-            pickle.dump(data, f)
+    async def precompute_policy(
+        self,
+        session: AsyncSession,
+        agent_id: str,
+        skip_compute: bool = True,
+    ) -> int:
+        """Precompute and cache policy vectors for an agent into Postgres.
 
-    def _load_from_embeddings_dir(self, agent_id: str) -> dict[str, Any] | None:
-        path = self._get_embedding_file_path(agent_id)
-        if not path.exists():
-            return None
-        try:
-            with path.open("rb") as f:
-                return pickle.load(f)
-        except Exception:
-            return None
+        Steps:
+        1. Check if DB cache is current (matching policy hash). Skip if so.
+        2. Fetch the policy from the Provenance Layer.
+        3. Flatten it to text chunks.
+        4. NLI-classify each chunk into allowed / forbidden buckets.
+        5. Encode all chunks with the bi-encoder.
+        6. Persist to the policy_chunks table via the repository layer.
 
-    def check_policy_embedding_exists(self, agent_id: str) -> dict[str, Any] | None:
+        Returns the number of chunks stored.
         """
-        Checks if the embedding file for an agent is present or not
-
-        Returns None if its not present
-        """
-        embedding = self._load_from_embeddings_dir(agent_id=agent_id)
-        return embedding
-
-    async def precompute_policy(self, agent_id: str, skip_compute=True) -> dict[str, Any]:
-        """
-        Precompute and cache policy vectors for an agent.  Call this once
-        after deploying or updating the agent's policy card — not on every
-        inbound request.
-
-        What it does
-        ------------
-        1. Fetches the policy from the Provenance Layer.
-        2. Flattens it to text chunks (unified key:value + body path).
-        3. NLI-classifies each chunk into allowed / forbidden buckets.
-        4. Encodes both buckets with the bi-encoder.
-        5. Persists everything to ``~/.agentdna/embedding_cache/<hash>.pkl``.
-
-        Returns the cached payload so callers can inspect it.
-        """
-        # Checks if embedding is present for a model locally.
-        # If it exists, then check if skip_compute is True.
-        # If its true, proceed to fetch the embeddings from local
-        local_embedding = self.check_policy_embedding_exists(agent_id)
-        if local_embedding and skip_compute:
-            return local_embedding
-
+        # Fetch current policy from chain.
         policy = self._get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
 
+        current_hash = _policy_hash(policy)
+
+        # Check DB cache — skip if hash matches and skip_compute is True.
+        if skip_compute:
+            cache_valid = await policy_hash_matches(session, agent_id, current_hash)
+            if cache_valid:
+                return 0  # Already up to date
+
+        # Flatten and classify.
         chunks = self._flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
 
-        allowed_chunks, forbidden_chunks = self._classify_chunks(chunks)
+        allowed_chunks, forbidden_chunks = await asyncio.to_thread(self._classify_chunks, chunks)
+
+        # Encode all chunks.
+        all_chunks = allowed_chunks + forbidden_chunks
+        chunk_types = (["allowed"] * len(allowed_chunks)) + (["forbidden"] * len(forbidden_chunks))
+
         encoder = self._get_encoder()
-        to_encode = allowed_chunks + forbidden_chunks
+        embeddings = await asyncio.to_thread(
+            lambda: encoder.encode(all_chunks, normalize_embeddings=True)
+        )
 
-        vecs = encoder.encode(to_encode, normalize_embeddings=True)
+        # Persist to DB.
+        count = await save_policy_chunks(
+            session=session,
+            agent_id=agent_id,
+            chunks=all_chunks,
+            chunk_types=chunk_types,
+            embeddings=embeddings,
+            policy_hash=current_hash,
+        )
 
-        n_allowed = len(allowed_chunks)
-        allowed_vecs = vecs[:n_allowed]
-        forbidden_vecs = vecs[n_allowed:]
+        return count
 
-        policy_text = "\n".join(chunks)
-        payload: dict[str, Any] = {
-            "agent_id": agent_id,
-            "allowed_chunks": allowed_chunks,
-            "forbidden_chunks": forbidden_chunks,
-            "allowed_vecs": allowed_vecs,
-            "forbidden_vecs": forbidden_vecs,
-            "policy_text": policy_text,
-            "policy_hash": _policy_hash(policy),
-            "cached_at": datetime.now(timezone.utc).isoformat(),
-            "encoder": self._encoder_name,
-            "nli_model": self._nli_model_name,
-        }
-
-        await asyncio.to_thread(self._save_to_embeddings_dir, agent_id, payload)
-        return payload
+    # ── Check 1: NLI drift ────────────────────────────────────────────────────
 
     async def _check1_drift(
         self,
@@ -339,10 +306,7 @@ class CBAC:
         """NLI drift check: does the agent's action contradict the user's intent?
 
         Returns ``((decision, reason), intent_score)`` if contradiction is
-        strong enough to deny, else ``(None, intent_score)``. ``intent_score``
-        (``1 - contradiction``, in [0, 1]) is always returned — it's the same
-        NLI call regardless of outcome, so the caller gets it for free to feed
-        into :meth:`compute_lhi` later.
+        strong enough to deny, else ``(None, intent_score)``.
         """
         scores = await asyncio.to_thread(self._nli_scores, user_intent, agent_action)
         contradiction = scores.get("contradiction", 0.0)
@@ -360,40 +324,30 @@ class CBAC:
             )
         return None, intent_score
 
-    def _max_cosine(self, query_vec, chunk_vecs) -> float:
-        """Maximum cosine similarity from query_vec to any row in chunk_vecs."""
-        if chunk_vecs.shape[0] == 0:
-            return 0.0
-        sims = chunk_vecs @ query_vec  # both already L2-normalised by SentenceTransformer
-        return float(np.max(sims))
+    # ── Tiered decision (DB-backed search) ────────────────────────────────────
 
     async def _tiered_decision(
         self,
+        session: AsyncSession,
+        agent_id: str,
         intent_text: str,
-        intent_vec,
-        allowed_chunks: list[str],
-        forbidden_chunks: list[str],
-        allowed_vecs,
-        forbidden_vecs,
-        policy_text: str,
+        intent_vec: np.ndarray,
     ) -> tuple[str, str, float | None]:
         """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM).
 
-        Returns ``(decision, reason, policy_score)``. ``policy_score`` is a
-        [0, 1] normalization of whichever signal decided — the Tier 1 cosine
-        gap rescaled against its own allow/deny thresholds (so it lands at
-        exactly 1.0/0.0 on a clean Tier 1 allow/deny), or the Tier 2 NLI
-        entailment as-is. Tier 3 (LLM judgment or no-backend "advise") has no
-        numeric signal, so ``policy_score`` is ``None`` there — the caller
-        must supply their own if they want to feed :meth:`compute_lhi`.
-
-        Pure decision logic, extracted from :meth:`verify_cbac` so
-        the caller can attach a hallucination score to the result exactly once,
-        after a decision is reached, without duplicating it at every tier's exit.
+        Uses pgvector search for Tier 1 instead of in-memory numpy operations.
+        Returns ``(decision, reason, policy_score)``.
         """
-        # Tier 1: cosine gap.
-        allowed_score = self._max_cosine(intent_vec, allowed_vecs)
-        forbidden_score = self._max_cosine(intent_vec, forbidden_vecs)
+        # Tier 1: cosine gap via pgvector.
+        allowed_results = await vector_search(
+            session, agent_id, intent_vec, top_k=1, chunk_type="allowed"
+        )
+        forbidden_results = await vector_search(
+            session, agent_id, intent_vec, top_k=1, chunk_type="forbidden"
+        )
+
+        allowed_score = allowed_results[0].score if allowed_results else 0.0
+        forbidden_score = forbidden_results[0].score if forbidden_results else 0.0
         gap = allowed_score - forbidden_score
 
         span = self._allow_gap + self._deny_gap
@@ -419,11 +373,21 @@ class CBAC:
             )
 
         # Tier 2: NLI entailment vs top allowed chunk.
-        if not allowed_chunks:
+        # Use hybrid search if enabled for better candidate selection,
+        # otherwise fall back to the vector search result we already have.
+        if HYBRID_SEARCH_ENABLED and allowed_results:
+            top_results = await hybrid_search(
+                session, agent_id, intent_vec, intent_text, top_k=1, chunk_type="allowed"
+            )
+            top_chunk = top_results[0].chunk_text if top_results else None
+        elif allowed_results:
+            top_chunk = allowed_results[0].chunk_text
+        else:
+            top_chunk = None
+
+        if not top_chunk:
             return ("deny", "Tier 2: no allowed policy chunks found", None)
 
-        top_idx = int(np.argmax(allowed_vecs @ intent_vec))
-        top_chunk = allowed_chunks[top_idx]
         t2_scores = await asyncio.to_thread(self._nli_scores, intent_text, top_chunk)
         entailment = t2_scores.get("entailment", 0.0)
         contradiction = t2_scores.get("contradiction", 0.0)
@@ -437,7 +401,7 @@ class CBAC:
                 entailment,
             )
 
-        # Tier 3: LLM judgment (optional). No numeric signal — policy_score is None.
+        # Tier 3: LLM judgment (optional).
         if self._llm_backend is None:
             return (
                 "advise",
@@ -448,6 +412,10 @@ class CBAC:
                 ),
                 None,
             )
+
+        # Gather policy text for LLM context.
+        all_chunks = await get_policy_chunks(session, agent_id)
+        policy_text = "\n".join(all_chunks)
 
         try:
             llm_decision = await self._llm_backend(intent_text, policy_text)
@@ -461,14 +429,16 @@ class CBAC:
             return ("allow", f"Tier 3 LLM: {llm_decision}", None)
         return ("advise", f"Tier 3 LLM inconclusive: {llm_decision}", None)
 
+    # ── Main entry point ──────────────────────────────────────────────────────
+
     async def verify_cbac(
         self,
+        session: AsyncSession,
         agent_id: str,
         intended_action: Any,
         user_intent: str | None = None,
     ) -> CBACResult:
-        """
-        Semantic intent verification against the agent's on-chain policy.
+        """Semantic intent verification against the agent's on-chain policy.
 
         Fetches the policy, flattens it into allowed/forbidden chunks (cached
         per policy hash), then runs the tiered decision — Tier 1 cosine gap →
@@ -483,28 +453,19 @@ class CBAC:
 
         Parameters
         ----------
+        session:
+            Async DB session for repository/search calls.
         agent_id:
-            Whose policy to fetch (via :meth:`_get_latest_agent_policy`).
+            Whose policy to fetch (via Provenance Layer).
         intended_action:
-            The action the agent wants to perform. Any shape — string, dict,
-            or object — is flattened to text by :func:`_intended_action_text`.
+            The action the agent wants to perform (any shape, flattened to text).
         user_intent:
-            The root user request. When given, enables the Check-1 drift test
-            and the hallucination score; when omitted, both are skipped.
+            The root user request. Enables Check-1 drift + hallucination score.
 
         Returns
         -------
         CBACResult with ``decision`` in ``{"allow", "deny", "advise"}``.
-        Fail-closed: any unrecoverable error (no policy, empty content, model
-        failure) resolves to ``deny``. The score fields are informational only
-        — none of them ever changes ``decision``:
-
-        - ``intent_score`` — from Check-1 (``1 - contradiction``), set whenever
-          ``user_intent`` is supplied.
-        - ``policy_score`` — set when Tier 1 or 2 decides; ``None`` on Tier 3.
-        - ``hallucination_score`` — HHEM grounding of ``intended_action`` in
-          ``user_intent`` (1 = grounded), set once a decision is reached and
-          ``user_intent`` is present.
+        Fail-closed: any unrecoverable error resolves to ``deny``.
         """
         intent_text = _intended_action_text(intended_action)
         if not intent_text.strip():
@@ -522,7 +483,7 @@ class CBAC:
 
         # Fetch current policy from chain — always, so we can detect updates.
         try:
-            current_policy = self._get_latest_agent_policy(agent_id)
+            current_policy = await asyncio.to_thread(self._get_latest_agent_policy, agent_id)
         except Exception as e:
             return CBACResult(
                 decision="deny", reason=f"Policy lookup failed for agent {agent_id}: {e}"
@@ -532,25 +493,19 @@ class CBAC:
 
         current_hash = _policy_hash(current_policy)
 
-        # Load local cache and validate against current policy hash.
-        cached = await asyncio.to_thread(self._load_from_embeddings_dir, agent_id)
-
-        if cached is None or cached.get("policy_hash") != current_hash:
-            # Cache miss or policy updated on chain — recompute and persist.
+        # Check DB cache — recompute if stale.
+        cache_valid = await policy_hash_matches(session, agent_id, current_hash)
+        if not cache_valid:
             try:
-                cached = await self.precompute_policy(agent_id)
+                await self.precompute_policy(session, agent_id, skip_compute=False)
             except Exception as e:
                 return CBACResult(
                     decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}"
                 )
 
-        allowed_chunks: list[str] = cached["allowed_chunks"]
-        forbidden_chunks: list[str] = cached["forbidden_chunks"]
-        allowed_vecs: np.ndarray = cached["allowed_vecs"]
-        forbidden_vecs: np.ndarray = cached["forbidden_vecs"]
-        policy_text: str = cached["policy_text"]
-
-        if not allowed_chunks and not forbidden_chunks:
+        # Check that chunks actually exist.
+        all_chunks = await get_policy_chunks(session, agent_id)
+        if not all_chunks:
             return CBACResult(decision="deny", reason="Policy carries no analysable content")
 
         # Encode only the intent at runtime (~5 ms on CPU).
@@ -559,18 +514,12 @@ class CBAC:
             lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
         )
 
+        # Run the tiered decision pipeline (DB-backed search).
         decision, reason, policy_score = await self._tiered_decision(
-            intent_text,
-            intent_vec,
-            allowed_chunks,
-            forbidden_chunks,
-            allowed_vecs,
-            forbidden_vecs,
-            policy_text,
+            session, agent_id, intent_text, intent_vec
         )
 
-        # Hallucination score rides along with the decision but never gates it —
-        # a scoring failure must not flip an already-decided allow into a deny.
+        # Hallucination score — informational, never gates the decision.
         hallucination = None
         if user_intent:
             try:
@@ -578,6 +527,7 @@ class CBAC:
                     self.hallucination_score, user_intent, intent_text
                 )
             except Exception:
+                logger.warning("hallucination scoring failed", decision=decision, exc_info=True)
                 hallucination = None
 
         return CBACResult(
@@ -588,69 +538,11 @@ class CBAC:
             policy_score=policy_score,
         )
 
-    # TODO:- Remove
-    def authorise_agent_app_interaction(
+    # TODO:- Verify writing provenance card.
+    # TODO:- Remove output_score? In that case we can compute lhi score at the time of decision or it can be computed asynchornously\
+    async def compute_lhi(
         self,
-        agent_id: str,
-        action_intent: str,
-        envelope: IntentWorkflow,
-        app_url: str,
-        app_method: str = "POST",
-        app_headers: dict | None = None,
-        app_body: str | dict | None = None,
-        app_timeout: float = 100.0,
-    ) -> requests.Response:
-        if isinstance(app_body, dict):
-            app_body = json.dumps(app_body)
-            app_headers = {"Content-Type": "application/json", **(app_headers or {})}
-
-        envelope_dict = asdict(envelope)
-        payload = {
-            "agent_id": agent_id,
-            "action_intent": action_intent,
-            "envelope": envelope_dict,
-            "app_request": {
-                "url": app_url,
-                "method": app_method,
-                "headers": app_headers or {},
-                "body": app_body or "",
-            },
-        }
-
-        resp = requests.post(
-            f"{self.cbac_url.rstrip('/')}/agent-admin/v1/authorize-action",
-            json=payload,
-            timeout=app_timeout,
-        )
-
-        decision = resp.headers.get("X-CBAC-Decision")
-
-        if decision == "deny":
-            raise PermissionError(resp.text)
-        if decision == "error":
-            raise RuntimeError(resp.text)
-
-        return resp
-
-    # TODO:- Replace trust file by light db.
-    # Fix LHI store structure.
-    @property
-    def _trust_store_path(self) -> Path:
-        return Path(self.provenance.config_dir) / TRUST_STORE_FILE
-
-    def _load_trust_store(self) -> dict[str, Any]:
-        try:
-            with self._trust_store_path.open("r") as f:
-                return json.load(f)
-        except Exception:
-            return {}
-
-    def _save_trust_store(self, store: dict[str, Any]):
-        with self._trust_store_path.open("w") as f:
-            json.dump(store, f, indent=2)
-
-    def compute_lhi(
-        self,
+        session: AsyncSession,
         agent_id: str,
         callee_name: str,
         callee_type: str,
@@ -659,25 +551,32 @@ class CBAC:
         hallucination_score: float,
         output_score: float,
     ) -> float:
-        """Update and return the LHI trust score for one (agent → callee) edge.
+        """Update and return the LHI (Local Heuristic Intelligence) trust
+        score for one (agent → callee) edge.
 
         Called *after* the interaction executed, once all four per-interaction
         scores (each in [0, 1], higher is better) are known:
 
-        1. Instantaneous quality ``s`` = weighted geometric mean of the four
-           scores — non-compensatory, so a single near-zero component drags
-           ``s`` toward zero regardless of the others.
+        1. Instantaneous quality ``s`` = weighted **arithmetic** mean of the
+           four scores — the expected quality of the interaction. Deliberately
+           compensatory: hard constraints are already enforced by the
+           allow/deny gates *before* execution, and this update only ever sees
+           interactions that passed them, so the reputation's job is unbiased
+           longitudinal estimation, not constraint enforcement.
         2. Asymmetric EMA against the stored trust for this edge:
            ``T = λ·T_prev + (1−λ)·s`` with λ = ``lhi_lambda_up`` when improving
            (trust builds slowly) and ``lhi_lambda_down`` when degrading (trust
            drops fast). First interaction with a callee: ``T = s``.
 
-        The full record (callee, all four scores, trust) is persisted locally
-        under the config dir and appended to a dedicated per-agent LHI card on
-        the Provenance Layer (created on first write), so the trust history is
-        independently verifiable on-chain. Trust never overrides the per-
-        interaction allow/deny gates — it is read pre-execution only to
-        arbitrate the inconclusive ("advise") band.
+        Storage: one ``lhi_records`` row per interaction — the table is the
+        full trust history for every edge ((agent, callee_name, callee_type)),
+        and the current trust is simply the edge's latest row (see
+        ``repository.get_latest_trust`` / ``get_trust_history``). The record
+        is also appended to a dedicated per-agent CBAC card
+        (``{agent_id}:cbac``) on the Provenance Layer (created on the agent's
+        first record), so the history is independently verifiable on-chain.
+        Trust never overrides the per-interaction allow/deny gates — it is
+        read pre-execution only to arbitrate the inconclusive ("advise") band.
         """
         scores = {
             "intent": intent_score,
@@ -689,21 +588,34 @@ class CBAC:
             if not 0.0 <= value <= 1.0:
                 raise ValueError(f"{key}_score must be in [0, 1], got {value}")
 
-        # TODO: should this be a geometric mean?
-        s = 1.0
-        for value, weight in zip(scores.values(), self._lhi_weights, strict=False):
-            s *= value**weight
+        s = sum(
+            value * weight for value, weight in zip(scores.values(), self._lhi_weights, strict=True)
+        )
 
-        store = self._load_trust_store()
-        agent_entry = store.setdefault(agent_id, {"callees": {}})
-        prev_entry = agent_entry["callees"].get(callee_name)
-
-        if prev_entry is None:
+        prev = await get_latest_trust(session, agent_id, callee_name, callee_type)
+        if prev is None:
             trust = s
         else:
-            prev = prev_entry["trust"]
             lam = self._lhi_lambda_up if s >= prev else self._lhi_lambda_down
             trust = lam * prev + (1 - lam) * s
+
+        # First record for this agent (any edge) -> its CBAC card doesn't
+        # exist yet. Checked before the insert commits.
+        is_new_agent = not await agent_has_lhi_records(session, agent_id)
+
+        # DB is the working copy; the chain is the audit log. Commit first so
+        # a chain failure never loses the trust update.
+        db_record = await insert_lhi_record(
+            session,
+            agent_id=agent_id,
+            callee_name=callee_name,
+            callee_type=callee_type,
+            intent_score=intent_score,
+            policy_score=policy_score,
+            hallucination_score=hallucination_score,
+            output_score=output_score,
+            trust=trust,
+        )
 
         record = {
             "type": "lhi_record",
@@ -711,38 +623,28 @@ class CBAC:
             "callee": {"name": callee_name, "type": callee_type},
             "scores": scores,
             "trust": trust,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": db_record.created_at.isoformat(),
         }
-
-        agent_entry["callees"][callee_name] = {
-            "type": callee_type,
-            "scores": scores,
-            "trust": trust,
-            "updated_at": record["updated_at"],
-        }
-
-        # Local store is the working copy; the chain is the audit log. Persist
-        # locally first so a chain failure never loses the trust update.
-        lhi_card_id = agent_entry.get("lhi_card_id")
-        is_new_card = lhi_card_id is None
-        if is_new_card:
-            lhi_card_id = get_id(f"{agent_id}:lhi")
-            agent_entry["lhi_card_id"] = lhi_card_id
-        self._save_trust_store(store)
+        card_id = get_id(f"{agent_id}:cbac")
 
         try:
-            if is_new_card:
-                self.provenance.create_new_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+            # Chain writes are sync network calls — off the event loop.
+            if is_new_agent:
+                await asyncio.to_thread(
+                    self.provenance.create_new_provenance_card,
+                    card_id=card_id,
+                    card_info=json.dumps(record),
                 )
             else:
-                self.provenance.append_to_provenance_card(
-                    card_id=lhi_card_id, card_info=json.dumps(record)
+                await asyncio.to_thread(
+                    self.provenance.append_to_provenance_card,
+                    card_id=card_id,
+                    card_info=json.dumps(record),
                 )
         except Exception as exc:
             raise RuntimeError(
                 f"LHI record for agent {agent_id} saved locally but failed to "
-                f"write to provenance card {lhi_card_id}: {exc}"
+                f"write to provenance card {card_id}: {exc}"
             ) from exc
 
         return trust

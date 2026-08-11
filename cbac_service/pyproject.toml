@@ -9,11 +9,18 @@ dependencies = [
   "agent-dna>=0.4.1",
   "fastapi>=0.115.0",
   "uvicorn>=0.30.0",
+  "structlog>=24.1.0",
   "sentence-transformers>=3.0.0",
   "scipy>=1.10.0",
   "numpy>=1.24.0",
   # HHEM-2.1's remote code (hallucination_score) is incompatible with transformers 5.x
   "transformers>=4.40.0,<5",
+  # ORM + Vector DB
+  "sqlalchemy>=2.0.0",
+  "asyncpg>=0.29.0",
+  "alembic>=1.13.0",
+  "pgvector>=0.3.6",
+  "greenlet>=3.0.0",
 ]
 
 # Deployed from a checkout (uvicorn cbac_service.cbac:app); not published as a wheel.

@@ -48,6 +48,29 @@ def run_guarded(fn, *args, user_intent="show me the PRs", **kwargs):
     return asyncio.run(_run())
 
 
+def test_intent_is_rendered_as_prose_from_docstring(posts):
+    @cbac_guard()
+    async def close_pull_request(state: str, all: bool = False):
+        """Close a pull request in the repository."""
+        return "ok"
+
+    run_guarded(close_pull_request, state="draft", all=True)
+    assert posts[0][1]["intended_action"] == (
+        "The agent wants to close a pull request in the repository, with state = draft, all = True."
+    )
+
+
+def test_intent_prose_falls_back_to_desnaked_name(posts):
+    @cbac_guard()
+    async def list_pull_requests(repo: str):
+        return "ok"
+
+    run_guarded(list_pull_requests, repo="payments")
+    assert posts[0][1]["intended_action"] == (
+        "The agent wants to list pull requests, with repo = payments."
+    )
+
+
 def test_successful_call_reports_output_score_one(posts):
     @cbac_guard()
     async def github_tool(owner: str):

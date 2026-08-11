@@ -1,0 +1,36 @@
+# Docker Compose for local development — Postgres 18 with pgvector + pg_textsearch.
+#
+# Usage:
+#   cd cbac_service
+#   docker compose up -d
+#
+# Then run migrations:
+#   alembic upgrade head
+#
+# Connect manually:
+#   psql postgresql://cbac_user:cbac_pass@localhost:5432/cbac
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    # Note: As of Aug 2026, there is no official pg18 + pgvector + pg_textsearch
+    # all-in-one image. For production, build a custom image (see Dockerfile below).
+    # For local dev with PG 17+pgvector, this works. pg_textsearch requires PG 17+.
+    container_name: cbac-postgres
+    environment:
+      POSTGRES_USER: cbac_user
+      POSTGRES_PASSWORD: cbac_pass
+      POSTGRES_DB: cbac
+    ports:
+      - "5432:5432"
+    volumes:
+      - cbac_pgdata:/var/lib/postgresql/data
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/01-extensions.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cbac_user -d cbac"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  cbac_pgdata:

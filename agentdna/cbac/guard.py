@@ -115,11 +115,32 @@ def get_config() -> GuardConfig:
 # ── Guard internals ───────────────────────────────────────────────────────────
 
 
-def _default_intent(action_name: str, kwargs: dict[str, Any]) -> str:
-    """Build the CBAC intent text from the call's own arguments."""
-    parts = [action_name]
-    parts.extend(f"{k}={str(v)[:200]}" for k, v in kwargs.items())
-    return " ".join(parts)
+def _action_summary(action_name: str, description: str | None = None) -> str:
+    """Verb-only prose for the intended action: "The agent wants to <verb>."
+
+    The verb phrase is the tool's own description (docstring first line)
+    when available, else the de-snaked tool name. This is the prefix of
+    :func:`_default_intent`'s full rendering; kept as its own function so a
+    verb-only view stays available to callers that want one.
+    """
+    verb = (description or action_name.replace("_", " ")).strip().rstrip(".")
+    return f"The agent wants to {verb[:1].lower()}{verb[1:]}."
+
+
+def _default_intent(
+    action_name: str, kwargs: dict[str, Any], description: str | None = None
+) -> str:
+    """Render the intended action as prose, parameters included.
+
+    NLI and the policy tiers score natural language far better than raw
+    ``tool k=v`` call syntax — snake_case tool names hide their verb from
+    the NLI model (measured: a direct "close" vs "do not close"
+    contradiction scored 0.01 on call syntax, 0.95 as prose).
+    """
+    text = _action_summary(action_name, description).rstrip(".")
+    if kwargs:
+        text += ", with " + ", ".join(f"{k} = {str(v)}" for k, v in kwargs.items())
+    return text + "."
 
 
 def _bind_kwargs(sig: inspect.Signature, args: tuple, kwargs: dict) -> dict[str, Any]:
@@ -275,6 +296,56 @@ async def _report_lhi(
         pass
 
 
+# ── Framework-agnostic call gate ──────────────────────────────────────────────
+#
+# The authorize/report flow every framework needs, split from any framework's
+# request/result types. A framework interceptor supplies only its own glue:
+# extract (name, args), execute, detect success, render a denial. See
+# `agentdna.cbac.mcp.cbac_intercept` for the MCP/LangChain adapter.
+
+
+async def authorize_tool_call(
+    callee_name: str,
+    args: dict[str, Any],
+    description: str | None = None,
+) -> tuple[str, str, dict[str, float | None]]:
+    """Authorize one tool call against the ambient policy (decision only).
+
+    Returns ``(decision, detail, scores)``. ``decision`` is ``"allow"`` when
+    governance is off (no :func:`cbac_context`), so a caller can always
+    proceed on ``"allow"`` and short-circuit otherwise. Fail-closed: any
+    error resolves to ``"error"`` and never raises.
+
+    ``description`` is the tool's own description (schema/docstring first
+    line) used as the verb phrase of the rendered intent; without it the
+    de-snaked ``callee_name`` is the fallback.
+    """
+    ctx = get_context()
+    if ctx is None:
+        return "allow", "", {}
+    intent = _default_intent(callee_name, args, description)
+    cfg = get_config()
+    try:
+        return await _authorize(ctx, intent, cfg)
+    except Exception as exc:
+        return "error", str(exc), {}
+
+
+async def report_tool_outcome(
+    callee_name: str,
+    scores: dict[str, float | None],
+    *,
+    ok: bool,
+    callee_type: str = "tool",
+) -> None:
+    """Fold a finished tool call's outcome into the trust score. No-op when
+    governance is off; never raises (mirrors :func:`_report_lhi`)."""
+    ctx = get_context()
+    if ctx is None:
+        return
+    await _report_lhi(ctx, callee_name, callee_type, scores, 1.0 if ok else 0.0, get_config())
+
+
 # ── The decorator ─────────────────────────────────────────────────────────────
 
 
@@ -327,6 +398,8 @@ def cbac_guard(
 
         action_name = action or fn.__name__
         sig = inspect.signature(fn)
+        doc = inspect.getdoc(fn)
+        description = doc.splitlines()[0].strip() if doc else None
 
         @functools.wraps(fn)
         async def wrapper(*args, **kwargs):
@@ -341,7 +414,7 @@ def cbac_guard(
             intent_text = (
                 action_intent(call_kwargs)
                 if action_intent
-                else _default_intent(action_name, call_kwargs)
+                else _default_intent(action_name, call_kwargs, description)
             )
 
             cfg = get_config()
