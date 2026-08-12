@@ -1,0 +1,1 @@
+"""Independent RSS research workload."""
