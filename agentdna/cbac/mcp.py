@@ -59,7 +59,6 @@ __all__ = [
 # INTENT_ARG = "user_intent"
 
 
-# # XXX: Not agnostic to MCP-SDK
 # class CBACMiddleware(Middleware):
 #     """Server-side: restore the governance context from the hidden
 #     ``user_intent`` argument so ``@cbac_guard`` can authorize the call.

@@ -1,6 +1,12 @@
 import re
+from typing import Any
+
+import structlog
 
 from cbac_service.config import CHUNK_MAX_WORDS
+from cbac_service.skills import SkillsCard, parse_skill_md
+
+logger = structlog.get_logger("cbac_service.chunking")
 
 _BULLET_RE = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
@@ -79,3 +85,39 @@ def chunk_body_text(text: str, max_words: int = CHUNK_MAX_WORDS) -> list[str]:
                 continue
             chunks.extend(split_by_word_budget(unit, max_words))
     return chunks
+
+
+def _flatten_mapping(mapping: dict[str, Any]) -> list[str]:
+    """Flatten a key→value mapping to "key: value" chunks — one per list item
+    for list-valued keys, one per scalar otherwise. ``None`` values are skipped."""
+    chunks: list[str] = []
+    for key, value in mapping.items():
+        if isinstance(value, list):
+            chunks.extend(f"{key}: {item}" for item in value)
+        elif value is not None:
+            chunks.append(f"{key}: {value}")
+    return chunks
+
+
+def flatten_policy_chunks(policy: Any) -> list[str]:
+    """Flatten a policy of any shape into a list of text chunks.
+
+    Each YAML frontmatter (or dict) entry becomes "key: value" (one chunk
+    per list item for list-valued keys); the body is chunked by
+    paragraph/list-item structure via :func:`chunk_body_text`, not by raw
+    line. This unified path works for any skill.md schema — no hardcoded
+    key names.
+    """
+    if isinstance(policy, SkillsCard):
+        return _flatten_mapping(policy.raw_frontmatter) + chunk_body_text(policy.body)
+    if isinstance(policy, str):
+        stripped = policy.strip()
+        if stripped.startswith("---"):
+            try:
+                return flatten_policy_chunks(parse_skill_md(policy))
+            except Exception:
+                logger.debug("policy frontmatter unparseable, chunking as plain text")
+        return chunk_body_text(policy)
+    if isinstance(policy, dict):
+        return _flatten_mapping(policy)
+    return []

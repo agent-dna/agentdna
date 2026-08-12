@@ -145,20 +145,25 @@ async def compute_lhi(request: Request) -> JSONResponse:
 async def precompute_policy(request: Request) -> JSONResponse:
     """Precompute and cache policy embeddings for an agent.
 
-    Call this after deploying or updating an agent's policy card.
+    Call this after deploying or updating an agent's policy card. Supply
+    ``policy`` (the decoded policy text) to embed that instead of reading the
+    agent's card from the Provenance Layer.
     """
     body = await request.json()
     agent_id = body.get("agent_id", "")
+    policy = body.get("policy")
 
     if not agent_id:
         return JSONResponse({"error": "agent_id is required"}, status_code=400)
+    if policy is not None and not isinstance(policy, str):
+        return JSONResponse({"error": "policy must be a string"}, status_code=400)
 
     try:
         async with get_session() as session:
-            count = await _get_cbac().precompute_policy(
+            count = await _get_cbac().index_policy(
                 session=session,
                 agent_id=agent_id,
-                skip_compute=body.get("skip_compute", False),
+                policy=policy,
             )
     except Exception as exc:
         return JSONResponse({"error": str(exc)}, status_code=500)

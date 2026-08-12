@@ -12,10 +12,7 @@ from .base import Base
 
 
 class PolicyChunk(Base):
-    """One text chunk from an agent's policy, with its embedding vector.
-
-    Replaces the old pickle-file cache under ~/.agentdna/embeddings_cache/.
-    """
+    """One text chunk from an agent's policy, with its embedding vector."""
 
     __tablename__ = "policy_chunks"
 

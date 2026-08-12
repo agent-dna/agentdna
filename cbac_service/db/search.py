@@ -53,23 +53,20 @@ async def vector_search(
     """
     distance = PolicyChunk.embedding.cosine_distance(query_embedding)
 
-    stmt = (
-        select(
-            PolicyChunk.id,
-            PolicyChunk.agent_id,
-            PolicyChunk.chunk_text,
-            PolicyChunk.chunk_type,
-            PolicyChunk.chunk_index,
-            PolicyChunk.section,
-            (1 - distance).label("similarity"),
-        )
-        .where(PolicyChunk.agent_id == agent_id)
-        .order_by(distance)
-        .limit(top_k)
-    )
+    stmt = select(
+        PolicyChunk.id,
+        PolicyChunk.agent_id,
+        PolicyChunk.chunk_text,
+        PolicyChunk.chunk_type,
+        PolicyChunk.chunk_index,
+        PolicyChunk.section,
+        (1 - distance).label("similarity"),
+    ).where(PolicyChunk.agent_id == agent_id)
+
     if chunk_type is not None:
         stmt = stmt.where(PolicyChunk.chunk_type == chunk_type)
 
+    stmt = stmt.order_by(distance).limit(top_k)
     result = await session.execute(stmt)
 
     return [

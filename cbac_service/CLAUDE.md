@@ -105,7 +105,7 @@ Class `CBAC`. On each request:
 
 2. **Policy fetch + cache check**: Fetches the agent's latest policy from the
    Provenance Layer. Compares the policy hash against `policy_meta` in Postgres.
-   If stale or missing → `precompute_policy` (chunk, classify, encode, store).
+   If stale or missing → `index_policy` (chunk, classify, encode, store).
 
 3. **Tier 1 — Cosine gap** (via pgvector): Encodes the intent, runs
    `vector_search(allowed)` and `vector_search(forbidden)`. If

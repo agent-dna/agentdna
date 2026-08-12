@@ -5,7 +5,6 @@ import json
 from collections.abc import Callable
 from typing import Any
 
-import numpy as np
 import structlog
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from agentdna.id import get_id
 from agentdna.provenance import Provenance
 from agentdna.types import AgentCard
-from cbac_service.chunking import chunk_body_text
+from cbac_service.chunking import flatten_policy_chunks
 from cbac_service.config import (
     ALLOW_GAP,
     CONTRADICTION_THRESHOLD,
@@ -39,9 +38,7 @@ from cbac_service.db.repository import (
 from cbac_service.db.search import hybrid_search, vector_search
 from cbac_service.skills import (
     CBACResult,
-    SkillsCard,
     _intended_action_text,
-    parse_skill_md,
 )
 
 # TODO:- Fix return types in CBAC class
@@ -54,18 +51,6 @@ def _policy_hash(policy: str) -> str:
     and the read side (compares it) must derive it identically, or cache
     invalidation breaks — so both go through here."""
     return hashlib.sha256(policy.encode()).hexdigest()
-
-
-def _flatten_mapping(mapping: dict[str, Any]) -> list[str]:
-    """Flatten a key→value mapping to "key: value" chunks — one per list item
-    for list-valued keys, one per scalar otherwise. ``None`` values are skipped."""
-    chunks: list[str] = []
-    for key, value in mapping.items():
-        if isinstance(value, list):
-            chunks.extend(f"{key}: {item}" for item in value)
-        elif value is not None:
-            chunks.append(f"{key}: {value}")
-    return chunks
 
 
 class CBAC:
@@ -182,29 +167,6 @@ class CBAC:
 
     # ── Policy processing ─────────────────────────────────────────────────────
 
-    def _flatten_policy_chunks(self, policy: Any) -> list[str]:
-        """Flatten a policy of any shape into a list of text chunks.
-
-        Each YAML frontmatter (or dict) entry becomes "key: value" (one chunk
-        per list item for list-valued keys); the body is chunked by
-        paragraph/list-item structure via :func:`chunk_body_text`, not by raw
-        line. This unified path works for any skill.md schema — no hardcoded
-        key names.
-        """
-        if isinstance(policy, SkillsCard):
-            return _flatten_mapping(policy.raw_frontmatter) + chunk_body_text(policy.body)
-        if isinstance(policy, str):
-            stripped = policy.strip()
-            if stripped.startswith("---"):
-                try:
-                    return self._flatten_policy_chunks(parse_skill_md(policy))
-                except Exception:
-                    logger.debug("policy frontmatter unparseable, chunking as plain text")
-            return chunk_body_text(policy)
-        if isinstance(policy, dict):
-            return _flatten_mapping(policy)
-        return []
-
     def _classify_chunks(self, chunks: list[str]) -> tuple[list[str], list[str]]:
         """NLI-classify each chunk as allowed or forbidden."""
         if not chunks:
@@ -237,39 +199,41 @@ class CBAC:
 
     # ── Precompute (DB-backed) ────────────────────────────────────────────────
 
-    async def precompute_policy(
+    async def index_policy(
         self,
         session: AsyncSession,
         agent_id: str,
-        skip_compute: bool = True,
+        policy: str | None = None,
     ) -> int:
         """Precompute and cache policy vectors for an agent into Postgres.
 
         Steps:
-        1. Check if DB cache is current (matching policy hash). Skip if so.
-        2. Fetch the policy from the Provenance Layer.
-        3. Flatten it to text chunks.
-        4. NLI-classify each chunk into allowed / forbidden buckets.
-        5. Encode all chunks with the bi-encoder.
-        6. Persist to the policy_chunks table via the repository layer.
+        1. Take ``policy`` when supplied, else fetch it from the Provenance Layer.
+        2. Flatten it to text chunks.
+        3. NLI-classify each chunk into allowed / forbidden buckets.
+        4. Encode all chunks with the bi-encoder.
+        5. Persist to the policy_chunks table via the repository layer.
+
+        Always recomputes — callers that want a cache check do it themselves
+        (``verify_cbac`` compares the on-chain hash before calling).
+
+        Passing ``policy`` warms the cache for a policy the chain does not carry
+        yet. ``verify_cbac`` still re-reads the chain on every request, so a
+        cached policy that disagrees with the chain is replaced on the next
+        authorization — this is a cache warm, never a way to override the policy
+        a decision is made against.
 
         Returns the number of chunks stored.
         """
-        # Fetch current policy from chain.
-        policy = self._get_latest_agent_policy(agent_id=agent_id)
+        if policy is None:
+            policy = self._get_latest_agent_policy(agent_id=agent_id)
         if not policy:
             raise RuntimeError(f"No policy found for agent {agent_id}")
 
         current_hash = _policy_hash(policy)
 
-        # Check DB cache — skip if hash matches and skip_compute is True.
-        if skip_compute:
-            cache_valid = await policy_hash_matches(session, agent_id, current_hash)
-            if cache_valid:
-                return 0  # Already up to date
-
         # Flatten and classify.
-        chunks = self._flatten_policy_chunks(policy)
+        chunks = flatten_policy_chunks(policy)
         if not chunks:
             raise RuntimeError(f"Policy for agent {agent_id} produced no chunks")
 
@@ -331,13 +295,19 @@ class CBAC:
         session: AsyncSession,
         agent_id: str,
         intent_text: str,
-        intent_vec: np.ndarray,
     ) -> tuple[str, str, float | None]:
         """Tier 1 (cosine gap) → Tier 2 (NLI entailment) → Tier 3 (LLM).
 
         Uses pgvector search for Tier 1 instead of in-memory numpy operations.
         Returns ``(decision, reason, policy_score)``.
         """
+
+        # Encode only the intent at runtime (~5 ms on CPU).
+        encoder = self._get_encoder()
+        intent_vec = await asyncio.to_thread(
+            lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
+        )
+
         # Tier 1: cosine gap via pgvector.
         allowed_results = await vector_search(
             session, agent_id, intent_vec, top_k=1, chunk_type="allowed"
@@ -497,7 +467,7 @@ class CBAC:
         cache_valid = await policy_hash_matches(session, agent_id, current_hash)
         if not cache_valid:
             try:
-                await self.precompute_policy(session, agent_id, skip_compute=False)
+                await self.index_policy(session, agent_id, policy=current_policy)
             except Exception as e:
                 return CBACResult(
                     decision="deny", reason=f"Policy unavailable for agent {agent_id}: {e}"
@@ -508,16 +478,8 @@ class CBAC:
         if not all_chunks:
             return CBACResult(decision="deny", reason="Policy carries no analysable content")
 
-        # Encode only the intent at runtime (~5 ms on CPU).
-        encoder = self._get_encoder()
-        intent_vec = await asyncio.to_thread(
-            lambda: encoder.encode([intent_text], normalize_embeddings=True)[0]
-        )
-
         # Run the tiered decision pipeline (DB-backed search).
-        decision, reason, policy_score = await self._tiered_decision(
-            session, agent_id, intent_text, intent_vec
-        )
+        decision, reason, policy_score = await self._tiered_decision(session, agent_id, intent_text)
 
         # Hallucination score — informational, never gates the decision.
         hallucination = None

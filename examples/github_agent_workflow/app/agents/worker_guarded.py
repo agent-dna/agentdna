@@ -126,7 +126,7 @@ async def _get_guarded_tools() -> list:
     )
     return await client.get_tools()
 
-
+ 
 # An in-process tool: runs in THIS process, not over MCP. Governed by the same
 # cbac_context as the MCP tools, but enforced by @cbac_guard (authorized
 # in-process) rather than the client interceptor.
@@ -135,7 +135,7 @@ async def draft_summary(repo: str, notes: str) -> dict:
     """Condense raw notes into a short change summary for a repo.
 
     Args:
-        repo: Repository in owner/name format.
+        repo: Repository in owner/name format.x
         notes: Raw notes to condense.
     """
     return {"status": "drafted", "repo": repo, "summary": " ".join(notes.split())[:280]}

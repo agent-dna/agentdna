@@ -27,6 +27,7 @@ credentials/
 
 uv.lock
 
+
 # Example specific
 
 examples/github_agent_workflow/agent_actor_ids.json

@@ -128,3 +128,46 @@ def test_compute_lhi_error_returns_500(monkeypatch):
 
     assert response.status_code == 500
     assert "must be in [0, 1]" in json.loads(response.body)["error"]
+
+
+def _recording_precompute(calls, result=7):
+    async def precompute_policy(session, agent_id, policy):
+        calls.append({"agent_id": agent_id, "policy": policy})
+        return result
+
+    return precompute_policy
+
+
+def test_precompute_forwards_supplied_policy(monkeypatch):
+    calls = []
+    install_cbac(monkeypatch, index_policy=_recording_precompute(calls))
+    response = asyncio.run(
+        main.precompute_policy(
+            stub_request({"agent_id": "did:agent", "policy": "allowed-actions: read"})
+        )
+    )
+
+    assert calls == [{"agent_id": "did:agent", "policy": "allowed-actions: read"}]
+    assert json.loads(response.body) == {"agent_id": "did:agent", "chunks_stored": 7}
+
+
+def test_precompute_without_policy_passes_none(monkeypatch):
+    # None is the signal to read the agent's card from the Provenance Layer.
+    calls = []
+    install_cbac(monkeypatch, index_policy=_recording_precompute(calls))
+    asyncio.run(main.precompute_policy(stub_request({"agent_id": "did:agent"})))
+
+    assert calls == [{"agent_id": "did:agent", "policy": None}]
+
+
+def test_precompute_rejects_non_string_policy(monkeypatch):
+    async def never(session, agent_id, policy):
+        raise AssertionError("should not reach the engine")
+
+    install_cbac(monkeypatch, precompute_policy=never)
+    response = asyncio.run(
+        main.precompute_policy(stub_request({"agent_id": "did:agent", "policy": {"a": 1}}))
+    )
+
+    assert response.status_code == 400
+    assert json.loads(response.body)["error"] == "policy must be a string"

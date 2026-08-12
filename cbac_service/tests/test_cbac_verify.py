@@ -139,7 +139,7 @@ def test_policy_score_normalized_on_tier1_decision(tmp_path, monkeypatch):
     monkeypatch.setattr(cbac_mod, "vector_search", _vsearch)
 
     decision, _reason, policy_score = asyncio.run(
-        cbac._tiered_decision(None, AGENT_ID, "intent text", np.array([1.0, 0.0]))
+        cbac._tiered_decision(None, AGENT_ID, "intent text")
     )
     assert decision == "allow"
     assert policy_score == pytest.approx(1.0)
