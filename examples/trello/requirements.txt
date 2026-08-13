@@ -1,0 +1,16 @@
+# Agent orchestration (run.py)
+langgraph>=0.2.50
+langchain-core>=0.3.0
+langchain-mcp-adapters>=0.1.0
+python-dotenv>=1.0.0
+
+# LLM backends -- select one via LLM_BACKEND in .env (install what you use)
+langchain-ollama>=0.2.0
+langchain-openai>=0.2.0
+langchain-google-genai>=2.0.0
+
+# MCP server (mcp_server.py)
+fastmcp>=2.3.0
+httpx>=0.27.0
+
+-e ../../../agentdna
