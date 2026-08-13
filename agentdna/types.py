@@ -83,7 +83,7 @@ def dump_workflow(workflow: IntentWorkflow) -> dict:
         "type": workflow.type,
         "version": workflow.version,
         "info": workflow.info,
-        "envelope": dump_envelope(workflow.envelope)
+        "envelope": dump_envelope(workflow.envelope),
     }
 
 
@@ -108,9 +108,7 @@ def dump_envelope(envelope: Envelope | None) -> dict | None:
 
     # Handle the recursive DAG properly
     if envelope.parent_envelope:
-        result["parent_envelope"] = [
-            dump_envelope(parent) for parent in envelope.parent_envelope
-        ]
+        result["parent_envelope"] = [dump_envelope(parent) for parent in envelope.parent_envelope]
     else:
         result["parent_envelope"] = None
 

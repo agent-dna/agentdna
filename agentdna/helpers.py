@@ -65,6 +65,7 @@ def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
     data["envelope"] = parse_envelope(data.get("envelope"))
     return IntentWorkflow(**data)
 
+
 @overload
 def parse_envelope(data: dict | Envelope) -> Envelope: ...
 @overload
