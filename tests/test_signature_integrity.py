@@ -15,7 +15,7 @@ def test_payload_tampering(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_sender_from_tampering(user, agent):
@@ -31,7 +31,7 @@ def test_sender_from_tampering(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_recipient_to_tampering(user, agent):
@@ -47,7 +47,7 @@ def test_recipient_to_tampering(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_signature_tampering(user, agent):
@@ -63,7 +63,7 @@ def test_signature_tampering(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_missing_signature(user, agent):
@@ -78,7 +78,7 @@ def test_missing_signature(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_parent_signature_tampering(user, agent):
@@ -132,4 +132,4 @@ def test_parent_payload_tampering(user, agent):
 
     result = user.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK

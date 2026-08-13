@@ -1,7 +1,7 @@
 import pytest
 
-from agentdna.types import VERIFY_LIGHT, VERIFY_HEAVY
 from agentdna.error import RESULT_OK
+from agentdna.types import VERIFY_HEAVY, VERIFY_LIGHT
 
 
 def test_simple_build_verify_ideal_flow(user, agent):
@@ -167,7 +167,7 @@ def test_three_step_build_verify_failure(user, agent, second_agent):
 
 
 def test_verify_without_envelope_raises(agent):
-    from agentdna.types import IntentWorkflow, CURRENT_VERSION
+    from agentdna.types import CURRENT_VERSION, IntentWorkflow
 
     workflow = IntentWorkflow(
         type="intent_workflow",

@@ -1,5 +1,6 @@
 import copy
 from dataclasses import fields
+
 import pytest
 
 from agentdna.helpers import canonicalize_envelope

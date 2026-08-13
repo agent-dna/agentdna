@@ -44,7 +44,7 @@ def test_handle_with_invalid_signature_returns_invalid(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
 
 
 def test_handle_with_missing_signature_returns_invalid(user, agent):
@@ -59,4 +59,4 @@ def test_handle_with_missing_signature_returns_invalid(user, agent):
 
     result = agent.verify(workflow)
 
-    assert not result is RESULT_OK
+    assert result is not RESULT_OK
