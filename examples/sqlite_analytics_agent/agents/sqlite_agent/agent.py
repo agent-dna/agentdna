@@ -15,15 +15,17 @@ from agentdna.core import AgentDNA
 from agentdna.types import IntentWorkflow
 from agentdna.error import RESULT_OK
 
+from config import settings
+
 _HERE = Path(__file__).resolve().parent
 SKILLS_FILE = _HERE / "SKILLS.md"
 
 SQLITE_AGENT = AgentDNA(
-    name="SQLite Analytics Agent",
+    name=settings.sqlite_agent_name,
     type="agent",
     agent_policy_file=SKILLS_FILE,
-    api_key="31c1fd3f-5f2e-4dd1-9693-529de70c8347",
-    provenance_layer_url="https://chain-connector-2-dev.rubix.net",
+    api_key=settings.agentdna_api_key,
+    provenance_layer_url=settings.provenance_layer_url,
 )
 
 
