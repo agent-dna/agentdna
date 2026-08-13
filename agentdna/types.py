@@ -74,6 +74,7 @@ class Envelope:
             if new_envelope not in self.parent_envelope:
                 self.parent_envelope.append(new_envelope)
 
+
 def dump_workflow(workflow: IntentWorkflow) -> dict:
     """
     Converts an IntentWorkflow object back into a raw dictionary,
