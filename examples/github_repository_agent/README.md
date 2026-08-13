@@ -47,14 +47,9 @@ Set `GITHUB_ANALYSIS_TASK` to one of the following before an execution:
 From the `examples` parent directory, start the MCP server and provide a task directly to the Python CLI:
 
 ```sh
-python3 -m github_repository_agent.mcp_server
-python3 -m github_repository_agent.manual "Review open pull requests for delivery and security risks."
-```
+python3 mcp_server.py
 
-The manual CLI prints a readable report by default. Use `--json` when a structured execution event is needed:
-
-```sh
-python3 -m github_repository_agent.manual --json "Review open pull requests for delivery and security risks."
+python3 manual.py "Your prompt"
 ```
 
 On Windows, replace `python3` with `python`.
