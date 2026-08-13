@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 from .error import RESULT_OK
@@ -75,6 +75,48 @@ class Envelope:
             if new_envelope not in self.parent_envelope:
                 self.parent_envelope.append(new_envelope)
 
+def dump_workflow(workflow: IntentWorkflow) -> dict:
+    """
+    Converts an IntentWorkflow object back into a raw dictionary,
+    ready for JSON serialization.
+    """
+    return {
+        "type": workflow.type,
+        "version": workflow.version,
+        "info": workflow.info,
+        "envelope": dump_envelope(workflow.envelope)
+    }
+
+
+def dump_envelope(envelope: Envelope | None) -> dict | None:
+    """
+    Recursively turns a proper Envelope object into a raw dict,
+    safely handling the DAG of parent envelopes and mapping 'from_' back to 'from'.
+    """
+    if envelope is None:
+        return None
+
+    result = {
+        "from": envelope.from_,  # <-- CRITICAL: Map from_ back to from
+        "payload": envelope.payload,
+        "epoch": envelope.epoch,
+        "status_code": envelope.status_code,
+        "run_id": envelope.run_id,
+        "to": envelope.to,
+        "hash": envelope.hash,
+        "signature": envelope.signature,
+    }
+
+    # Handle the recursive DAG properly
+    if envelope.parent_envelope:
+        result["parent_envelope"] = [
+            dump_envelope(parent) for parent in envelope.parent_envelope
+        ]
+    else:
+        result["parent_envelope"] = None
+
+    return result
+
 
 @dataclass
 class IntentWorkflow:
@@ -133,7 +175,8 @@ class IntentWorkflow:
         """
         Serializes the workflow into a dictionary representation.
         """
-        return json.dumps(asdict(self))
+        raw_dict = dump_workflow(self)
+        return json.dumps(raw_dict, separators=(",", ":"))
 
     def unwrap(self) -> list[Envelope]:
         """
