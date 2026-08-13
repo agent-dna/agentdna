@@ -5,6 +5,7 @@ venv/
 .DS_Store
 .vscode/
 .venv/
+.ruff_cache/
 
 dist/
 build/
@@ -35,3 +36,5 @@ examples/github_agent_workflow/agent_names.json
 # Tests
 
 tests/temp
+
+docs

@@ -63,14 +63,9 @@ Verification (`Provenance.verify_envelope`) calls `rubix.did.online_signature_ve
 Context-Based Access Control decides whether an agent's intended action is permitted by its on-chain policy. It splits across the two projects:
 
 - **`agentdna/cbac/`** (in the library, no ML deps) — the guard. `cbac_guard` decorates a tool/function, `cbac_context` carries the governance context via `contextvars`, and authorization is a `requests` POST to a CBAC service (`cbac_url`, default `https://cbac-admin.agentdna.io`).
-- **`cbac_service/cbac.py`** (the deployable) — the decision engine plus the `FastAPI` app serving `POST /authorize-cbac`.
+- **`cbac_service/`** (the deployable) — the decision engine + `FastAPI` app (`POST /authorize-cbac`). Decisions are `"allow" | "deny" | "advise"`, fail-closed.
 
-The engine is a three-tier semantic pipeline. It fetches the latest policy from the Provenance Layer, flattens it to text chunks (YAML frontmatter of a `skill.md` + body), and runs:
-1. **Tier 1** — cosine gap between allowed vs forbidden policy chunks (with an optional Check-1 NLI drift test against the root user intent).
-2. **Tier 2** — NLI entailment against the top allowed chunk.
-3. **Tier 3** — optional LLM backend; if none is configured the result is `"advise"` and the caller decides.
-
-Decisions are `"allow" | "deny" | "advise"` and the pipeline is **fail-closed** (any error → `deny`). Policy embeddings are precomputed and cached as pickles under `~/.agentdna/embeddings_cache/`, keyed by policy hash so an on-chain policy update triggers recompute.
+Only the guard side is part of the library. For the decision engine's internals (the semantic pipeline, hallucination/trust scoring, config), see **`cbac_service/CLAUDE.md`** — don't duplicate them here.
 
 ## Working conventions
 

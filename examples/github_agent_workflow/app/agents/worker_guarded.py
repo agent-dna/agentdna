@@ -1,7 +1,6 @@
 """
 Guarded Worker — same role as app/agents/worker, but GitHub tools are
-served behind MCP (same server URL as the original example) with
-governance done by `@cbac_guard` instead of hand-written per tool.
+served behind MCP and governed *from the client* by `cbac_intercept`.
 
 This one file plays two roles:
 
@@ -9,14 +8,18 @@ This one file plays two roles:
     the tools remotely (over MCP) and calls them inside a governance
     scope.
   - Run standalone (`python -m app.agents.worker_guarded`): hosts the
-    guarded MCP server the worker connects to.
+    MCP server the worker connects to.
 
-A contextvar can't cross the MCP process boundary, so the root user
-intent the guard authorizes against travels as a hidden "user_intent"
-tool argument: the client-side interceptor injects it (invisible to the
-LLM's tool schema — it's added after LangChain's arg parsing), and
-`CBACMiddleware` restores it into a governance scope server-side
-before the guarded tool runs.
+The MCP server here is deliberately un-governed — a stand-in for a
+third-party server you don't own and can't decorate. All CBAC
+enforcement happens on the client: `cbac_intercept` authorizes each
+outgoing tool call against the worker's policy before it leaves the
+process, so a denied call never reaches the server. The interceptor
+reads the ambient `cbac_context` that `worker_node` opens.
+
+(`@cbac_guard` governs an agent's *own* in-process tools; an MCP tool
+call crosses a process boundary into someone else's server, so it is
+gated at the client edge instead.)
 
 Delegation (coordinator <-> worker) keeps the original build()/handle()
 protocol; only tool calls go through the guard.
@@ -26,19 +29,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import httpx
-from fastmcp import FastMCP
-from langchain_core.messages import HumanMessage
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langgraph.prebuilt import create_react_agent
-
-from agentdna.core import AgentDNA
-from agentdna.cbac import cbac_context, cbac_guard
-from agentdna.cbac.mcp import CBACMiddleware, intent_interceptor
-from agentdna.helpers import get_latest_envelope, get_root_envelope
-
 from app.agent_names import coordinator_name, worker_name
 from app.agents.agentdna_helpers import get_dna, verify_inbound
 from app.agents.state import GithubAgentState
@@ -46,18 +38,18 @@ from app.agents.worker.agent import WORKER_SYSTEM
 from app.config import settings
 from app.llm import make_llm
 from app.utils import serialize_workflow as serialize_state_workflow
+from fastmcp import FastMCP
+from langchain_core.messages import HumanMessage
+from langchain_core.tools import StructuredTool
+from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.prebuilt import create_react_agent
+
+from agentdna.cbac import cbac_context, cbac_guard
+from agentdna.cbac.mcp import cbac_intercept
+from agentdna.helpers import get_latest_envelope, get_root_envelope
 
 SKILLS_FILE = str(Path(__file__).parent / "worker" / "skills.md")
 COORDINATOR_SKILLS_FILE = str(Path(__file__).parent / "coordinator" / "skills.md")
-
-
-def _worker_dna() -> Optional[AgentDNA]:
-    return get_dna(worker_name(), SKILLS_FILE)
-
-
-def _worker_agent_id() -> Optional[str]:
-    dna = _worker_dna()
-    return dna.get_actor_id() if dna else None
 
 
 def _gh_headers() -> dict:
@@ -69,15 +61,14 @@ def _gh_headers() -> dict:
     }
 
 
-# ── MCP server side: guarded tools + governance ──────────────────────────────
+# ── MCP server side: plain tools, no CBAC awareness (governed client-side) ───
 
 mcp = FastMCP("github-mcp-guarded")
-mcp.add_middleware(CBACMiddleware(agent_id_provider=_worker_agent_id))
 
 
 async def _github_post(url: str, body: dict) -> dict:
     """POST to GitHub and shape the tool result. Runs only after the
-    guard has authorized the call."""
+    client-side interceptor has authorized the call."""
     async with httpx.AsyncClient(timeout=30.0) as client:
         response = await client.post(url, headers=_gh_headers(), json=body)
     if response.status_code >= 300:
@@ -86,7 +77,6 @@ async def _github_post(url: str, body: dict) -> dict:
 
 
 @mcp.tool()
-@cbac_guard(action_intent=lambda kw: f"github:create_issue:{kw['repo']}")
 async def create_issue(repo: str, title: str, body: str) -> dict:
     """Create a GitHub issue.
 
@@ -102,8 +92,6 @@ async def create_issue(repo: str, title: str, body: str) -> dict:
 
 
 @mcp.tool()
-# @cbac_guard(action_intent=lambda kw: f"github:create_pr:{kw['repo']}")
-@cbac_guard()
 async def create_pr(repo: str, title: str, body: str, head: str, base: str = "main") -> dict:
     """Create a GitHub pull request.
 
@@ -134,9 +122,23 @@ async def _get_guarded_tools() -> list:
                 "sse_read_timeout": timeout_s,
             }
         },
-        tool_interceptors=[intent_interceptor],
+        tool_interceptors=[cbac_intercept],
     )
     return await client.get_tools()
+
+
+# An in-process tool: runs in THIS process, not over MCP. Governed by the same
+# cbac_context as the MCP tools, but enforced by @cbac_guard (authorized
+# in-process) rather than the client interceptor.
+@cbac_guard(action_intent=lambda kw: f"repo:draft_summary:{kw['repo']}")
+async def draft_summary(repo: str, notes: str) -> dict:
+    """Condense raw notes into a short change summary for a repo.
+
+    Args:
+        repo: Repository in owner/name format.
+        notes: Raw notes to condense.
+    """
+    return {"status": "drafted", "repo": repo, "summary": " ".join(notes.split())[:280]}
 
 
 # ── Worker node ───────────────────────────────────────────────────────────────
@@ -179,10 +181,14 @@ async def worker_node(state: GithubAgentState) -> GithubAgentState:
             "worker_messages": [],
         }
 
-    tools = await _get_guarded_tools()
+    tools = [
+        StructuredTool.from_function(coroutine=draft_summary),  # in-process, @cbac_guard
+        *await _get_guarded_tools(),  # MCP, cbac_intercept
+    ]
     agent = create_react_agent(make_llm(temperature=0.0), tools, prompt=WORKER_SYSTEM)
 
     root = get_root_envelope(handle_result.workflow)
+    
     with cbac_context(agent_id=dna.get_actor_id(), user_intent=(root.payload if root else "")):
         result = await agent.ainvoke({"messages": [HumanMessage(content=task_spec)]})
 

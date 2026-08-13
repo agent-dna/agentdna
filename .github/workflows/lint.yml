@@ -26,10 +26,10 @@ jobs:
         run: uv sync
 
       - name: ruff format
-        run: uv run ruff format --check agentdna cbac_service
+        run: uv run ruff format --check agentdna cbac_service tests
 
       - name: ruff check
-        run: uv run ruff check agentdna cbac_service
+        run: uv run ruff check agentdna cbac_service tests
 
       - name: pyright
         run: uv run pyright

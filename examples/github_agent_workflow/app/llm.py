@@ -78,7 +78,7 @@ def make_llm(temperature: float = 0.0) -> BaseChatModel:
         kwargs = {
             "model": settings.openai_model,
             "api_key": settings.openai_api_key,
-            "temperature": 0.1,
+            "temperature": temperature,
         }
 
         if settings.openai_base_url:
