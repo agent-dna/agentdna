@@ -1,0 +1,1 @@
+"""Independent GitHub repository analysis workload."""

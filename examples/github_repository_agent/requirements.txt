@@ -1,0 +1,11 @@
+fastmcp>=3.4.0
+httpx>=0.28.0
+langchain-core>=0.3.0
+langchain-mcp-adapters>=0.1.0
+langgraph>=0.2.50
+langchain-ollama>=0.2.0
+langchain-openai>=0.2.0
+langchain-google-genai>=2.0.0
+python-dotenv>=1.0.0
+
+-e ../../../agentdna
