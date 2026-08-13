@@ -1,87 +1,133 @@
-from .helpers import get_latest_envelope, unwrap_workflow
+from .helpers import _hash_content
 from .provenance import Provenance
-from .types import IntentWorkflow, Issue, VerificationResult
+from .types import IntentWorkflow
 
 
 def verify_light(
     provenance: Provenance,
     workflow: IntentWorkflow,
-) -> VerificationResult:
+) -> bool:
     """
-    Verifies only the latest envelope.
+    Verifies only the latest envelope (the tip).
     """
-
-    envelope = get_latest_envelope(workflow)
-
-    issues: list[Issue] = []
+    logger = provenance.logger
+    envelope = workflow.get_latest_envelope()
 
     try:
-        valid = provenance.verify_envelope(envelope)
-
-        if not valid:
-            issues.append(
-                Issue(
-                    depth=0,
-                    reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})",
-                )
+        result = provenance.verify_envelope(envelope)
+        if not result:
+            logger.warning(
+                "verify.light.failed",
+                envelope_from=envelope.from_,
+                epoch=envelope.epoch,
+                position="tip",
             )
+            return False
 
+        if envelope.parent_envelope:
+            for parent in envelope.parent_envelope:
+                if parent.hash != _hash_content(parent):
+                    logger.warning(
+                        "verify.light.parent_integrity_failed",
+                        reason="parent content hash mismatch",
+                    )
+                    return False
+
+        return True
     except Exception as ex:
-        issues.append(
-            Issue(
-                depth=0,
-                reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}",
-            )
+        logger.error(
+            "verify.light.error",
+            envelope_from=envelope.from_,
+            epoch=envelope.epoch,
+            error=str(ex),
         )
-
-    return VerificationResult(
-        valid=len(issues) == 0,
-        chain_depth=1,
-        issues=issues,
-    )
+        raise RuntimeError(f"Error occurred while verifying envelope tip: {ex}") from ex
 
 
 def verify_heavy(
     provenance: Provenance,
     workflow: IntentWorkflow,
-) -> VerificationResult:
+) -> bool:
     """
     Verifies the complete envelope chain.
 
-    Every envelope in the workflow lineage
+    Every unique envelope in the workflow DAG
     is verified, starting from the latest
     envelope and traversing back to the root.
     """
+    logger = provenance.logger
+    envelopes = workflow.unwrap()
 
-    envelopes = unwrap_workflow(workflow)
+    if not envelopes:
+        logger.warning("verify.heavy.failed", reason="empty_workflow")
+        return False
 
-    chain_depth = len(envelopes)
-
-    issues: list[Issue] = []
-
-    current_depth = 0
-    for envelope in envelopes:
+    for idx, envelope in enumerate(envelopes):
         try:
             valid = provenance.verify_envelope(envelope)
             if not valid:
-                issues.append(
-                    Issue(
-                        depth=current_depth,
-                        reason=f"invalid signature for actor {envelope.from_.name} (id: {envelope.from_.id})",
-                    )
+                logger.warning(
+                    "verify.heavy.failed",
+                    envelope_from=envelope.from_,
+                    epoch=envelope.epoch,
+                    position=idx,
+                    chain_length=len(envelopes),
                 )
-
+                return False
         except Exception as ex:
-            issues.append(
-                Issue(
-                    depth=current_depth,
-                    reason=f"error occured while verifying signature of actor {envelope.from_.name} (id: {envelope.from_.id}): {str(ex)}",
-                )
+            logger.error(
+                "verify.heavy.error",
+                envelope_from=envelope.from_,
+                epoch=envelope.epoch,
+                position=idx,
+                chain_length=len(envelopes),
+                error=str(ex),
             )
+            raise RuntimeError(f"Error occurred while verifying envelope chain: {ex}") from ex
 
-        current_depth += 1
-    return VerificationResult(
-        valid=len(issues) == 0,
-        chain_depth=chain_depth,
-        issues=issues,
-    )
+    return True
+
+
+def verify_boundary(
+    provenance: Provenance,
+    workflow: IntentWorkflow,
+) -> bool:
+    """
+    Verifies the latest envelope and the root envelope.
+
+    Optimized approach for deep DAGs. Secures the boundaries
+    (initial human intent and final output) without the compute overhead
+    of verifying every intermediate node.
+    """
+    logger = provenance.logger
+    latest_env = workflow.get_latest_envelope()
+    root_env = workflow.get_root_envelope()
+
+    envelopes_to_verify = [("tip", latest_env)]
+
+    # Ensure we don't double-verify if the DAG is only 1 layer deep (tip is root)
+    if id(root_env) != id(latest_env):
+        envelopes_to_verify.append(("root", root_env))
+
+    for position, envelope in envelopes_to_verify:
+        try:
+            valid = provenance.verify_envelope(envelope)
+            if not valid:
+                logger.warning(
+                    "verify.boundary.failed",
+                    envelope_from=envelope.from_,
+                    epoch=envelope.epoch,
+                    position=position,
+                )
+                return False
+        except Exception as ex:
+            logger.error(
+                "verify.boundary.error",
+                envelope_from=envelope.from_,
+                epoch=envelope.epoch,
+                position=position,
+                error=str(ex),
+            )
+            raise RuntimeError(f"Error occurred while verifying hybrid boundaries: {ex}") from ex
+
+    return True

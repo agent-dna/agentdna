@@ -26,6 +26,7 @@ dependencies = [
   "rubix-py>=1.0.0",
   "py-multiformats-cid>=0.4.4",
   "pyyaml>=6.0",
+  "structlog>=24.0.0",
 ]
 
 [project.optional-dependencies]

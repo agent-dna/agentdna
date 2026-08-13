@@ -27,7 +27,7 @@ pydantic-settings>=2.2.0
 structlog>=24.0.0
 
 # AgentDNA
-agent-dna @ git+https://github.com/agent-dna/agentdna.git@main
+agent-dna==0.4.1
 
 sentence-transformers>=5.6.0
 

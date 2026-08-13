@@ -2,138 +2,60 @@ import hashlib
 import json
 from typing import overload
 
-from .types import Actor, Envelope, IntentWorkflow, Issue
+from .log import get_logger
+from .types import Envelope, IntentWorkflow
+
+logger = get_logger("agentdna.helpers")
+
+
+def _hash_content(envelope: Envelope) -> str:
+    """
+    Extracts and hashes ONLY the intrinsic fields of the
+    current envelope. Explicitly ignores 'hash', 'signature', and 'parent_envelope'.
+    """
+    content = {
+        "from_": envelope.from_,
+        "payload": envelope.payload,
+        "epoch": envelope.epoch,
+        "status_code": envelope.status_code,
+        "run_id": envelope.run_id,
+        "to": envelope.to,
+    }
+
+    content_str = json.dumps(content, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+    return hashlib.sha256(content_str).hexdigest()
 
 
 def canonicalize_envelope(envelope: Envelope) -> str:
     """
-    Produces the canonical representation used
-    for both signing and verification.
-
-    Ancestor signatures are included.
-
-    Returns the SHA-256 hash of the envelope
+    Combines the content hash with the parent hashes
+    to create a strict, flat canonical hash for signing.
     """
+    content_hash = _hash_content(envelope)
 
-    envelope_dict = _envelope_to_dict(envelope)
+    if not envelope.hash:
+        envelope.hash = content_hash
 
-    envelope_dict_str = json.dumps(
-        envelope_dict,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    if not envelope.parent_envelope or len(envelope.parent_envelope) == 0:
+        return content_hash
 
-    return hashlib.sha256(envelope_dict_str).hexdigest()
+    parent_hashes = []
+    for parent in envelope.parent_envelope:
+        if parent.hash == "":
+            error_msg = f"Parent envelope {parent} lacks hash; cannot canonicalize."
+            logger.error("agentdna.helpers.canonicalize_envelope", msg=error_msg)
+            raise ValueError(error_msg)
 
+        parent_hashes.append(parent.hash)
 
-def get_latest_envelope(
-    workflow: IntentWorkflow,
-) -> Envelope:
-    """
-    Returns the latest envelope
-    from a workflow.
-    """
+    parent_hashes.sort()  # To ensure deterministic ordering of parent hashes
 
-    if workflow.envelope is None:
-        raise ValueError("workflow does not contain an envelope")
+    combined_msg = {"content_hash": content_hash, "parents": parent_hashes}
 
-    return workflow.envelope
+    combined_str = json.dumps(combined_msg, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
-
-def get_root_envelope(
-    workflow: IntentWorkflow,
-) -> Envelope | None:
-    """
-    Returns the root envelope from a workflow.
-    """
-
-    if workflow.envelope is None:
-        raise ValueError("workflow does not contain an envelope")
-
-    current = parse_envelope(workflow.envelope)
-
-    while current.parent_envelope is not None:
-        current = parse_envelope(current.parent_envelope)
-
-    return current
-
-
-def get_envelope_depth(
-    envelope: Envelope | None,
-) -> int:
-    depth = 0
-
-    while envelope:
-        depth += 1
-        envelope = envelope.parent_envelope
-
-    return depth
-
-
-def unwrap_workflow(workflow: IntentWorkflow) -> list[Envelope]:
-    """
-    Unwraps a workflow into a list of envelopes.
-
-    Returns envelopes in descending order:
-        [latest ... root]
-
-    Example:
-        E4(E3(E2(E1)))
-
-    becomes:
-        [E4, E3, E2, E1]
-    """
-    current = get_latest_envelope(workflow)
-    envelopes: list[Envelope] = []
-
-    while current is not None:
-        if isinstance(current, dict):
-            current = parse_envelope(current)
-        envelopes.append(current)
-        current = current.parent_envelope
-
-    return envelopes
-
-
-def _envelope_to_dict(envelope: Envelope, is_current=True) -> dict:
-    """
-    Converts an envelope into a canonical dictionary.
-
-    Parent envelope signatures are always included.
-
-    `is_current` skips adding the signature attribute to the dict
-    if envelope is current.
-
-    This creates a chain-of-attestation where every
-    envelope commits to all previously signed envelopes.
-    """
-
-    result = {
-        "from_": {
-            "id": envelope.from_.id,
-            "name": envelope.from_.name,
-            "type": envelope.from_.type,
-            "metadata": envelope.from_.metadata,
-        },
-        "to": {
-            "id": envelope.to.id,
-            "name": envelope.to.name,
-            "type": envelope.to.type,
-            "metadata": envelope.to.metadata,
-        },
-        "payload": envelope.payload,
-        "metadata": envelope.metadata,
-        "epoch": envelope.epoch,
-        "issues": [{"depth": issue.depth, "reason": issue.reason} for issue in envelope.issues],
-    }
-
-    if not is_current:
-        result["signature"] = envelope.signature
-
-    if envelope.parent_envelope is not None:
-        result["parent_envelope"] = _envelope_to_dict(envelope.parent_envelope, is_current=False)
-
-    return result
+    return hashlib.sha256(combined_str).hexdigest()
 
 
 def parse_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
@@ -149,32 +71,38 @@ def parse_envelope(data: dict | Envelope) -> Envelope: ...
 @overload
 def parse_envelope(data: None) -> None: ...
 def parse_envelope(data: dict | Envelope | None) -> Envelope | None:
-    """Recursively turns a raw dict (and any nested dicts) into a
-    proper Envelope, including the parent_envelope chain."""
+    """
+    Recursively turns a raw dict into a proper Envelope,
+    safely handling the list of parent envelopes in the DAG.
+    """
     if data is None or isinstance(data, Envelope):
         return data
 
     data = dict(data)  # don't mutate caller's dict
 
-    # handle "from" alias
     if "from" in data and "from_" not in data:
         data["from_"] = data.pop("from")
 
-    data["from_"] = parse_actor(data.get("from_"))
-    data["to"] = parse_actor(data.get("to"))
-    data["issues"] = [parse_issue(i) for i in data.get("issues", [])]
-    data["parent_envelope"] = parse_envelope(data.get("parent_envelope"))
+    parents_data = data.get("parent_envelope")
+    if parents_data:
+        if isinstance(parents_data, dict):
+            parents_data = [parents_data]
+        data["parent_envelope"] = [parse_envelope(p) for p in parents_data if p]
+    else:
+        data["parent_envelope"] = None
+
+    # Safety check: Allow "hash" to pass through deserialization
+    allowed_keys = {
+        "from_",
+        "payload",
+        "epoch",
+        "status_code",
+        "run_id",
+        "to",
+        "hash",
+        "signature",
+        "parent_envelope",
+    }
+    data = {k: v for k, v in data.items() if k in allowed_keys}
 
     return Envelope(**data)
-
-
-def parse_actor(data: dict | Actor | None) -> Actor | None:
-    if data is None or isinstance(data, Actor):
-        return data
-    return Actor(**data)
-
-
-def parse_issue(data: dict | Issue) -> Issue:
-    if isinstance(data, Issue):
-        return data
-    return Issue(**data)

@@ -1,37 +1,29 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
+from .error import RESULT_OK
+
 ACTOR_TYPE_AGENT = "agent"
-ACTOR_TYPE_HUMAN = "human"
+ACTOR_TYPE_USER = "user"
 ACTOR_TYPE_APP = "app"
-supported_actors = [ACTOR_TYPE_AGENT, ACTOR_TYPE_HUMAN, ACTOR_TYPE_APP]
+supported_actors = [ACTOR_TYPE_AGENT, ACTOR_TYPE_USER, ACTOR_TYPE_APP]
 
 VERIFY_LIGHT = "light"
 VERIFY_HEAVY = "heavy"
+VERIFY_BOUNDARY = "boundary"
 supported_verification_modes = [
     VERIFY_LIGHT,
     VERIFY_HEAVY,
+    VERIFY_BOUNDARY,
 ]
 
 ACTOR_INFO_FILE = "actor_info.json"
 
-CURRENT_VERSION = "1.0"
-SUPPORTED_VERSIONS = ["1.0"]
-
-
-@dataclass
-class Actor:
-    """
-    Represents an actor participating in the workflow.
-    """
-
-    id: str
-    name: str
-    type: str
-
-    metadata: dict[str, Any] = field(default_factory=dict)
+CURRENT_VERSION = "2.0"
+SUPPORTED_VERSIONS = ["2.0"]
 
 
 @dataclass
@@ -43,8 +35,7 @@ class Envelope:
     between two actors.
     """
 
-    from_: Actor = field(metadata={"alias": "from"})
-    to: Actor
+    from_: str = field(metadata={"alias": "from"})
 
     # Message, decision, response, verification result, etc.
     payload: str
@@ -52,17 +43,77 @@ class Envelope:
     # Epoch at which the envelop is formed
     epoch: int
 
-    # Additional information that may evolve over time.
-    metadata: dict[str, Any] = field(default_factory=dict)
+    # Code represents the error category during an
+    # envelope formation event
+    status_code: int = RESULT_OK
+
+    # run_id acts as a reference for access token
+    run_id: str = ""
 
     # Signature of the canonical envelope representation.
     signature: str = ""
 
-    # List of issues being observered via CoCA or CBAC layers
-    issues: list[Issue] = field(default_factory=list)
-
     # Previous envelope in the provenance chain.
-    parent_envelope: Envelope | None = None
+    parent_envelope: list[Envelope] | None = None
+
+    # To whom the envelope is forwared to explicity
+    to: str = ""
+
+    # Hash of the envelope for integrity verification
+    hash: str = ""
+
+    def add_envelope(self, new_envelope: Envelope | None):
+        if new_envelope is None:
+            return
+
+        if self.parent_envelope is None:
+            self.parent_envelope = [new_envelope]
+        else:
+            # Check to ensure we don't end up adding
+            # duplicate envelopes
+            if new_envelope not in self.parent_envelope:
+                self.parent_envelope.append(new_envelope)
+
+
+def dump_workflow(workflow: IntentWorkflow) -> dict:
+    """
+    Converts an IntentWorkflow object back into a raw dictionary,
+    ready for JSON serialization.
+    """
+    return {
+        "type": workflow.type,
+        "version": workflow.version,
+        "info": workflow.info,
+        "envelope": dump_envelope(workflow.envelope),
+    }
+
+
+def dump_envelope(envelope: Envelope | None) -> dict | None:
+    """
+    Recursively turns a proper Envelope object into a raw dict,
+    safely handling the DAG of parent envelopes and mapping 'from_' back to 'from'.
+    """
+    if envelope is None:
+        return None
+
+    result = {
+        "from": envelope.from_,  # <-- CRITICAL: Map from_ back to from
+        "payload": envelope.payload,
+        "epoch": envelope.epoch,
+        "status_code": envelope.status_code,
+        "run_id": envelope.run_id,
+        "to": envelope.to,
+        "hash": envelope.hash,
+        "signature": envelope.signature,
+    }
+
+    # Handle the recursive DAG properly
+    if envelope.parent_envelope:
+        result["parent_envelope"] = [dump_envelope(parent) for parent in envelope.parent_envelope]
+    else:
+        result["parent_envelope"] = None
+
+    return result
 
 
 @dataclass
@@ -79,7 +130,6 @@ class IntentWorkflow:
 
     type: str
     version: str
-    remarks: str
 
     # Workflow-level information.
     info: dict[str, Any] = field(default_factory=dict)
@@ -87,25 +137,70 @@ class IntentWorkflow:
     # Latest envelope in the workflow.
     envelope: Envelope | None = None
 
+    def set_envelope(self, envelope: Envelope):
+        self.envelope = envelope
 
-@dataclass
-class Issue:
-    depth: int
-    reason: str
+    def get_latest_envelope(self) -> Envelope:
+        """Returns the latest envelope (the tip) from the workflow."""
+        if self.envelope is None:
+            raise ValueError("workflow does not contain an envelope")
+        return self.envelope
 
+    def get_root_envelope(self) -> Envelope:
+        """
+        Returns the single root envelope (the original human intent).
+        Since all branches originate from the same single root, we
+        can efficiently walk straight up the first parent branch.
+        """
+        if self.envelope is None:
+            raise ValueError("workflow does not contain an envelope")
 
-@dataclass
-class VerificationResult:
-    valid: bool
-    chain_depth: int
-    issues: list[Issue] = field(default_factory=list)
+        current = self.envelope
+        # Traverse up until a node has no parents
+        while current.parent_envelope:
+            current = current.parent_envelope[0]
 
+        return current
 
-@dataclass
-class HandleResult:
-    workflow: IntentWorkflow
-    envelope: Envelope
-    verification: VerificationResult
+    def get_root_envelope_actor(self) -> str:
+        """
+        Returns the actor ID of the root envelope
+        """
+        root_envelope = self.get_root_envelope()
+        return root_envelope.from_
+
+    def seralize(self) -> str:
+        """
+        Serializes the workflow into a dictionary representation.
+        """
+        raw_dict = dump_workflow(self)
+        return json.dumps(raw_dict, separators=(",", ":"))
+
+    def unwrap(self) -> list[Envelope]:
+        """
+        Flattens the provenance graph into a unique list of envelopes.
+        Returns them in reverse chronological order (newest to oldest)
+        using Breadth-First Search (BFS).
+        """
+        if not self.envelope:
+            return []
+
+        unwrapped: list[Envelope] = []
+        visited_hashes = set()
+        queue = [self.envelope]
+
+        while queue:
+            current = queue.pop(0)
+
+            if current.hash not in visited_hashes:
+                visited_hashes.add(current.hash)
+                unwrapped.append(current)
+
+                if current.parent_envelope:
+                    queue.extend(current.parent_envelope)
+
+        unwrapped.sort(key=lambda env: (env.epoch, env.hash), reverse=True)
+        return unwrapped
 
 
 @dataclass
