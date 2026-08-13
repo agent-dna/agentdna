@@ -14,8 +14,15 @@ orchestrator -> technology worker ---/
 
 ## Setup
 
-1. Use Python 3.11 or later and create a virtual environment.
-2. Install dependencies: `pip install -r requirements.txt`.
+1. Use Python 3.11 or later and create a virtual environment:
+
+```
+python3 -m venv .venv
+chmod +x ./.venv/bin/activate
+source ./.venv/bin/activate
+```
+
+2. Install dependencies: `pip3 install -r requirements.txt`.
 3. Copy `.env.example` to `.env`.
 4. Set `LLM_BACKEND` to `ollama` or `gemini`, then configure that provider's model and credentials.
 
