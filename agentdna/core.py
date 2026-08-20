@@ -143,9 +143,10 @@ class AgentDNA:
         Log in a human actor via the identity-binding-service (IBS) and return an AgentDNA instance.
 
         """
-        run_id, email = originate(auth_server_url=auth_server_url, timeout=timeout)
+        run_id, email, server_api_key = originate(auth_server_url=auth_server_url, timeout=timeout)
+        # precedence: explicit arg > server-returned > env fallback (headless)
         if api_key is None:
-            api_key = os.environ.get("AGENTDNA_API_KEY", "")
+            api_key = server_api_key or os.environ.get("AGENTDNA_API_KEY", "")
         return cls(name=email, type=ACTOR_TYPE_USER, api_key=api_key, run_id=run_id, **kwargs)
 
     def __validate_api_key(self) -> None:
