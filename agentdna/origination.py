@@ -29,12 +29,15 @@ _DONE_HTML = (
 )
 
 
-def originate(*, auth_server_url: str | None = None, timeout: float = 300) -> tuple[str, str]:
-    """Drive a full origination login and return ``(run_id, email)``. Fail-closed.
+def originate(*, auth_server_url: str | None = None, timeout: float = 300) -> tuple[str, str, str]:
+    """Drive a full origination login and return ``(run_id, email, api_key)``. Fail-closed.
 
     The email is the authenticated human's; the SDK builds the actor under it
-    (the signing key is stored by email). Endpoints are admin-configured;
-    `auth_server_url` defaults to the ``AGENTDNA_AUTH_SERVER_URL`` env var.
+    (the signing key is stored by email). ``run_id`` is empty when no IdP is
+    configured (no origination proof), and ``api_key`` is the key the server
+    hands back for this user (empty if the server does not return one).
+    Endpoints are admin-configured; `auth_server_url` defaults to the
+    ``AGENTDNA_AUTH_SERVER_URL`` env var.
     """
     base = auth_server_url or os.environ.get("AGENTDNA_AUTH_SERVER_URL")
     if not base:
@@ -47,7 +50,7 @@ def originate(*, auth_server_url: str | None = None, timeout: float = 300) -> tu
     state, code = _wait_for_callback(_redirect_uri_of(authorize_url), timeout)
 
     finished = _post(base, _COMPLETE_PATH, {"state": state, "code": code})
-    return finished["run_id"], finished["email"]
+    return finished.get("run_id", ""), finished["email"], finished.get("api_key", "")
 
 
 def _redirect_uri_of(authorize_url: str) -> str:
@@ -84,8 +87,15 @@ def _wait_for_callback(redirect_uri: str, timeout: float) -> tuple[str, str]:
             self.server.result = {k: v[0] for k, v in parse_qs(got.query).items()}
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
+            # Declare the exact body length and close intent so the browser can
+            # render immediately, instead of waiting for the socket to close —
+            # the single-shot server shuts down the instant it has the code, and
+            # that race was showing "can't be reached" instead of the done page.
+            self.send_header("Content-Length", str(len(_DONE_HTML)))
+            self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(_DONE_HTML)
+            self.wfile.flush()
 
         def log_message(self, *_):  # silence default logging
             return
