@@ -26,6 +26,7 @@ def get_id(val: str):
     multihash_bytes = bytes([0x12, len(digest)]) + digest
     return CIDv0(multihash_bytes).encode().decode("utf-8")
 
+
 def get_intent_workflow_id(user_card_id: str):
     """
     Get a deterministic Intent Workflow ID based on the provided user card ID.

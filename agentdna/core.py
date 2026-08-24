@@ -512,7 +512,7 @@ class AgentDNA:
                 for prev_workflow in previous_workflows:
                     if prev_workflow.id == "":
                         raise ValueError("previous_workflows.id cannot be empty")
-                    
+
                 workflow_id = previous_workflows[0].id
             else:
                 raise ValueError(
