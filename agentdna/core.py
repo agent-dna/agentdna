@@ -28,6 +28,7 @@ from .log import configure_logging, get_logger
 from .provenance import Provenance
 from .types import (
     ACTOR_TYPE_AGENT,
+    ACTOR_TYPE_TOOL,
     ACTOR_TYPE_USER,
     CURRENT_VERSION,
     VERIFY_BOUNDARY,
@@ -125,6 +126,9 @@ class AgentDNA:
 
             if self.type == ACTOR_TYPE_USER:
                 self.__register_user()
+
+            if self.type == ACTOR_TYPE_TOOL:
+                self.__register_tool()
 
         self.logger.info("agentdna.init.success", card_id=self.card_id)
 
@@ -230,6 +234,40 @@ class AgentDNA:
             raise RuntimeError(f"agent registration failed: {error_msg}")
 
         self.logger.info("agentdna.register_agent.success", policy_path=str(policy_path))
+
+    def __register_tool(self) -> None:
+        """
+        Registers the current tool with
+        the provenance layer.
+        """
+
+        try:
+            response = requests.post(
+                urljoin(self.provenance.provenance_url, "/core/v1/register-tool"),
+                json={
+                    "tool_name": self.name,
+                    "tool_id": self.get_actor_id(),
+                },
+                timeout=300,
+            )
+
+            response.raise_for_status()
+        except requests.exceptions.RequestException as exc:
+            self.logger.error(
+                "agentdna.register_tool.failed",
+                status_code=getattr(exc.response, "status_code", None),
+                error=str(exc),
+            )
+            raise
+
+        data = response.json()
+
+        if not data.get("status"):
+            error_msg = data.get("message", "")
+            self.logger.error("agentdna.register_tool.failed", error=error_msg)
+            raise RuntimeError(f"tool registration failed: {error_msg}")
+
+        self.logger.info("agentdna.register_tool.success")
 
     def get_actor_id(self) -> str:
         return self.provenance.provenance_id

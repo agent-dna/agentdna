@@ -8,8 +8,8 @@ from .error import RESULT_OK
 
 ACTOR_TYPE_AGENT = "agent"
 ACTOR_TYPE_USER = "user"
-ACTOR_TYPE_APP = "app"
-supported_actors = [ACTOR_TYPE_AGENT, ACTOR_TYPE_USER, ACTOR_TYPE_APP]
+ACTOR_TYPE_TOOL = "tool"
+supported_actors = [ACTOR_TYPE_AGENT, ACTOR_TYPE_USER, ACTOR_TYPE_TOOL]
 
 VERIFY_LIGHT = "light"
 VERIFY_HEAVY = "heavy"
