@@ -127,6 +127,7 @@ class IntentWorkflow:
     The entire workflow can be reconstructed by
     recursively traversing parent_envelope.
     """
+
     id: str
     type: str
     version: str

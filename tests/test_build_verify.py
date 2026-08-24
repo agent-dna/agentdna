@@ -170,7 +170,7 @@ def test_verify_without_envelope_raises(agent):
     from agentdna.types import CURRENT_VERSION, IntentWorkflow
 
     workflow = IntentWorkflow(
-        id = "QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
+        id="QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
         type="intent_workflow",
         version=CURRENT_VERSION,
     )

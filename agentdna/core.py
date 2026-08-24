@@ -24,8 +24,9 @@ from .error import (
 )
 from .helpers import _hash_content
 from .id import (
-    get_agent_card_id, get_user_card_id, 
+    get_agent_card_id,
     get_intent_workflow_id,
+    get_user_card_id,
 )
 from .log import configure_logging, get_logger
 from .provenance import Provenance
@@ -514,7 +515,9 @@ class AgentDNA:
                     
                 workflow_id = previous_workflows[0].id
             else:
-                raise ValueError("previous_workflows must be an IntentWorkflow or a list of IntentWorkflows")
+                raise ValueError(
+                    "previous_workflows must be an IntentWorkflow or a list of IntentWorkflows"
+                )
         else:
             # The workflow_id is generated based on card ID of actor type "user" only.
             # This is based on the idea that only users initiates the intent.
