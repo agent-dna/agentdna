@@ -128,6 +128,7 @@ class IntentWorkflow:
     recursively traversing parent_envelope.
     """
 
+    id: str
     type: str
     version: str
 

@@ -23,7 +23,11 @@ from .error import (
     RESULT_OK,
 )
 from .helpers import _hash_content
-from .id import get_agent_card_id, get_user_card_id
+from .id import (
+    get_agent_card_id,
+    get_intent_workflow_id,
+    get_user_card_id,
+)
 from .log import configure_logging, get_logger
 from .provenance import Provenance
 from .types import (
@@ -535,6 +539,34 @@ class AgentDNA:
             epoch=epoch,
         )
 
+        workflow_id = ""
+        if previous_workflows is not None:
+            if isinstance(previous_workflows, IntentWorkflow):
+                if previous_workflows.id == "":
+                    raise ValueError("previous_workflows.id cannot be empty")
+
+                workflow_id = previous_workflows.id
+            elif isinstance(previous_workflows, list) and len(previous_workflows) > 0:
+                for prev_workflow in previous_workflows:
+                    if prev_workflow.id == "":
+                        raise ValueError("previous_workflows.id cannot be empty")
+
+                workflow_id = previous_workflows[0].id
+            else:
+                raise ValueError(
+                    "previous_workflows must be an IntentWorkflow or a list of IntentWorkflows"
+                )
+        else:
+            # The workflow_id is generated based on card ID of actor type "user" only.
+            # This is based on the idea that only users initiates the intent.
+            if self.type != ACTOR_TYPE_USER:
+                raise ValueError("workflow_id can only be generated for actors of type 'user'")
+
+            if self.card_id == "":
+                raise ValueError("card_id for user cannot be empty")
+
+            workflow_id = get_intent_workflow_id(self.card_id)
+
         current_envelope = Envelope(
             from_=self.get_actor_id(),
             payload=payload,
@@ -558,6 +590,7 @@ class AgentDNA:
         current_envelope.signature = signature
 
         new_workflow = IntentWorkflow(
+            id=workflow_id,
             type="intent_workflow",
             version=CURRENT_VERSION,
         )

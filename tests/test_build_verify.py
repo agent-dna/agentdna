@@ -170,6 +170,7 @@ def test_verify_without_envelope_raises(agent):
     from agentdna.types import CURRENT_VERSION, IntentWorkflow
 
     workflow = IntentWorkflow(
+        id="QmYwAPJzv5CZsnA625s3Xf2nemtYgPpHdWEz79ojWnPbdG",
         type="intent_workflow",
         version=CURRENT_VERSION,
     )
@@ -242,3 +243,24 @@ def test_epoch_tamper_in_envelope(user, agent):
     result = agent.verify(workflow)
 
     assert not result == RESULT_OK
+
+
+def test_persistance_in_workflow_id(user, agent, second_agent):
+    agent.verification_mode = VERIFY_HEAVY
+    second_agent.verification_mode = VERIFY_HEAVY
+
+    workflow = user.build(
+        payload="MFA is mandatory",
+    )
+
+    workflow_2 = agent.build(
+        payload="2FA approach",
+        previous_workflows=workflow,
+    )
+
+    workflow_3 = second_agent.build(
+        payload="3FA approach",
+        previous_workflows=workflow_2,
+    )
+
+    assert workflow_3.id == workflow.id
