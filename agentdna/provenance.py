@@ -3,7 +3,7 @@ import os
 from typing import Any
 
 from rubix.client import RubixClient
-from rubix.did import online_signature_verify
+from rubix.did import fast_signature_verify
 from rubix.querier import Querier
 from rubix.signer import Signer
 from structlog.typing import FilteringBoundLogger
@@ -327,8 +327,9 @@ class Provenance:
         message = canonicalize_envelope(envelope)
 
         try:
-            is_valid = online_signature_verify(
+            is_valid = fast_signature_verify(
                 rubixNodeBaseUrl=self.provenance_url,
+                account_dir=self.provenance_executor.account_dir,
                 did=envelope.from_,
                 message=message.encode("utf-8"),
                 signature=signature_bytes,
