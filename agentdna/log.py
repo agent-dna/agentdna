@@ -24,7 +24,7 @@ def configure_logging(log_level: str = "INFO", log_format: str = LOG_FORMAT_JSON
     renderer = (
         structlog.processors.JSONRenderer()
         if log_format == LOG_FORMAT_JSON
-        else structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty())
+        else structlog.dev.ConsoleRenderer(colors=sys.stderr.isatty())
     )
 
     structlog.configure(
@@ -35,7 +35,7 @@ def configure_logging(log_level: str = "INFO", log_format: str = LOG_FORMAT_JSON
             renderer,
         ],
         wrapper_class=structlog.make_filtering_bound_logger(numeric_level),
-        logger_factory=structlog.PrintLoggerFactory(file=sys.stdout),
+        logger_factory=structlog.PrintLoggerFactory(file=sys.stderr),
         cache_logger_on_first_use=True,
     )
 

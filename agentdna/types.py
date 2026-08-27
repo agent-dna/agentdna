@@ -115,6 +115,43 @@ def dump_envelope(envelope: Envelope | None) -> dict | None:
 
     return result
 
+def load_workflow(data: dict | IntentWorkflow) -> IntentWorkflow:
+    """
+    Converts a raw dictionary (from JSON serialization) back into 
+    an IntentWorkflow object.
+    """
+    if isinstance(data, IntentWorkflow):
+        return data
+
+    data_copy = dict(data)
+    data_copy["envelope"] = load_envelope(data_copy.get("envelope"))
+    return IntentWorkflow(**data_copy)
+
+
+def load_envelope(data: dict | Envelope | None) -> Envelope | None:
+    """
+    Recursively turns a raw dict back into a proper Envelope object,
+    handling parent envelopes and mapping 'from' back to 'from_'.
+    """
+    if data is None or isinstance(data, Envelope):
+        return data
+    if not isinstance(data, dict):
+        raise TypeError(f"Expected dict or Envelope, got {type(data)}")
+
+    data_copy = dict(data)
+
+    # CRITICAL: Map network key 'from' back to Python attribute 'from_'
+    if "from" in data_copy:
+        data_copy["from_"] = data_copy.pop("from")
+
+    # Handle the recursive DAG properly
+    parents = data_copy.get("parent_envelope")
+    if parents:
+        data_copy["parent_envelope"] = [load_envelope(parent) for parent in parents]
+    else:
+        data_copy["parent_envelope"] = None
+
+    return Envelope(**data_copy)
 
 @dataclass
 class IntentWorkflow:
@@ -170,7 +207,7 @@ class IntentWorkflow:
         root_envelope = self.get_root_envelope()
         return root_envelope.from_
 
-    def seralize(self) -> str:
+    def serialize(self) -> str:
         """
         Serializes the workflow into a dictionary representation.
         """

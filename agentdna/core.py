@@ -503,7 +503,7 @@ class AgentDNA:
         try:
             workflow_card_id = self.provenance.create_new_child_provenance_card(
                 parent_card_id=user_card_id,
-                card_info=workflow.seralize(),
+                card_info=workflow.serialize(),
             )
 
             self.logger.info(
