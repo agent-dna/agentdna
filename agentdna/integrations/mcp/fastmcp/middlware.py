@@ -27,7 +27,6 @@ from agentdna.integrations.mcp.metadata import (
     AGENTDNA_INTENT_WORKFLOW_META_KEY,
 )
 
-
 class AgentDNAMCPMiddleware(
     Middleware
 ):
@@ -55,7 +54,6 @@ class AgentDNAMCPMiddleware(
     def __init__(
         self,
         dna: AgentDNA,
-        *,
         log_prefix: str = (
             "[AgentDNA MCP Server]"
         ),
@@ -70,9 +68,7 @@ class AgentDNAMCPMiddleware(
         call_next,
     ) -> ToolResult:
 
-        tool_name = (
-            context.message.name
-        )
+        tool_name = context.message.name
 
         # ========================================================
         # 1. Read workflow header.
@@ -88,7 +84,6 @@ class AgentDNAMCPMiddleware(
         )
 
         if not workflow_header:
-
             raise ValueError(
                 f"Missing required "
                 f"{AGENTDNA_HEADER_NAME!r} header"
@@ -107,25 +102,6 @@ class AgentDNAMCPMiddleware(
         )
 
         # ========================================================
-        # 3. SECURITY BOUNDARY.
-        #
-        # Failed verification means:
-        #
-        #     DO NOT execute the MCP tool.
-        # ========================================================
-
-        verification_code = (
-            self.dna.verify(
-                incoming_workflow
-            )
-        )
-
-        if verification_code != RESULT_OK:
-            raise ValueError(
-                "AgentDNA IntentWorkflow verification failed"
-            )
-
-        # ========================================================
         # 4. Establish request-local context.
         #
         # This is only for the downstream FastMCP execution path.
@@ -137,7 +113,14 @@ class AgentDNAMCPMiddleware(
             incoming_workflow,
         ):
             try:
-                # TOOL CALL
+                verification_code = self.dna.verify(
+                    incoming_workflow
+                )
+
+                if verification_code != RESULT_OK:
+                    raise ValueError(
+                        "AgentDNA IntentWorkflow verification failed"
+                    )
 
                 result = await call_next(
                     context
@@ -153,8 +136,7 @@ class AgentDNAMCPMiddleware(
                     )
 
                 successor_payload = (
-                    json.dumps(
-                        {
+                    json.dumps({
                             "type": (
                                 "mcp_tool_result"
                             ),
