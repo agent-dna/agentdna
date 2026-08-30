@@ -81,6 +81,7 @@ def dump_workflow(workflow: IntentWorkflow) -> dict:
     ready for JSON serialization.
     """
     return {
+        "id": workflow.id,
         "type": workflow.type,
         "version": workflow.version,
         "info": workflow.info,
