@@ -6,6 +6,7 @@ from langchain_mcp_adapters.sessions import StreamableHttpConnection
 
 from config import settings
 
+from agentdna.integrations.mcp.http import agentdna_http_interceptor
 
 def build_client() -> MultiServerMCPClient:
     return MultiServerMCPClient(
@@ -16,7 +17,8 @@ def build_client() -> MultiServerMCPClient:
                 timeout=settings.mcp_timeout_seconds,
                 sse_read_timeout=settings.mcp_timeout_seconds,
             )
-        }
+        },
+        tool_interceptors=[agentdna_http_interceptor],
     )
 
 

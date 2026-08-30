@@ -5,8 +5,18 @@ from fastmcp import FastMCP
 
 from config import settings
 
-mcp = FastMCP("github-repository-mcp")
+from agentdna import AgentDNA
+from agentdna.integrations.mcp.fastmcp.middlware import AgentDNAMCPMiddleware
 
+mcp_server_dna = AgentDNA(
+    name="Github MCP",
+    type="tool",
+    api_key=settings.agentdna_api_key,
+    provenance_layer_url=settings.provenance_layer_url,
+)
+
+mcp = FastMCP("github-repository-mcp")
+mcp.add_middleware(AgentDNAMCPMiddleware(mcp_server_dna))
 
 def _headers() -> dict[str, str]:
     if not settings.github_token:
