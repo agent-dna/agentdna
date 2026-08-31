@@ -88,11 +88,12 @@ class Provenance:
             )
             raise
 
-    def create_new_child_provenance_card(self, parent_card_id: str, card_info: str):
+    def create_new_child_provenance_card(self, parent_card_id: str, card_info: str, child_nft_id: str):
         try:
             response = self.provenance_executor.create_child_nft(
                 parent_nft_address=parent_card_id,
                 nft_data=card_info,
+                child_nft_id=child_nft_id,
             )
         except Exception as exc:
             self.logger.error(

@@ -504,6 +504,7 @@ class AgentDNA:
             workflow_card_id = self.provenance.create_new_child_provenance_card(
                 parent_card_id=user_card_id,
                 card_info=workflow.serialize(),
+                child_nft_id=workflow.id
             )
 
             self.logger.info(
