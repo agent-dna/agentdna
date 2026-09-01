@@ -17,8 +17,14 @@ from agentdna.core import IntentWorkflow
 from agentdna.error import (
     TOOL_EXECUTION_FAILED,
     RESULT_OK,
+    ADMIN_WHITELIST_CHECK_FAILED,
+    ADMIN_WHITELIST_CHECK_SERVER_ERROR,
+    COCA_VERIFICATION_FAILED_UNKNOWN
 )
-from agentdna.types import load_workflow
+from agentdna.types import (
+    load_workflow, AgentNotWhitelistedError,
+    CoCAVerificationError
+)
 
 from agentdna.integrations.mcp.context import agentdna_context
 from agentdna.integrations.mcp.metadata import (
@@ -26,6 +32,7 @@ from agentdna.integrations.mcp.metadata import (
     AGENTDNA_META_KEY,
     AGENTDNA_INTENT_WORKFLOW_META_KEY,
 )
+from agentdna.admin import request_agent_whitelist_check
 
 class AgentDNAMCPMiddleware(
     Middleware
@@ -54,13 +61,9 @@ class AgentDNAMCPMiddleware(
     def __init__(
         self,
         dna: AgentDNA,
-        log_prefix: str = (
-            "[AgentDNA MCP Server]"
-        ),
     ) -> None:
 
         self.dna = dna
-        self.log_prefix = log_prefix
 
     async def on_call_tool(
         self,
@@ -111,17 +114,93 @@ class AgentDNAMCPMiddleware(
         with agentdna_context(
             self.dna,
             incoming_workflow,
-        ):
+        ):  
+            latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
+
+            # Whitelist check
+            try:
+                is_agent_whitelisted = request_agent_whitelist_check(
+                    self.dna.agentdna_admin_url,
+                    latest_envelope_actor
+                )
+
+                if not is_agent_whitelisted:
+                    raise AgentNotWhitelistedError(
+                        f"Agent {latest_envelope_actor} is not whitelisted in the Admin server."
+                    )
+            except AgentNotWhitelistedError as exc:
+                workflow = self.dna.build(
+                    payload=f"Agent {latest_envelope_actor} not whitelisted in Admin server",
+                    previous_workflows=(
+                        incoming_workflow
+                    ),
+                    verification_code=ADMIN_WHITELIST_CHECK_FAILED,
+                )
+                self.dna.record(
+                    workflow
+                )
+
+                raise RuntimeError(
+                    str(exc)
+                )
+            except Exception as exc:
+                workflow = self.dna.build(
+                    payload=f"unable to contact Admin server to check whitelist status for agent {latest_envelope_actor}",
+                    previous_workflows=(
+                        incoming_workflow
+                    ),
+                    verification_code=ADMIN_WHITELIST_CHECK_SERVER_ERROR,
+                )
+                self.dna.record(
+                    workflow
+                )
+
+                raise RuntimeError(
+                    f"Failed to check whitelist status for agent {latest_envelope_actor}: {exc}"
+                ) from exc
+
+            # CoCA verification
             try:
                 verification_code = self.dna.verify(
                     incoming_workflow
                 )
 
                 if verification_code != RESULT_OK:
-                    raise ValueError(
-                        "AgentDNA IntentWorkflow verification failed"
+                    raise CoCAVerificationError(
+                        f"AgentDNA IntentWorkflow verification failed for agent {latest_envelope_actor}"
                     )
+            except CoCAVerificationError as exc:
+                workflow = self.dna.build(
+                    payload=f"CoCA verification failed for agent {latest_envelope_actor}",
+                    previous_workflows=(
+                        incoming_workflow
+                    ),
+                    verification_code=verification_code,
+                )
+                self.dna.record(
+                    workflow
+                )
 
+                raise RuntimeError(
+                    str(exc)
+                )
+            except Exception as exc:
+                workflow = self.dna.build(
+                    payload=f"unable to contact Admin server to check whitelist status for agent {latest_envelope_actor}",
+                    previous_workflows=(
+                        incoming_workflow
+                    ),
+                    verification_code=COCA_VERIFICATION_FAILED_UNKNOWN,
+                )
+                self.dna.record(
+                    workflow
+                )
+                raise RuntimeError(
+                    f"Failed to verify incoming workflow for agent {latest_envelope_actor}: {exc}"
+                ) from exc
+
+            # Execute tool
+            try:
                 result = await call_next(
                     context
                 )

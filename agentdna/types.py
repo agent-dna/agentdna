@@ -208,6 +208,13 @@ class IntentWorkflow:
         root_envelope = self.get_root_envelope()
         return root_envelope.from_
 
+    def get_latest_envelope_actor(self) -> str:
+        """
+        Returns the actor ID of the latest envelope
+        """
+        latest_envelope = self.get_latest_envelope()
+        return latest_envelope.from_
+
     def serialize(self) -> str:
         """
         Serializes the workflow into a dictionary representation.
@@ -262,3 +269,11 @@ class ActorRegistryEntry:
     actor_id: str
     actor_name: str
     actor_card_id: str
+
+class AgentNotWhitelistedError(Exception):
+    """Raised when an agent is not whitelisted in the Admin server."""
+    pass
+
+class CoCAVerificationError(Exception):
+    """Raised when a CoCA verification fails."""
+    pass

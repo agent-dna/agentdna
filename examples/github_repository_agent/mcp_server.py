@@ -6,7 +6,7 @@ from fastmcp import FastMCP
 from config import settings
 
 from agentdna import AgentDNA
-from agentdna.integrations.mcp.fastmcp.middlware import AgentDNAMCPMiddleware
+from agentdna.integrations.mcp.fastmcp.middleware import AgentDNAMCPMiddleware
 
 mcp_server_dna = AgentDNA(
     name="Github MCP",

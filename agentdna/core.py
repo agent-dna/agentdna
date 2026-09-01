@@ -57,6 +57,7 @@ class AgentDNA:
         name: str,
         type: str,
         provenance_layer_url: str = "https://chain-connector-2.rubix.net",
+        admin_server_url: str = "https://agentdna-admin.rubix.net",
         api_key: str = "",
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
@@ -101,6 +102,7 @@ class AgentDNA:
             logger=self.logger,
             actor_type=type,
         )
+        self.agentdna_admin_url = admin_server_url
 
         self.logger = self.provenance.logger
 
