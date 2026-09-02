@@ -17,14 +17,8 @@ from agentdna.core import IntentWorkflow
 from agentdna.error import (
     TOOL_EXECUTION_FAILED,
     RESULT_OK,
-    ADMIN_WHITELIST_CHECK_FAILED,
-    ADMIN_WHITELIST_CHECK_SERVER_ERROR,
-    COCA_VERIFICATION_FAILED_UNKNOWN
 )
-from agentdna.types import (
-    load_workflow, AgentNotWhitelistedError,
-    CoCAVerificationError
-)
+from agentdna.types import load_workflow
 
 from agentdna.integrations.mcp.context import agentdna_context
 from agentdna.integrations.mcp.metadata import (
@@ -32,11 +26,11 @@ from agentdna.integrations.mcp.metadata import (
     AGENTDNA_META_KEY,
     AGENTDNA_INTENT_WORKFLOW_META_KEY,
 )
-from agentdna.admin import request_agent_whitelist_check
+from .utils import  get_tool_name
+from .types import CbacFn
+from .checks import agent_whitelist_check, coca_verification, cbac_verification
 
-class AgentDNAMCPMiddleware(
-    Middleware
-):
+class AgentDNAMCPMiddleware(Middleware):
     """
     FastMCP-specific AgentDNA server middleware.
 
@@ -48,43 +42,25 @@ class AgentDNAMCPMiddleware(
         4. Execute the MCP tool.
         5. Build a successor event for success/failure.
         6. Attach the successor to MCP metadata.
-
-    It knows only about:
-
-        - FastMCP
-        - MCP
-        - AgentDNA
-
-    It does not know anything about Agent frameworks.
     """
-
     def __init__(
         self,
         dna: AgentDNA,
+        cbac_fn: CbacFn | None = None
     ) -> None:
-
         self.dna = dna
+        self.cbac_fn = cbac_fn
 
     async def on_call_tool(
         self,
         context: MiddlewareContext,
         call_next,
     ) -> ToolResult:
+        tool_name = get_tool_name(context)
 
-        tool_name = context.message.name
-
-        # ========================================================
-        # 1. Read workflow header.
-        # ========================================================
-
-        headers = (
-            get_http_headers()
-            or {}
-        )
-
-        workflow_header = headers.get(
-            AGENTDNA_HEADER_NAME
-        )
+        # Get AgentDNA from HTTP headers
+        headers = get_http_headers() or {}
+        workflow_header = headers.get(AGENTDNA_HEADER_NAME)
 
         if not workflow_header:
             raise ValueError(
@@ -92,24 +68,11 @@ class AgentDNAMCPMiddleware(
                 f"{AGENTDNA_HEADER_NAME!r} header"
             )
 
-        # ========================================================
-        # 2. Reconstruct workflow.
-        # ========================================================
-
-        incoming_workflow = (
-            load_workflow(
-                json.loads(
-                    workflow_header
-                )
+        incoming_workflow = load_workflow(
+            json.loads(
+                workflow_header
             )
         )
-
-        # ========================================================
-        # 4. Establish request-local context.
-        #
-        # This is only for the downstream FastMCP execution path.
-        # It does NOT represent an Agent interaction.
-        # ========================================================
 
         with agentdna_context(
             self.dna,
@@ -117,87 +80,30 @@ class AgentDNAMCPMiddleware(
         ):  
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
-            # Whitelist check
-            try:
-                is_agent_whitelisted = request_agent_whitelist_check(
-                    self.dna.agentdna_admin_url,
-                    latest_envelope_actor
-                )
-
-                if not is_agent_whitelisted:
-                    raise AgentNotWhitelistedError(
-                        f"Agent {latest_envelope_actor} is not whitelisted in the Admin server."
-                    )
-            except AgentNotWhitelistedError as exc:
-                workflow = self.dna.build(
-                    payload=f"Agent {latest_envelope_actor} not whitelisted in Admin server",
-                    previous_workflows=(
-                        incoming_workflow
-                    ),
-                    verification_code=ADMIN_WHITELIST_CHECK_FAILED,
-                )
-                self.dna.record(
-                    workflow
-                )
-
-                raise RuntimeError(
-                    str(exc)
-                )
-            except Exception as exc:
-                workflow = self.dna.build(
-                    payload=f"unable to contact Admin server to check whitelist status for agent {latest_envelope_actor}",
-                    previous_workflows=(
-                        incoming_workflow
-                    ),
-                    verification_code=ADMIN_WHITELIST_CHECK_SERVER_ERROR,
-                )
-                self.dna.record(
-                    workflow
-                )
-
-                raise RuntimeError(
-                    f"Failed to check whitelist status for agent {latest_envelope_actor}: {exc}"
-                ) from exc
-
             # CoCA verification
-            try:
-                verification_code = self.dna.verify(
-                    incoming_workflow
-                )
+            coca_verification(
+                self.dna,
+                latest_envelope_actor,
+                incoming_workflow,
+            )
 
-                if verification_code != RESULT_OK:
-                    raise CoCAVerificationError(
-                        f"AgentDNA IntentWorkflow verification failed for agent {latest_envelope_actor}"
-                    )
-            except CoCAVerificationError as exc:
-                workflow = self.dna.build(
-                    payload=f"CoCA verification failed for agent {latest_envelope_actor}",
-                    previous_workflows=(
-                        incoming_workflow
-                    ),
-                    verification_code=verification_code,
-                )
-                self.dna.record(
-                    workflow
-                )
+            # Whitelist check
+            agent_whitelist_check(
+                self.dna,
+                self.dna.agentdna_admin_url,
+                latest_envelope_actor,
+                incoming_workflow,
+            )
 
-                raise RuntimeError(
-                    str(exc)
+            # CBAC Verification
+            if self.cbac_fn:
+                await cbac_verification(
+                    self.dna,
+                    latest_envelope_actor,
+                    incoming_workflow,
+                    self.cbac_fn,
+                    context
                 )
-            except Exception as exc:
-                workflow = self.dna.build(
-                    payload=f"unable to contact Admin server to check whitelist status for agent {latest_envelope_actor}",
-                    previous_workflows=(
-                        incoming_workflow
-                    ),
-                    verification_code=COCA_VERIFICATION_FAILED_UNKNOWN,
-                )
-                self.dna.record(
-                    workflow
-                )
-                raise RuntimeError(
-                    f"Failed to verify incoming workflow for agent {latest_envelope_actor}: {exc}"
-                ) from exc
 
             # Execute tool
             try:
@@ -205,10 +111,7 @@ class AgentDNAMCPMiddleware(
                     context
                 )
 
-                if not isinstance(
-                    result,
-                    ToolResult,
-                ):
+                if not isinstance(result, ToolResult):
                     raise TypeError(
                         "FastMCP on_call_tool middleware expected "
                         f"ToolResult, got {type(result)!r}"
