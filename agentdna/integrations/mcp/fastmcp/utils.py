@@ -28,7 +28,7 @@ def get_tool_name(context: MiddlewareContext) -> str:
     return context.message.name
 
 def get_tool_args(context: MiddlewareContext) -> dict:
-    return context.message.args
+    return context.message.arguments
 
 async def get_tool_description(
     context: MiddlewareContext,
