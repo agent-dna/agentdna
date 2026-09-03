@@ -106,7 +106,10 @@ async def cbac_verification(
     incoming_workflow: IntentWorkflow,
     cbac_fn: CbacFn,
     context: MiddlewareContext,
-):
+) -> tuple[str, int]:
+    cbac_message_hash: str = ""
+    cbac_status: int = 0
+
     try:
         intent_id =  incoming_workflow.id
         user_intent = incoming_workflow.get_root_envelope().payload
@@ -118,7 +121,7 @@ async def cbac_verification(
             tool_name,
         )
 
-        cbac_status, cbac_message_hash = await cbac_fn(
+        cbac_decision, cbac_status, cbac_message_hash = await cbac_fn(
             agent_id,
             tool_name,
             tool_args,
@@ -127,7 +130,8 @@ async def cbac_verification(
             callee_type,
             intent_id,
         )
-        if cbac_status != RESULT_OK:
+
+        if cbac_decision.lower() != "allow":
             raise CBACVerificationError(
                 f"CBAC verification failed for agent {agent_id} with status {cbac_status}"
             )
@@ -154,3 +158,4 @@ async def cbac_verification(
             f"Failed to perform CBAC verification for agent {agent_id}: {exc}"
         ) from exc
     
+    return cbac_message_hash, cbac_status

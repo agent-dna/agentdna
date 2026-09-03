@@ -13,7 +13,7 @@ CbacFn: TypeAlias = Callable[
         str,
         str | None,
     ], 
-    Awaitable[tuple[int, str]]
+    Awaitable[tuple[str, int, str]]
 ]
 
 class CBACVerificationError(Exception):
