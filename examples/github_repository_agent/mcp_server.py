@@ -13,6 +13,7 @@ mcp_server_dna = AgentDNA(
     type="tool",
     api_key=settings.agentdna_api_key,
     provenance_layer_url=settings.provenance_layer_url,
+    admin_server_url=settings.admin_server_url,
 )
 
 mcp = FastMCP("github-repository-mcp")
