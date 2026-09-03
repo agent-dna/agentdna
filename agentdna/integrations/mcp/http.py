@@ -186,17 +186,16 @@ async def agentdna_http_interceptor(
             call_handle
         )
 
-        context.dna.record(successor)
+        failed_workflow = context.dna.build(
+            payload=f"CoCA: failed to verify signature for workflow received from the {successor.get_latest_envelope_actor()}",
+            previous_workflows=successor,
+            verification_code=verification_code,
+        )
+        context.dna.record(failed_workflow)
 
         raise ValueError(
             f"CoCA verification failed for workflow recieved from the {successor.get_latest_envelope_actor()}"
         )
-
-    # ------------------------------------------------------------
-    # Record terminal MCP workflow.
-    #
-    # This may close the batch and advance the frontier.
-    # ------------------------------------------------------------
 
     await context.complete_mcp_call(
         call_handle,
