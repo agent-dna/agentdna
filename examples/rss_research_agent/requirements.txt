@@ -8,4 +8,6 @@ langchain-google-genai>=2.0.0
 python-dotenv>=1.0.0
 colorama>=0.4.6
 mcp==1.29.1
+cbac>=0.1.0
+
 -e ../../../agentdna
