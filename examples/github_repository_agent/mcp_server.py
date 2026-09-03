@@ -7,6 +7,7 @@ from config import settings
 
 from agentdna import AgentDNA
 from agentdna.integrations.mcp.fastmcp.middleware import AgentDNAMCPMiddleware
+from cbac import authorize
 
 mcp_server_dna = AgentDNA(
     name="Github MCP",
@@ -17,7 +18,12 @@ mcp_server_dna = AgentDNA(
 )
 
 mcp = FastMCP("github-repository-mcp")
-mcp.add_middleware(AgentDNAMCPMiddleware(mcp_server_dna))
+mcp.add_middleware(
+    AgentDNAMCPMiddleware(
+        mcp_server_dna,
+        cbac_fn=authorize
+    )
+)
 
 def _headers() -> dict[str, str]:
     if not settings.github_token:
