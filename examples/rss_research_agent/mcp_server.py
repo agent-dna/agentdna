@@ -9,8 +9,26 @@ from fastmcp import FastMCP
 
 from config import settings
 
-mcp = FastMCP("rss-research-mcp")
+from agentdna import AgentDNA
+from agentdna.integrations.mcp.fastmcp.middleware import AgentDNAMCPMiddleware
 
+from cbac import authorize
+
+mcp_server_dna = AgentDNA(
+    name="RSS Research MCP",
+    type="tool",
+    api_key=settings.agentdna_api_key,
+    provenance_layer_url=settings.provenance_layer_url,
+    admin_server_url=settings.admin_server_url,
+)
+
+mcp = FastMCP("rss-research-mcp")
+mcp.add_middleware(
+    AgentDNAMCPMiddleware(
+        mcp_server_dna,
+        cbac_fn=authorize
+    )
+)
 
 def _connection() -> sqlite3.Connection:
     settings.cache_database.parent.mkdir(parents=True, exist_ok=True)

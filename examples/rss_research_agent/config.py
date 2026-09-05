@@ -40,6 +40,7 @@ class Settings:
     orchestrator_agent_name: str = os.getenv("RSS_ORCHESTRATOR_AGENT_NAME", "RSS Orchestrator Agent")
     technology_agent_name: str = os.getenv("RSS_TECHNOLOGY_AGENT_NAME", "RSS Technology Agent")
     security_agent_name: str = os.getenv("RSS_SECURITY_AGENT_NAME", "RSS Security Agent")
+    admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "")
 
     @property
     def feeds(self) -> list[dict[str, str]]:

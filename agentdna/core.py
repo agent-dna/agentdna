@@ -57,10 +57,10 @@ class AgentDNA:
         name: str,
         type: str,
         provenance_layer_url: str = "https://chain-connector-2.rubix.net",
+        admin_server_url: str = "https://agentdna-admin.rubix.net",
         api_key: str = "",
         config_dir: str = "",
         metadata: dict[str, Any] | None = None,
-        verification_mode: str = VERIFY_BOUNDARY,
         agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
         log_level: str = "INFO",
@@ -74,14 +74,6 @@ class AgentDNA:
                 f"provided actor type {type} is not supported. Supported actors are {supported_actors}"
             )
 
-        if verification_mode not in supported_verification_modes:
-            raise ValueError(
-                f"unsupported verification mode: "
-                f"{verification_mode}. "
-                f"Supported modes: "
-                f"{supported_verification_modes}"
-            )
-        self.verification_mode = verification_mode
         self.api_key = api_key
 
         configure_logging(log_level, log_format)
@@ -101,6 +93,7 @@ class AgentDNA:
             logger=self.logger,
             actor_type=type,
         )
+        self.agentdna_admin_url = admin_server_url
 
         self.logger = self.provenance.logger
 
@@ -503,7 +496,8 @@ class AgentDNA:
         try:
             workflow_card_id = self.provenance.create_new_child_provenance_card(
                 parent_card_id=user_card_id,
-                card_info=workflow.seralize(),
+                card_info=workflow.serialize(),
+                child_nft_id=workflow.id
             )
 
             self.logger.info(
@@ -608,6 +602,7 @@ class AgentDNA:
     def verify(
         self,
         workflow: IntentWorkflow,
+        mode: str = VERIFY_BOUNDARY
     ) -> int:
         """
         Verifies an incoming workflow and returns
@@ -616,7 +611,7 @@ class AgentDNA:
         if workflow.envelope is None:
             raise ValueError("workflow does not contain an envelope")
 
-        if self.verification_mode == VERIFY_LIGHT:
+        if mode == VERIFY_LIGHT:
             verification = verify_light(
                 self.provenance,
                 workflow,
@@ -624,12 +619,12 @@ class AgentDNA:
             if not verification:
                 self.logger.warning(
                     "agentdna.verify.failed",
-                    verification_mode=self.verification_mode,
+                    verification_mode=mode,
                     code=COCA_VERIFICATION_FAILED_LIGHT,
                 )
                 return COCA_VERIFICATION_FAILED_LIGHT
 
-        elif self.verification_mode == VERIFY_HEAVY:
+        elif mode == VERIFY_HEAVY:
             verification = verify_heavy(
                 self.provenance,
                 workflow,
@@ -637,12 +632,12 @@ class AgentDNA:
             if not verification:
                 self.logger.warning(
                     "agentdna.verify.failed",
-                    verification_mode=self.verification_mode,
+                    verification_mode=mode,
                     code=COCA_VERIFICATION_FAILED_HEAVY,
                 )
                 return COCA_VERIFICATION_FAILED_HEAVY
 
-        elif self.verification_mode == VERIFY_BOUNDARY:
+        elif mode == VERIFY_BOUNDARY:
             verification = verify_boundary(
                 self.provenance,
                 workflow,
@@ -650,12 +645,12 @@ class AgentDNA:
             if not verification:
                 self.logger.warning(
                     "agentdna.verify.failed",
-                    verification_mode=self.verification_mode,
+                    verification_mode=mode,
                     code=COCA_VERIFICATION_FAILED_BOUNDARY,
                 )
                 return COCA_VERIFICATION_FAILED_BOUNDARY
         else:
-            raise ValueError(f"unsupported verification mode {self.verification_mode}")
+            raise ValueError(f"unsupported verification mode {mode}")
 
-        self.logger.info("agentdna.verify.success", verification_mode=self.verification_mode)
+        self.logger.info("agentdna.verify.success", verification_mode=mode)
         return RESULT_OK

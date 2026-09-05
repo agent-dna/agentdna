@@ -31,4 +31,4 @@ def get_intent_workflow_id(user_card_id: str):
     """
     Get a deterministic Intent Workflow ID based on the provided user card ID.
     """
-    return f"{user_card_id}-{uuid.uuid4()}"
+    return get_id(f"{user_card_id}-{uuid.uuid4()}")

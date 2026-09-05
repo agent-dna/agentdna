@@ -10,6 +10,7 @@ from pathlib import Path
 from agentdna.core import AgentDNA
 from agentdna.error import RESULT_OK
 from agentdna.types import IntentWorkflow
+from agentdna.integrations.mcp.context import agentdna_context
 
 from config import settings
 
@@ -36,12 +37,16 @@ class SecurityNewsAgent:
             RSS_SECURITY_AGENT.record(adna_workflow)
             raise ValueError(f"ADNA workflow verification failed with code: {verification_code}")
 
-        result = await agent.ainvoke({"messages": [HumanMessage(content=f"Execution ID: {execution_id}\nTask: {task}\nFocus: AI security, cybersecurity, vulnerabilities, authentication, authorization, and MCP security.")]})
+        with agentdna_context(RSS_SECURITY_AGENT, adna_workflow) as ctx:
+            result = await agent.ainvoke({"messages": [HumanMessage(content=f"Execution ID: {execution_id}\nTask: {task}\nFocus: AI security, cybersecurity, vulnerabilities, authentication, authorization, and MCP security.")]})
 
-        security_adna_workflow = RSS_SECURITY_AGENT.build(
-            payload=str(result["messages"][-1].content),
-            previous_workflows=[adna_workflow],
-        )
+            if len(ctx.workflows) == 0:
+                raise ValueError("No AgentDNA workflow was created during the agent execution.")
+
+            security_adna_workflow = RSS_SECURITY_AGENT.build(
+                payload=str(result["messages"][-1].content),
+                previous_workflows=[adna_workflow],
+            )
 
         return {
             "security_result": str(result["messages"][-1].content),
