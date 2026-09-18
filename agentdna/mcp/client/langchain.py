@@ -9,6 +9,7 @@ from agentdna.mcp.metadata import (
     workflow_from_metadata,
     workflow_to_metadata,
 )
+from agentdna.error import TOOL_EXECUTION_FAILED
 from agentdna.types import RESULT_OK
 
 _PATCH_INSTALLED = False
@@ -148,28 +149,44 @@ def _install_session_call_tool_patch(session: Any) -> None:
         if is_error is None:
             is_error = getattr(result, "isError", False)
 
+        # Carries MCP Tool Execution error
+        # If the MCP Middleware is implemented correctly, then it is possible
+        # that reason for error is either of the following
+        # 
+        # 1. One of the middleware checks has failed and an exception was raised
+        # on the middleware's end. In this scenario, we won't recieve any
+        # IntentWorkflow from MCP Middleware.
+        #
+        # 2. A tool call exception has occurred, and received a workflow with the
+        # status code reflecting the tool execution failure.
         if is_error:
-            await context.cancel_mcp_call(call_handle)
-
             error_message = _extract_result_text(result)
 
-            if error_message:
+            tool_exec_failure_workflow = workflow_from_metadata(
+                getattr(result, "meta", None)
+            )
+
+            if tool_exec_failure_workflow is None:
+                await context.cancel_mcp_call(call_handle)
                 raise RuntimeError(error_message)
+            else:
+                if tool_exec_failure_workflow.envelope is None:
+                    await context.cancel_mcp_call(call_handle)
+                    raise RuntimeError(f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}")
 
-            raise RuntimeError("MCP tool call failed")
+                # Unexpected scenario: IntentWorkflow was received.
+                # However, we expected tool failure as the status code.
+                if tool_exec_failure_workflow.envelope.status_code != TOOL_EXECUTION_FAILED:
+                    await context.cancel_mcp_call(call_handle)
+                    raise RuntimeError(
+                        f"unexpected error: expected status code from intentWorkflow is {TOOL_EXECUTION_FAILED}, got {tool_exec_failure_workflow.envelope.status_code}"
+                    )
 
-        # ------------------------------------------------------------
-        # Successful MCP result.
-        #
-        # A successful AgentDNA-protected request MUST return the
-        # successor workflow in MCP response metadata.
-        # ------------------------------------------------------------
 
+        # Processing the envelope recieved from MCP server
         successor = workflow_from_metadata(getattr(result, "meta", None))
-
         if successor is None:
             await context.cancel_mcp_call(call_handle)
-
             raise RuntimeError("MCP tool response did not contain an AgentDNA successor workflow")
 
         verification_code = context.dna.verify(successor)
