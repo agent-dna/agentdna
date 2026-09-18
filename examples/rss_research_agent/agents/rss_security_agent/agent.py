@@ -48,7 +48,7 @@ class SecurityNewsAgent:
 
             security_adna_workflow = RSS_SECURITY_AGENT.build(
                 payload=str(result["messages"][-1].content),
-                previous_workflows=[adna_workflow],
+                previous_workflows=ctx.workflows,
             )
 
         return {
