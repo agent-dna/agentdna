@@ -7,12 +7,12 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (
     workflow_from_metadata,
     workflow_to_metadata,
 )
-from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 
 _PATCH_INSTALLED = False
 _PATCH_LOCK = threading.Lock()
