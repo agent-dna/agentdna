@@ -526,8 +526,8 @@ class AgentDNA:
 
             if is_intent_card_already_present:
                 self.logger.info(
-                    "agentdna.record.append_attempt", 
-                    msg=f"existing IntentWorkflow card {workflow.id} found, appending to it"
+                    "agentdna.record.append_attempt",
+                    msg=f"existing IntentWorkflow card {workflow.id} found, appending to it",
                 )
                 return self.__append_to_intent_workflow_card_with_retry(
                     workflow.id,
@@ -536,7 +536,6 @@ class AgentDNA:
             else:
                 self.logger.error("agentdna.record.failed", error=str(exc))
                 raise RuntimeError(f"failed create workflow provenance, err: {exc}") from exc
-
 
     def build(
         self,
@@ -676,7 +675,6 @@ class AgentDNA:
         self.logger.info("agentdna.verify.success", verification_mode=mode)
         return RESULT_OK
 
-
     def __append_to_intent_workflow_card_with_retry(
         self,
         card_id: str,
@@ -709,9 +707,7 @@ class AgentDNA:
                         error=error_message,
                     )
 
-                    raise RuntimeError(
-                        f"failed append workflow provenance, err: {exc}"
-                    ) from exc
+                    raise RuntimeError(f"failed append workflow provenance, err: {exc}") from exc
 
                 self.logger.warning(
                     "agentdna.record.append.retry",
@@ -735,6 +731,4 @@ class AgentDNA:
 
                 time.sleep(retry_delay)
 
-        raise RuntimeError(
-            f"failed append workflow provenance for card {card_id}"
-        )
+        raise RuntimeError(f"failed append workflow provenance for card {card_id}")
