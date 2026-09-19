@@ -192,9 +192,14 @@ def install_mcp_client() -> None:
                             else:
                                 if tool_exec_failure_workflow.envelope is None:
                                     await context.cancel_mcp_call(call_handle)
-                                    raise RuntimeError(f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}")
+                                    raise RuntimeError(
+                                        f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}"
+                                    )
 
-                            if tool_exec_failure_workflow.envelope.status_code != TOOL_EXECUTION_FAILED:
+                            if (
+                                tool_exec_failure_workflow.envelope.status_code
+                                != TOOL_EXECUTION_FAILED
+                            ):
                                 await context.cancel_mcp_call(call_handle)
                                 cancelled = True
 

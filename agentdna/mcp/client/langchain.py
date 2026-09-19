@@ -152,7 +152,7 @@ def _install_session_call_tool_patch(session: Any) -> None:
         # Carries MCP Tool Execution error
         # If the MCP Middleware is implemented correctly, then it is possible
         # that reason for error is either of the following
-        # 
+        #
         # 1. One of the middleware checks has failed and an exception was raised
         # on the middleware's end. In this scenario, we won't recieve any
         # IntentWorkflow from MCP Middleware.
@@ -162,9 +162,7 @@ def _install_session_call_tool_patch(session: Any) -> None:
         if is_error:
             error_message = _extract_result_text(result)
 
-            tool_exec_failure_workflow = workflow_from_metadata(
-                getattr(result, "meta", None)
-            )
+            tool_exec_failure_workflow = workflow_from_metadata(getattr(result, "meta", None))
 
             if tool_exec_failure_workflow is None:
                 await context.cancel_mcp_call(call_handle)
@@ -172,7 +170,9 @@ def _install_session_call_tool_patch(session: Any) -> None:
             else:
                 if tool_exec_failure_workflow.envelope is None:
                     await context.cancel_mcp_call(call_handle)
-                    raise RuntimeError(f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}")
+                    raise RuntimeError(
+                        f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}"
+                    )
 
                 # Unexpected scenario: IntentWorkflow was received.
                 # However, we expected tool failure as the status code.
@@ -181,7 +181,6 @@ def _install_session_call_tool_patch(session: Any) -> None:
                     raise RuntimeError(
                         f"unexpected error: expected status code from intentWorkflow is {TOOL_EXECUTION_FAILED}, got {tool_exec_failure_workflow.envelope.status_code}"
                     )
-
 
         # Processing the envelope recieved from MCP server
         successor = workflow_from_metadata(getattr(result, "meta", None))
