@@ -10,6 +10,17 @@ def build_llm() -> BaseChatModel:
         from langchain_ollama import ChatOllama
 
         return ChatOllama(model=settings.ollama_model, base_url=settings.ollama_host, temperature=settings.llm_temperature)
+    if settings.llm_backend == "openai":
+        from langchain_openai import ChatOpenAI
+
+        kwargs = {"model": settings.openai_name, "temperature": settings.llm_temperature}
+        if settings.openai_base_url:
+            kwargs["base_url"] = settings.openai_base_url
+        if settings.openai_api_key:
+            kwargs["api_key"] = settings.openai_api_key
+    
+        return ChatOpenAI(**kwargs)
+
     if settings.llm_backend == "gemini":
         from langchain_google_genai import ChatGoogleGenerativeAI
 

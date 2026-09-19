@@ -42,6 +42,10 @@ class Settings:
     security_agent_name: str = os.getenv("RSS_SECURITY_AGENT_NAME", "RSS Security Agent")
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "")
 
+    openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")
+    openai_name: str = os.getenv("OPENAI_MODEL_NAME", "")
+    openai_api_key: str = os.getenv("OPENAI_API_KEY", "")
+
     @property
     def feeds(self) -> list[dict[str, str]]:
         feeds = json.loads(self.feeds_json)

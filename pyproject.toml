@@ -2,8 +2,6 @@
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
 
-# cbac_service is a standalone deployable with its own pyproject.toml and lock;
-# it depends on this library from PyPI. Ship only the agentdna package.
 [tool.setuptools.packages.find]
 include = ["agentdna*"]
 
