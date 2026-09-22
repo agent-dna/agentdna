@@ -18,9 +18,9 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 
-from agentdna.authevidence import METHOD_BEARER_JWT, METHOD_NONE
-from agentdna.evidence_sink import ENV_FILE, ENV_URL
-from agentdna.fingerprintkey import ENV_KEY, load_key
+from agentdna.auth.evidence import METHOD_BEARER_JWT, METHOD_NONE
+from agentdna.auth.key import ENV_KEY, load_key
+from agentdna.auth.sink import ENV_FILE, ENV_URL
 from agentdna.mcp.server.observer import (
     SOURCE_SERVER_IN,
     capture_headers,

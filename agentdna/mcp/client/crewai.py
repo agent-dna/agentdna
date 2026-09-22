@@ -7,7 +7,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from agentdna import httpobserver
+from agentdna.auth import httpobserver
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (

@@ -11,7 +11,7 @@ import hashlib
 import json
 from dataclasses import asdict
 
-from agentdna.authevidence import (
+from agentdna.auth.evidence import (
     METHOD_API_KEY,
     METHOD_BASIC,
     METHOD_BEARER_JWT,

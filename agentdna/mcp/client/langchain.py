@@ -4,7 +4,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import Any
 
-from agentdna import httpobserver
+from agentdna.auth import httpobserver
 from agentdna.error import TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (

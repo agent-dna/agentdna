@@ -8,7 +8,8 @@ from mcp.server import ServerRequestContext
 from mcp.server.context import CallNext, HandlerResult
 from mcp.types import CallToolResult, TextContent
 
-from agentdna import AgentDNA, httpobserver
+from agentdna import AgentDNA
+from agentdna.auth import httpobserver
 from agentdna.error import MIDDLEWARE_EXECUTION_FAILED, RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import agentdna_context
 from agentdna.mcp.metadata import (

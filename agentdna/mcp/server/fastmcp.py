@@ -13,7 +13,8 @@ try:
 except ImportError:
     from fastmcp.tools.base import ToolResult
 
-from agentdna import AgentDNA, httpobserver
+from agentdna import AgentDNA
+from agentdna.auth import httpobserver
 from agentdna.error import (
     RESULT_OK,
     TOOL_EXECUTION_FAILED,

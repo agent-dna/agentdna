@@ -38,9 +38,9 @@ from urllib.parse import urlparse
 
 import httpx
 
-from agentdna import evidence_sink
-from agentdna.authevidence import STATUS_UNKNOWN, AuthEvidence, observe
-from agentdna.fingerprintkey import load_key
+from agentdna.auth import sink
+from agentdna.auth.evidence import STATUS_UNKNOWN, AuthEvidence, observe
+from agentdna.auth.key import load_key
 from agentdna.mcp.metadata import (
     AGENTDNA_INTENT_WORKFLOW_META_KEY,
     AGENTDNA_META_KEY,
@@ -78,7 +78,7 @@ def install(dna=None, source: str = SOURCE_SERVER_OUT) -> None:
     recorded the workflow in context has one.
     """
     global _installed
-    if _installed or not evidence_sink.enabled():
+    if _installed or not sink.enabled():
         return
     _installed = True
 
@@ -192,7 +192,7 @@ def _record(dna, source, headers, host, body=None) -> None:
 
         facts = observe(dict(headers), load_key(dna.config_dir, dna.logger))
 
-        evidence_sink.send(
+        sink.send(
             AuthEvidence.from_facts(
                 facts,
                 run_id=run_id,
@@ -222,7 +222,7 @@ def _own_services(dna) -> set:
     urls = (
         getattr(dna, "agentdna_admin_url", "") or "",
         getattr(getattr(dna, "provenance", None), "provenance_url", "") or "",
-        os.environ.get(evidence_sink.ENV_URL, ""),
+        os.environ.get(sink.ENV_URL, ""),
     )
     return {host for host in (urlparse(url).hostname for url in urls if url) if host}
 

@@ -8,11 +8,11 @@ from dataclasses import dataclass
 import httpx
 import pytest
 
-from agentdna import httpobserver
-from agentdna.authevidence import METHOD_BEARER_JWT
-from agentdna.evidence_sink import ENV_FILE
-from agentdna.fingerprintkey import ENV_KEY
-from agentdna.httpobserver import SOURCE_CLIENT_OUT, SOURCE_SERVER_OUT
+from agentdna.auth import httpobserver
+from agentdna.auth.evidence import METHOD_BEARER_JWT
+from agentdna.auth.httpobserver import SOURCE_CLIENT_OUT, SOURCE_SERVER_OUT
+from agentdna.auth.key import ENV_KEY
+from agentdna.auth.sink import ENV_FILE
 
 TOKEN = "eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOiJodHRwczovL2lkcCIsIm9pZCI6InByaXlhIn0.not-real"
 CREDENTIAL = f"Bearer {TOKEN}"
@@ -543,7 +543,7 @@ def test_the_provenance_layer_is_not_a_hop(serving_wired):
 def test_recording_does_not_record_itself(monkeypatch, tmp_path):
     """Evidence is posted with `requests`, and `requests` is patched. Without
     this, one record posts a record that posts a record, without end."""
-    from agentdna.evidence_sink import ENV_URL
+    from agentdna.auth.sink import ENV_URL
 
     monkeypatch.setenv(ENV_KEY, "one-shared-value")
     monkeypatch.setenv(ENV_FILE, str(tmp_path / "evidence.jsonl"))

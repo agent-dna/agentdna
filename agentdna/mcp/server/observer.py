@@ -3,7 +3,7 @@
 Runs in the MCP server middleware and records how each request authenticated.
 It observes from outside the agent, so the agent cannot shape the evidence.
 
-Disabled by default. See `evidence_sink` for how to turn it on.
+Disabled by default. See `agentdna.auth.sink` for how to turn it on.
 
 This module:
 
@@ -23,14 +23,14 @@ from __future__ import annotations
 import time
 from contextvars import ContextVar
 
-from agentdna import evidence_sink
-from agentdna.authevidence import (
+from agentdna.auth import sink
+from agentdna.auth.evidence import (
     AUTH_HEADERS,
     STATUS_UNKNOWN,
     AuthEvidence,
     observe,
 )
-from agentdna.fingerprintkey import load_key
+from agentdna.auth.key import load_key
 
 # Two legs, two sources. The server receives a request and then calls its own
 # backend to answer it - and the credential on the way out is usually not the
@@ -54,7 +54,7 @@ def record_request(dna, workflow, context) -> None:
     arrived, not where the credential was judged, so whether it was accepted is
     something we have not observed. A point in front of the server sees that.
     """
-    if not evidence_sink.enabled():
+    if not sink.enabled():
         return
 
     try:
@@ -71,7 +71,7 @@ def record_request(dna, workflow, context) -> None:
             observed_at=time.time(),
         )
 
-        evidence_sink.send(evidence, dna.api_key)
+        sink.send(evidence, dna.api_key)
     except Exception as exc:
         dna.logger.warning("agentdna.authevidence.record_failed", error=str(exc))
 
