@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from agentdna.error import TOOL_EXECUTION_FAILED
+from agentdna import httpobserver
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (
     workflow_from_metadata,
@@ -36,6 +37,10 @@ def install_mcp_client() -> None:
         import langchain_mcp_adapters.tools as tools
     except ImportError as exc:
         raise ImportError("langchain-mcp-adapters is not installed.") from exc
+
+    # Record the credential on the calls this client makes. No-op unless
+    # evidence collection is switched on.
+    httpobserver.install(source=httpobserver.SOURCE_CLIENT_OUT)
 
     original_create_session = sessions.create_session
 
@@ -90,6 +95,10 @@ def _install_session_call_tool_patch(session: Any) -> None:
                 *args,
                 **kwargs,
             )
+
+        # Hand the instance to the outbound hook. This runs where the context
+        # is visible; the hook does not.
+        httpobserver.remember_dna(context.dna)
 
         # One actual MCP tools/call request = one AgentDNA workflow.
         call_handle = await context.begin_mcp_call()

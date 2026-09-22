@@ -13,7 +13,7 @@ try:
 except ImportError:
     from fastmcp.tools.base import ToolResult
 
-from agentdna import AgentDNA
+from agentdna import AgentDNA, httpobserver
 from agentdna.error import (
     RESULT_OK,
     TOOL_EXECUTION_FAILED,
@@ -30,6 +30,7 @@ from .checks import (
     cbac_verification,
     coca_verification,
 )
+from .observer import record_request
 from .types import CbacFn
 from .utils import get_tool_name
 
@@ -58,6 +59,9 @@ class AgentDNAMCPMiddleware(Middleware):
     ) -> None:
         self.dna = dna
         self.cbac_fn = cbac_fn
+        # Also record the calls this server makes to its own backend.
+        # No-op unless evidence collection is switched on.
+        httpobserver.install(dna)
 
     async def on_call_tool(
         self,
@@ -69,6 +73,8 @@ class AgentDNAMCPMiddleware(Middleware):
         incoming_workflow = _extract_workflow(context)
         if incoming_workflow is None:
             raise ValueError("Missing AgentDNA workflow in MCP request metadata")
+
+        record_request(self.dna, incoming_workflow, context)
 
         with agentdna_context(self.dna, incoming_workflow):
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
