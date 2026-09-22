@@ -20,6 +20,7 @@ authors = [
 
 dependencies = [
   "requests>=2.0.0",
+  "httpx>=0.27",
   "python-dotenv>=1.0.0",
   "rubix-py>=1.2.0",
   "py-multiformats-cid>=0.4.4",
