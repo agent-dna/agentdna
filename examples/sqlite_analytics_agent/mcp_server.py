@@ -9,7 +9,6 @@ from config import settings
 
 from agentdna.core import AgentDNA
 from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware
-from cbac import authorize
 
 dna = AgentDNA(
     name=settings.mcp_server_name,
@@ -22,8 +21,10 @@ dna = AgentDNA(
 
 mcp = FastMCP("sqlite-analytics-mcp")
 
+# No CBAC function: the `cbac` module this imported has never existed in
+# this repo, so the example could not start. CBAC is optional here.
 mcp.add_middleware(
-    AgentDNAMCPMiddleware(dna, authorize),
+    AgentDNAMCPMiddleware(dna),
 )
 
 
