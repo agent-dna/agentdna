@@ -25,21 +25,42 @@ dependencies = [
   "py-multiformats-cid>=0.4.4",
   "pyyaml>=6.0",
   "structlog>=24.0.0",
-  "fastmcp>=3.4.2",
   "colorama"
 ]
 
 
 [project.urls]
-Homepage = "https://github.com/agent-dna/agentdna"
+Homepage = "https://agentdna.io"
 Repository = "https://github.com/agent-dna/agentdna"
 
 [dependency-groups]
+# Dependency groups for dev testing.
 dev = [
-    "pyright>=1.1.411",
-    "pytest>=8.0.0",
-    "ruff==0.16.0",
+  "pyright>=1.1.411",
+  "pytest>=8.0.0",
+  "ruff==0.16.0",
 ]
+
+# # MCP Server Adapters
+# fastmcp3 = [
+#   "fastmcp>=3.0.0,<4.0.0",
+# ]
+# fastmcp4 = [
+#   "fastmcp>=4.0.0,<5.0.0",
+# ]
+# mcp2 = [
+#   "mcp>=2.0.0",
+# ]
+
+# # MCP Client Adapters
+# langchain = [
+#   "langchain-mcp-adapters<=0.3.2"
+# ]
+# crewai = [
+#   "crewai-tools[mcp]<2"
+# ]
+
+
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
