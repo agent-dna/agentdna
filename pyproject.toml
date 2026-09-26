@@ -35,31 +35,32 @@ Repository = "https://github.com/agent-dna/agentdna"
 
 [dependency-groups]
 # Dependency groups for dev testing.
-
-# MCP Server Adapters
-fastmcp3 = [
-  "fastmcp>=3.0.0,<4.0.0",
-]
-fastmcp4 = [
-  "fastmcp>=4.0.0,<5.0.0",
-]
-mcp2 = [
-  "mcp>=2.0.0",
-]
-
-# MCP Client Adapters
-langchain = [
-  "langchain-mcp-adapters<=0.3.2"
-]
-crewai = [
-  "crewai-tools[mcp]<2"
-]
-
 dev = [
   "pyright>=1.1.411",
   "pytest>=8.0.0",
   "ruff==0.16.0",
 ]
+
+# # MCP Server Adapters
+# fastmcp3 = [
+#   "fastmcp>=3.0.0,<4.0.0",
+# ]
+# fastmcp4 = [
+#   "fastmcp>=4.0.0,<5.0.0",
+# ]
+# mcp2 = [
+#   "mcp>=2.0.0",
+# ]
+
+# # MCP Client Adapters
+# langchain = [
+#   "langchain-mcp-adapters<=0.3.2"
+# ]
+# crewai = [
+#   "crewai-tools[mcp]<2"
+# ]
+
+
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
