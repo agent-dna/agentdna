@@ -66,19 +66,33 @@ Every Envelope is digitally signed by the sender and references its parent Envel
 }
 ```
 
-Following status codes are set:
+The following status codes are set:
 
-| Codes      | Description                                             |
-| ---------- | ------------------------------------------------------- |
-| 1000       | No issues found                                         |
-| 1001       | Agent not whitelisted                                   |
-| 1002       | Error while performing Agent whitelist verification     |
-| 2001       | Envelope verification failed under `light` mode         |
-| 2002       | Envelope verification failed under `heavy` mode         |
-| 2003       | Envelope verification failed under `boundary` mode      |
-| 2999       | CoCA verification failure for unknown reason            |
-| 4001       | MCP Tool Execution error. A special case where the workflow isn't interrupted |
-| 4002       | Generic Middleware Execution error                      |
+| Code | Name | Description |
+| --- | --- | --- |
+| 1000 | `RESULT_OK` | No issues found |
+| 1001 | `ADMIN_WHITELIST_CHECK_FAILED` | Agent is not whitelisted |
+| 1002 | `ADMIN_WHITELIST_CHECK_SERVER_ERROR` | Agent whitelist verification could not be completed |
+| 2001 | `COCA_VERIFICATION_FAILED_LIGHT` | Envelope verification failed under `light` mode |
+| 2002 | `COCA_VERIFICATION_FAILED_HEAVY` | Envelope verification failed under `heavy` mode |
+| 2003 | `COCA_VERIFICATION_FAILED_BOUNDARY` | Envelope verification failed under `boundary` mode |
+| 2999 | `COCA_VERIFICATION_FAILED_UNKNOWN` | CoCA verification failed for an unknown reason |
+| 4001 | `TOOL_EXECUTION_FAILED` | MCP tool execution failed |
+| 4002 | `MIDDLEWARE_EXECUTION_FAILED` | MCP middleware execution failed |
+
+Use `StatusCode` when a named integer is more readable, or `describe_status()`
+when displaying a result in logs, errors, or user interfaces. Existing integer
+constants remain available and fully backward compatible.
+
+```py
+from agentdna.error import StatusCode, describe_status
+
+status = StatusCode.COCA_VERIFICATION_FAILED_HEAVY
+
+assert status == 2002
+print(describe_status(status))
+# 2002 (COCA_VERIFICATION_FAILED_HEAVY): Envelope verification failed under heavy mode
+```
 ---
 
 ### IntentWorkflow
