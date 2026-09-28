@@ -50,7 +50,7 @@ class TechnologyNewsAgent:
             # (AgentDNA_Integration)
             technology_adna_workflow = RSS_TECHNOLOGY_AGENT.build(
                 payload=str(result["messages"][-1].content),
-                previous_workflows=[adna_workflow],
+                previous_workflows=ctx.workflows,
             )
 
         return {

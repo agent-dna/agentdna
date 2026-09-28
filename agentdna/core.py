@@ -1,6 +1,8 @@
 import base64
 import json
 import os
+import re
+import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -515,8 +517,25 @@ class AgentDNA:
 
             return workflow_card_id
         except Exception as exc:
-            self.logger.error("agentdna.record.failed", error=str(exc))
-            raise RuntimeError(f"failed create workflow provenance, err: {exc}") from exc
+            error_message = str(exc)
+
+            is_intent_card_already_present = re.search(
+                r"child nftId (\S+) already exists locally",
+                error_message,
+            )
+
+            if is_intent_card_already_present:
+                self.logger.info(
+                    "agentdna.record.append_attempt",
+                    msg=f"existing IntentWorkflow card {workflow.id} found, appending to it",
+                )
+                return self.__append_to_intent_workflow_card_with_retry(
+                    workflow.id,
+                    workflow.serialize(),
+                )
+            else:
+                self.logger.error("agentdna.record.failed", error=str(exc))
+                raise RuntimeError(f"failed create workflow provenance, err: {exc}") from exc
 
     def build(
         self,
@@ -655,3 +674,61 @@ class AgentDNA:
 
         self.logger.info("agentdna.verify.success", verification_mode=mode)
         return RESULT_OK
+
+    def __append_to_intent_workflow_card_with_retry(
+        self,
+        card_id: str,
+        card_info: str,
+        max_retries: int = 5,
+        retry_delay: float = 0.5,
+    ) -> str:
+        for attempt in range(max_retries):
+            try:
+                self.provenance.append_to_provenance_card(
+                    card_id=card_id,
+                    card_info=card_info,
+                )
+
+                self.logger.info(
+                    "agentdna.record.append.success",
+                    card_id=card_id,
+                    attempt=attempt + 1,
+                )
+
+                return card_id
+
+            except Exception as exc:
+                error_message = str(exc)
+
+                if "NFT lock failed" not in error_message:
+                    self.logger.error(
+                        "agentdna.record.append.failed",
+                        card_id=card_id,
+                        error=error_message,
+                    )
+
+                    raise RuntimeError(f"failed append workflow provenance, err: {exc}") from exc
+
+                self.logger.warning(
+                    "agentdna.record.append.retry",
+                    card_id=card_id,
+                    attempt=attempt + 1,
+                    max_retries=max_retries,
+                    error=error_message,
+                )
+
+                if attempt == max_retries - 1:
+                    self.logger.error(
+                        "agentdna.record.append.failed",
+                        card_id=card_id,
+                        error="max_retries_exceeded",
+                    )
+
+                    raise RuntimeError(
+                        f"failed append workflow provenance after "
+                        f"{max_retries} attempts, err: {exc}"
+                    ) from exc
+
+                time.sleep(retry_delay)
+
+        raise RuntimeError(f"failed append workflow provenance for card {card_id}")

@@ -7,12 +7,12 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (
     workflow_from_metadata,
     workflow_to_metadata,
 )
-from agentdna.types import RESULT_OK
 
 _PATCH_INSTALLED = False
 _PATCH_LOCK = threading.Lock()
@@ -182,14 +182,32 @@ def install_mcp_client() -> None:
                         if _is_mcp_error_result(result):
                             error_message = _extract_result_text(result) or "MCP tool call failed"
 
-                            await context.cancel_mcp_call(call_handle)
-                            cancelled = True
-
-                            _raise_crewai_terminal_failure(
-                                tool_name=name,
-                                tool_arguments=actual_arguments,
-                                message=error_message,
+                            tool_exec_failure_workflow = workflow_from_metadata(
+                                getattr(result, "meta", None)
                             )
+
+                            if tool_exec_failure_workflow is None:
+                                await context.cancel_mcp_call(call_handle)
+                                raise RuntimeError(error_message)
+                            else:
+                                if tool_exec_failure_workflow.envelope is None:
+                                    await context.cancel_mcp_call(call_handle)
+                                    raise RuntimeError(
+                                        f"Recieved empty envelope for workflow with id: {tool_exec_failure_workflow.id}"
+                                    )
+
+                            if (
+                                tool_exec_failure_workflow.envelope.status_code
+                                != TOOL_EXECUTION_FAILED
+                            ):
+                                await context.cancel_mcp_call(call_handle)
+                                cancelled = True
+
+                                _raise_crewai_terminal_failure(
+                                    tool_name=name,
+                                    tool_arguments=actual_arguments,
+                                    message=error_message,
+                                )
 
                         # --------------------------------------------------
                         # Successful MCP request.
@@ -318,11 +336,7 @@ def _extract_result_text(
     Extract human-readable text from an MCP result.
     """
 
-    content = getattr(
-        result,
-        "content",
-        None,
-    )
+    content = getattr(result, "content", None)
 
     if not content:
         return None
@@ -330,19 +344,9 @@ def _extract_result_text(
     messages: list[str] = []
 
     for item in content:
-        text = getattr(
-            item,
-            "text",
-            None,
-        )
+        text = getattr(item, "text", None)
 
-        if (
-            isinstance(
-                text,
-                str,
-            )
-            and text
-        ):
+        if isinstance(text, str) and text:
             messages.append(text)
 
     if not messages:
