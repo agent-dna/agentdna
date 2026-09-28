@@ -7,7 +7,7 @@ include = ["agentdna*"]
 
 [project]
 name = "agent-dna"
-version = "0.5.1"
+version = "0.5.2"
 description = "Security, Governance and Audit framework for AI Agents"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
@@ -21,7 +21,7 @@ authors = [
 dependencies = [
   "requests>=2.0.0",
   "python-dotenv>=1.0.0",
-  "rubix-py>=1.2.0",
+  "rubix-py>=1.2.1",
   "py-multiformats-cid>=0.4.4",
   "pyyaml>=6.0",
   "structlog>=24.0.0",
