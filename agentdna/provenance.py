@@ -125,6 +125,8 @@ class Provenance:
                 )
 
             child_provenance_card_id = response["child_nfts"][0].get("childNFTId")
+            tx_id = response["tx_id"]
+
             if child_provenance_card_id is None:
                 self.logger.error(
                     "provenance_card.create_child.failed",
@@ -141,8 +143,9 @@ class Provenance:
                 "provenance_card.create_child.success",
                 parent_card_id=parent_card_id,
                 card_id=child_provenance_card_id,
+                tx_id=tx_id,
             )
-            return child_provenance_card_id
+            return child_provenance_card_id, tx_id
 
     def append_to_provenance_card(
         self,
