@@ -7,7 +7,7 @@ include = ["agentdna*"]
 
 [project]
 name = "agent-dna"
-version = "0.5.2"
+version = "0.5.3"
 description = "Security, Governance and Audit framework for AI Agents"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
