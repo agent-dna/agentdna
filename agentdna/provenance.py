@@ -75,6 +75,13 @@ class Provenance:
             result = self.provenance_executor.deploy_nft(
                 nft_id=card_id, nft_value=card_value, nft_data=card_info
             )
+
+            if "error" in result:
+                err_msg = result["error"]
+                raise Exception(
+                    f"failed to create provenance card of id: {card_id}, err: {err_msg}"
+                )
+
             self.logger.info(
                 "provenance_card.create.success", card_id=card_id, card_value=card_value
             )
@@ -125,6 +132,8 @@ class Provenance:
                 )
 
             child_provenance_card_id = response["child_nfts"][0].get("childNFTId")
+            tx_id = response["tx_id"]
+
             if child_provenance_card_id is None:
                 self.logger.error(
                     "provenance_card.create_child.failed",
@@ -141,8 +150,9 @@ class Provenance:
                 "provenance_card.create_child.success",
                 parent_card_id=parent_card_id,
                 card_id=child_provenance_card_id,
+                tx_id=tx_id,
             )
-            return child_provenance_card_id
+            return child_provenance_card_id, tx_id
 
     def append_to_provenance_card(
         self,
@@ -158,6 +168,13 @@ class Provenance:
                 nft_address=card_id,
                 nft_data=card_info,
             )
+
+            if result["status"] is False:
+                err_message = result["message"]
+                raise Exception(
+                    f"failed to append to provenance card {card_id}, err: {err_message}"
+                )
+
             self.logger.info("provenance_card.append.success", card_id=card_id)
             return result
         except Exception as exc:

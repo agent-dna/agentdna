@@ -493,7 +493,7 @@ class AgentDNA:
     def record(
         self,
         workflow: IntentWorkflow,
-    ) -> str:
+    ) -> tuple[str, str]:
         if workflow.envelope is None:
             raise ValueError("workflow does not contain an envelope")
 
@@ -501,7 +501,7 @@ class AgentDNA:
         user_card_id = get_user_card_id(user_id=root_user_id)
 
         try:
-            workflow_card_id = self.provenance.create_new_child_provenance_card(
+            workflow_card_id, tx_id = self.provenance.create_new_child_provenance_card(
                 parent_card_id=user_card_id,
                 card_info=workflow.serialize(),
                 child_nft_id=workflow.id,
@@ -515,7 +515,7 @@ class AgentDNA:
                 workflow_card_id=workflow_card_id,
             )
 
-            return workflow_card_id
+            return workflow_card_id, tx_id
         except Exception as exc:
             error_message = str(exc)
 
@@ -681,7 +681,7 @@ class AgentDNA:
         card_info: str,
         max_retries: int = 5,
         retry_delay: float = 0.5,
-    ) -> str:
+    ) -> tuple[str, str]:
         for attempt in range(max_retries):
             try:
                 self.provenance.append_to_provenance_card(
@@ -695,7 +695,7 @@ class AgentDNA:
                     attempt=attempt + 1,
                 )
 
-                return card_id
+                return card_id, ""  # TODO: Add tx_id here
 
             except Exception as exc:
                 error_message = str(exc)
