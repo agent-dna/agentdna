@@ -2,13 +2,14 @@
 
 import json
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 
 import httpx
 import pytest
 
-from agentdna.auth import httpobserver
+from agentdna.auth import httpobserver, sink
 from agentdna.auth.evidence import METHOD_BEARER_JWT
 from agentdna.auth.httpobserver import SOURCE_CLIENT_OUT, SOURCE_SERVER_OUT
 from agentdna.auth.key import ENV_KEY
@@ -45,11 +46,16 @@ class FakeLogger:
         self.warnings.append((event, fields))
 
 
+class FakeProvenance:
+    provenance_url = ""
+
+
 class FakeDNA:
     def __init__(self, config_dir):
         self.config_dir = config_dir
         self.logger = FakeLogger()
         self.api_key = ""
+        self.provenance = FakeProvenance()
 
 
 class BearerAuth(httpx.Auth):
@@ -184,8 +190,8 @@ def test_a_failure_never_breaks_the_call(monkeypatch, tmp_path):
     with installed(dna):
         _call(headers={"Authorization": CREDENTIAL})  # must not raise
 
-    assert dna.logger.warnings
-    assert dna.logger.warnings[0][0] == "agentdna.authevidence.outbound_failed"
+    events = [event for event, _ in dna.logger.warnings]
+    assert "agentdna.authevidence.outbound_failed" in events
 
 
 # --- requests ------------------------------------------------------------
@@ -493,30 +499,11 @@ def test_run_id_comes_off_the_wire_too(serving_client):
     assert written["run_id"] == "run-from-the-wire"
 
 
-# --- AgentDNA's own services -----------------------------------------------
-
-
-class Provenance:
-    provenance_url = "https://chain-connector-2-dev.rubix.net"
-
-
-class WiredDNA(FakeDNA):
-    """A FakeDNA that knows where AgentDNA's own services live."""
-
-    agentdna_admin_url = "https://agentdna-admin-dev.agentdna.io"
-    provenance = Provenance()
-
-
-@pytest.fixture
-def serving_wired(monkeypatch, tmp_path):
-    monkeypatch.setenv(ENV_KEY, "one-shared-value")
-    monkeypatch.setenv(ENV_FILE, str(tmp_path / "evidence.jsonl"))
-
-    workflow = FakeWorkflow(FakeEnvelope(run_id="run-a41f", signature="sig-incoming"))
-    monkeypatch.setattr(httpobserver, "_current_envelope", lambda: workflow.get_latest_envelope())
-
-    with installed(WiredDNA(str(tmp_path))):
-        yield tmp_path / "evidence.jsonl"
+# --- AgentDNA's own work ---------------------------------------------------
+#
+# The server middleware wraps its checks, CBAC and signing in not_observed(),
+# and only the tool in observed(). Marked where the work happens, not by host:
+# a host list missed the CBAC service on the first real run.
 
 
 def _get(host):
@@ -527,40 +514,209 @@ def _get(host):
     return client.get(f"https://{host}/anything")
 
 
-def test_the_admin_server_is_not_a_hop(serving_wired):
+def test_agentdna_own_work_is_not_a_hop(serving):
     """A whitelist check is AgentDNA's bookkeeping, not work the agent did."""
+    with httpobserver.not_observed():
+        _get("agentdna-admin-dev.agentdna.io")
+
+    assert not serving.exists()
+
+
+def test_the_tool_inside_agentdna_work_is_a_hop(serving):
+    """The middleware's shape: everything unobserved except the tool."""
+    with httpobserver.not_observed():
+        _get("agentdna-admin-dev.agentdna.io")
+        with httpobserver.observed():
+            _get("api.github.com")
+        _get("cbac-service.agentdna.io")
+
+    rows = [json.loads(line) for line in serving.read_text().splitlines()]
+    assert [row["destination"] for row in rows] == ["api.github.com"]
+
+
+def test_agentdna_own_work_on_a_worker_thread_is_not_a_hop(serving):
+    """CBAC posts from asyncio.to_thread. The mark has to follow it there."""
+    import asyncio
+
+    async def check():
+        with httpobserver.not_observed():
+            await asyncio.to_thread(_get, "cbac-service.agentdna.io")
+
+    asyncio.run(check())
+
+    assert not serving.exists()
+
+
+def test_the_same_host_outside_agentdna_work_is_recorded(serving):
+    """Nothing is skipped by host any more. A tool calling the admin server
+    itself is a real hop."""
     _get("agentdna-admin-dev.agentdna.io")
 
-    assert not serving_wired.exists()
+    assert json.loads(serving.read_text())["destination"] == "agentdna-admin-dev.agentdna.io"
 
 
-def test_the_provenance_layer_is_not_a_hop(serving_wired):
-    _get("chain-connector-2-dev.rubix.net")
+def _evidence_server(on_post):
+    """A throwaway middleware. `on_post(handler)` answers each post."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
 
-    assert not serving_wired.exists()
+    class Middleware(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            on_post(self)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Middleware)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
-def test_recording_does_not_record_itself(monkeypatch, tmp_path):
+def _ok(handler):
+    handler.send_response(200)
+    handler.end_headers()
+
+
+def _post_to(monkeypatch, server):
+    """Turn posting on, with this server as the middleware."""
+    monkeypatch.setenv(sink.ENV_ON, "true")
+    monkeypatch.setattr(
+        FakeProvenance, "provenance_url", f"http://127.0.0.1:{server.server_address[1]}"
+    )
+
+
+def test_recording_does_not_record_itself(serving, monkeypatch):
     """Evidence is posted with `requests`, and `requests` is patched. Without
-    this, one record posts a record that posts a record, without end."""
-    from agentdna.auth.sink import ENV_URL
+    this, one record posts a record that posts a record, without end.
 
-    monkeypatch.setenv(ENV_KEY, "one-shared-value")
-    monkeypatch.setenv(ENV_FILE, str(tmp_path / "evidence.jsonl"))
-    monkeypatch.setenv(ENV_URL, "https://middleware.internal")
+    Through a redirect to another hostname, on purpose: a skip-by-hostname
+    list missed the redirected post, and one tool call became 49 posts.
+    """
+    hits = []
 
-    workflow = FakeWorkflow(FakeEnvelope(run_id="run-a41f", signature="sig-incoming"))
-    monkeypatch.setattr(httpobserver, "_current_envelope", lambda: workflow.get_latest_envelope())
+    def redirect_once(handler):
+        hits.append(handler.path)
+        if handler.path == sink.PATH:
+            handler.send_response(307)
+            handler.send_header("Location", f"http://localhost:{port}/landed")
+            handler.end_headers()
+        else:
+            _ok(handler)
 
-    with installed(WiredDNA(str(tmp_path))):
-        _get("middleware.internal")
+    server = _evidence_server(redirect_once)
+    port = server.server_address[1]
+    _post_to(monkeypatch, server)
+    try:
+        _call(headers={"Authorization": CREDENTIAL})
+        sink._waiting.join()
+    finally:
+        server.shutdown()
 
-    assert not (tmp_path / "evidence.jsonl").exists()
+    assert hits == [sink.PATH, "/landed"]  # one post, followed once
+    assert len(serving.read_text().strip().splitlines()) == 1
 
 
-def test_a_real_backend_is_still_recorded(serving_wired):
-    """The skip list is three named hosts, not a general silence."""
-    _get("analytics.internal")
+def test_a_backend_on_the_middleware_host_is_recorded(serving, monkeypatch):
+    """Same machine, different service. Common in dev, where everything is on
+    127.0.0.1, and behind one gateway host in production."""
+    server = _evidence_server(_ok)
+    _post_to(monkeypatch, server)
+    try:
+        _get("127.0.0.1:5000")
+        sink._waiting.join()
+    finally:
+        server.shutdown()
 
-    written = json.loads(serving_wired.read_text())
-    assert written["destination"] == "analytics.internal"
+    assert json.loads(serving.read_text())["destination"] == "127.0.0.1"
+
+
+def test_a_slow_middleware_does_not_hold_up_the_call(serving, monkeypatch):
+    """The post runs on its own thread. Inline, a one-second middleware made
+    every observed call one second slower - and froze an async server's loop."""
+
+    def slow(handler):
+        time.sleep(1.0)
+        _ok(handler)
+
+    server = _evidence_server(slow)
+    _post_to(monkeypatch, server)
+    try:
+        started = time.perf_counter()
+        _call(headers={"Authorization": CREDENTIAL})
+        took = time.perf_counter() - started
+        sink._waiting.join()
+    finally:
+        server.shutdown()
+
+    assert took < 0.5
+
+
+# --- the destination's verdict ---------------------------------------------
+#
+# Recorded from the response, not a probe: the destination already answered,
+# and replaying a user's credential elsewhere to ask again would be worse than
+# not knowing.
+
+
+def _post_returning(status):
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(status, json={})),
+        headers={"Authorization": CREDENTIAL},
+    )
+    return client.post("http://backend.internal/rows", content=b"{}")
+
+
+def test_a_credential_the_destination_took(serving):
+    _post_returning(200)
+
+    assert json.loads(serving.read_text())["auth_status"] == "accepted"
+
+
+def test_a_credential_the_destination_refused(serving):
+    """401 and 403 are the only answers that judge the credential."""
+    for code in (401, 403):
+        serving.unlink(missing_ok=True)
+        _post_returning(code)
+
+        assert json.loads(serving.read_text())["auth_status"] == "rejected"
+
+
+def test_a_failure_that_judged_nothing_stays_unknown(serving):
+    """A 500 is the destination breaking, a 404 is the wrong path, a redirect
+    is neither. Calling any of them "accepted" would claim more than we saw."""
+    for code in (500, 404, 302):
+        serving.unlink(missing_ok=True)
+        _post_returning(code)
+
+        assert json.loads(serving.read_text())["auth_status"] == "unknown"
+
+
+def test_the_credential_is_still_seen_on_the_response_hook(serving):
+    """The reason the hook used to be on the request: httpx applies `auth`
+    inside send(). By the response the request is as it was sent, so the
+    credential is there and the verdict is too."""
+    client = httpx.Client(
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+        auth=BearerAuth(),
+    )
+    client.post("http://backend.internal/rows", content=b"{}")
+
+    written = json.loads(serving.read_text())
+    assert written["auth_method"] == METHOD_BEARER_JWT
+    assert written["identity_id"]
+    assert written["auth_status"] == "accepted"
+
+
+def test_a_call_that_never_arrived_is_recorded_without_a_verdict(serving):
+    """The record still lands - the credential was presented - but nothing
+    judged it, so there is no verdict to report."""
+    import requests
+
+    session = requests.Session()
+    try:
+        session.get("http://127.0.0.1:9/never", timeout=0.4)
+    except Exception:
+        pass
+
+    written = json.loads(serving.read_text())
+    assert written["auth_status"] == "unknown"

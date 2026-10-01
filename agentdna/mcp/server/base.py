@@ -80,9 +80,14 @@ class AgentDNAMCPMiddleware:
 
         record_request(self.dna, incoming_workflow, ctx)
 
-        with agentdna_context(
-            self.dna,
-            incoming_workflow,
+        # Everything in here is AgentDNA's own work - checks, CBAC, signing -
+        # except the tool itself, so only the tool's outbound calls are hops.
+        with (
+            agentdna_context(
+                self.dna,
+                incoming_workflow,
+            ),
+            httpobserver.not_observed(),
         ):
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
@@ -109,7 +114,8 @@ class AgentDNAMCPMiddleware:
                 )
 
             try:
-                result = await call_next(ctx)
+                with httpobserver.observed():
+                    result = await call_next(ctx)
 
                 successor = self._build_successor(
                     ctx=ctx,

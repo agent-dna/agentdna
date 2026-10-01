@@ -71,7 +71,7 @@ def record_request(dna, workflow, context) -> None:
             observed_at=time.time(),
         )
 
-        sink.send(evidence, dna.api_key)
+        sink.send(evidence, dna)
     except Exception as exc:
         dna.logger.warning("agentdna.authevidence.record_failed", error=str(exc))
 

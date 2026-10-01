@@ -77,7 +77,9 @@ class AgentDNAMCPMiddleware(Middleware):
 
         record_request(self.dna, incoming_workflow, context)
 
-        with agentdna_context(self.dna, incoming_workflow):
+        # Everything in here is AgentDNA's own work - checks, CBAC, signing -
+        # except the tool itself, so only the tool's outbound calls are hops.
+        with agentdna_context(self.dna, incoming_workflow), httpobserver.not_observed():
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
             # CoCA verification
@@ -107,7 +109,8 @@ class AgentDNAMCPMiddleware(Middleware):
 
             # Execute tool
             try:
-                result = await call_next(context)
+                with httpobserver.observed():
+                    result = await call_next(context)
                 if not isinstance(result, ToolResult):
                     raise TypeError(
                         f"FastMCP on_call_tool middleware expected ToolResult, got {type(result)!r}"

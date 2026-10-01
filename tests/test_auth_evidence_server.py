@@ -18,9 +18,10 @@ import uvicorn
 from fastmcp import FastMCP
 from fastmcp.server.middleware import Middleware
 
+from agentdna.auth import sink
 from agentdna.auth.evidence import METHOD_BEARER_JWT, METHOD_NONE
 from agentdna.auth.key import ENV_KEY, load_key
-from agentdna.auth.sink import ENV_FILE, ENV_URL
+from agentdna.auth.sink import ENV_FILE, ENV_ON
 from agentdna.mcp.server.observer import (
     SOURCE_SERVER_IN,
     capture_headers,
@@ -56,6 +57,45 @@ def test_a_local_key_is_not_world_readable(monkeypatch, tmp_path):
     load_key(str(tmp_path))
     mode = (tmp_path / "fingerprint.key").stat().st_mode & 0o777
     assert mode == 0o600
+
+
+def test_a_short_key_is_warned_about_once(monkeypatch):
+    """A short key can be guessed from key_version. Warn - once - but still use
+    it, because evidence never stops a server from starting."""
+    import agentdna.auth.key as key_module
+
+    monkeypatch.setattr(key_module, "_warned_short", False)
+    monkeypatch.setenv(ENV_KEY, "step-three")
+    logger = FakeLogger()
+
+    for _ in range(50):
+        load_key("unused", logger)
+
+    assert [event for event, _ in logger.warnings] == ["agentdna.authevidence.short_key"]
+
+
+def test_a_long_key_is_not_warned_about(monkeypatch):
+    import agentdna.auth.key as key_module
+
+    monkeypatch.setattr(key_module, "_warned_short", False)
+    monkeypatch.setenv(ENV_KEY, "x" * 32)
+    logger = FakeLogger()
+
+    load_key("unused", logger)
+
+    assert logger.warnings == []
+
+
+def test_a_local_key_is_loaded_and_warned_about_once(monkeypatch, tmp_path):
+    """Every observed call asks for the key. Reading the file and warning on
+    each one filled the log and put a disk read on every request."""
+    monkeypatch.delenv(ENV_KEY, raising=False)
+    logger = FakeLogger()
+
+    keys = {load_key(str(tmp_path), logger) for _ in range(50)}
+
+    assert len(keys) == 1
+    assert len(logger.warnings) == 1
 
 
 # --- transport capture ----------------------------------------------------
@@ -216,11 +256,16 @@ class FakeLogger:
         self.warnings.append((event, fields))
 
 
+class FakeProvenance:
+    provenance_url = ""
+
+
 class FakeDNA:
     def __init__(self, config_dir):
         self.config_dir = config_dir
         self.logger = FakeLogger()
         self.api_key = ""
+        self.provenance = FakeProvenance()
 
     def get_actor_id(self):
         return "did:rubix:tickets-server"
@@ -381,7 +426,7 @@ def test_records_post_to_the_middleware(monkeypatch, tmp_path):
     try:
         monkeypatch.setenv(ENV_KEY, "one-shared-value")
         monkeypatch.delenv(ENV_FILE, raising=False)
-        monkeypatch.setenv(ENV_URL, f"http://127.0.0.1:{server.server_address[1]}")
+        monkeypatch.setenv(ENV_ON, "true")
         monkeypatch.setattr(
             "agentdna.mcp.server.observer.request_headers",
             lambda context: {"authorization": CREDENTIAL},
@@ -389,8 +434,10 @@ def test_records_post_to_the_middleware(monkeypatch, tmp_path):
 
         dna = FakeDNA(str(tmp_path))
         dna.api_key = "an-api-key"
+        dna.provenance.provenance_url = f"http://127.0.0.1:{server.server_address[1]}"
         workflow = FakeWorkflow(FakeEnvelope(run_id="run-a41f", signature="sig-6f1a2b"))
         record_request(dna, workflow, context=None)
+        sink._waiting.join()  # the post happens on the sender thread
     finally:
         server.shutdown()
 
@@ -410,7 +457,7 @@ def test_records_post_to_the_middleware(monkeypatch, tmp_path):
 
 def test_nothing_is_sent_when_neither_sink_is_configured(monkeypatch, tmp_path):
     monkeypatch.delenv(ENV_FILE, raising=False)
-    monkeypatch.delenv(ENV_URL, raising=False)
+    monkeypatch.delenv(ENV_ON, raising=False)
     calls = []
     monkeypatch.setattr(
         "agentdna.mcp.server.observer.request_headers",
@@ -421,3 +468,75 @@ def test_nothing_is_sent_when_neither_sink_is_configured(monkeypatch, tmp_path):
     record_request(FakeDNA(str(tmp_path)), workflow, context=None)
 
     assert calls == []
+
+
+def test_a_full_queue_drops_the_record_and_says_so(monkeypatch):
+    """A middleware that stays down fills the queue. The next record is
+    dropped - never waited on - and the drop is logged by name."""
+    import queue
+
+    full = queue.Queue(maxsize=1)
+    full.put("already waiting")
+    monkeypatch.setattr(sink, "_waiting", full)
+    monkeypatch.setattr(sink, "_start_sender", lambda: None)
+    monkeypatch.delenv(ENV_FILE, raising=False)
+    monkeypatch.setenv(ENV_ON, "true")
+
+    warnings = []
+    monkeypatch.setattr(sink.logger, "warning", lambda event, **f: warnings.append(event))
+
+    class Evidence:
+        def as_dict(self):
+            return {"request_id": "sig-dropped"}
+
+    sink.send(Evidence(), FakeDNA(""))  # must not raise
+
+    assert warnings == ["agentdna.authevidence.queue_full"]
+
+
+def test_the_switch_is_on_or_off_never_a_url(monkeypatch):
+    """Only an explicit yes turns posting on. "false" is not an empty string,
+    so a check for "is it set" would have read it as on."""
+    monkeypatch.delenv(ENV_FILE, raising=False)
+    for value in ("true", "TRUE", "1", "on", "yes"):
+        monkeypatch.setenv(ENV_ON, value)
+        assert sink.enabled(), value
+    for value in ("", "false", "0", "off", "no", "http://127.0.0.1:8080"):
+        monkeypatch.setenv(ENV_ON, value)
+        assert not sink.enabled(), value
+
+
+def test_a_middleware_that_refuses_the_post_is_logged(monkeypatch, tmp_path):
+    """requests does not raise on a 404. Without a status check, a middleware
+    with no evidence endpoint dropped every record and said nothing."""
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class NoSuchEndpoint(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), NoSuchEndpoint)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+
+    warnings = []
+    monkeypatch.setattr(sink.logger, "warning", lambda event, **f: warnings.append(event))
+    monkeypatch.delenv(ENV_FILE, raising=False)
+    monkeypatch.setenv(ENV_ON, "true")
+
+    class Evidence:
+        def as_dict(self):
+            return {"request_id": "sig-refused"}
+
+    dna = FakeDNA(str(tmp_path))
+    dna.provenance.provenance_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        sink.send(Evidence(), dna)
+        sink._waiting.join()  # the post happens on the sender thread
+    finally:
+        server.shutdown()
+
+    assert warnings == ["agentdna.authevidence.post_failed"]

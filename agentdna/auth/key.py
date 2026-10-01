@@ -16,11 +16,23 @@ from __future__ import annotations
 import hashlib
 import os
 import secrets
+import threading
 
 ENV_KEY = "AGENTDNA_FINGERPRINT_KEY"
 
 # Where a locally generated key is kept, under the actor config directory.
 KEY_FILE = "fingerprint.key"
+
+# A configured key shorter than this can be guessed back from key_version,
+# which is on every record. Warned about, not refused: evidence never stops a
+# server from starting.
+MIN_KEY_LENGTH = 32
+_warned_short = False
+
+# Local keys already loaded, by config dir: read from disk and warned about
+# once per process, not on every observed call.
+_local_keys: dict[str, bytes] = {}
+_local_keys_lock = threading.Lock()
 
 
 def load_key(config_dir: str, logger=None) -> bytes:
@@ -34,18 +46,28 @@ def load_key(config_dir: str, logger=None) -> bytes:
     process-only key is used instead.
     """
 
+    global _warned_short
     configured = os.environ.get(ENV_KEY, "").strip()
     if configured:
+        if len(configured) < MIN_KEY_LENGTH and not _warned_short and logger is not None:
+            _warned_short = True
+            logger.warning(
+                "agentdna.authevidence.short_key",
+                hint=f"{ENV_KEY} is under {MIN_KEY_LENGTH} characters; it can be guessed "
+                "from key_version, and with it every identity_id can be reversed",
+            )
         return hashlib.sha256(configured.encode("utf-8")).digest()
 
-    key = _local_key(config_dir)
-    if logger is not None:
-        logger.warning(
-            "agentdna.authevidence.local_key",
-            hint=f"no {ENV_KEY} set, so this installation fingerprints with a key of "
-            "its own; evidence from elsewhere will not be comparable",
-        )
-    return key
+    with _local_keys_lock:
+        if config_dir not in _local_keys:
+            _local_keys[config_dir] = _local_key(config_dir)
+            if logger is not None:
+                logger.warning(
+                    "agentdna.authevidence.local_key",
+                    hint=f"no {ENV_KEY} set, so this installation fingerprints with a key of "
+                    "its own; evidence from elsewhere will not be comparable",
+                )
+        return _local_keys[config_dir]
 
 
 def _local_key(config_dir: str) -> bytes:

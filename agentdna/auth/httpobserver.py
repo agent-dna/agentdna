@@ -13,9 +13,11 @@ Covers httpx and requests, which between them are what agent code uses: httpx
 for the protocol and model layer (MCP, CrewAI, OpenAI), requests for tool
 integrations and older SDKs.
 
-Calls to AgentDNA's own services are never recorded. They are bookkeeping, not
-the run's work - and the evidence endpoint would otherwise record the act of
-recording, which does not terminate.
+AgentDNA's own calls are never recorded. They are bookkeeping, not the run's
+work. The server middleware wraps its own work - checks, CBAC, signing,
+recording - in `not_observed()`, and only the tool itself in `observed()`.
+The evidence post is skipped by thread: recording it would post again, and
+that does not terminate.
 
 On the client side only calls that carry a workflow are recorded. One MCP tool
 call is several HTTP requests - a handshake, a stream, a teardown - and only
@@ -32,14 +34,21 @@ string set once at startup. Coverage here is "the backends that are HTTP", not
 from __future__ import annotations
 
 import json
-import os
 import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from urllib.parse import urlparse
 
 import httpx
 
 from agentdna.auth import sink
-from agentdna.auth.evidence import STATUS_UNKNOWN, AuthEvidence, observe
+from agentdna.auth.evidence import (
+    STATUS_ACCEPTED,
+    STATUS_REJECTED,
+    STATUS_UNKNOWN,
+    AuthEvidence,
+    observe,
+)
 from agentdna.auth.key import load_key
 from agentdna.mcp.metadata import (
     AGENTDNA_INTENT_WORKFLOW_META_KEY,
@@ -70,6 +79,31 @@ def remember_dna(dna) -> None:
     _remembered_dna = dna
 
 
+# False while AgentDNA does its own work. A ContextVar, so it follows the work
+# into asyncio.to_thread - which is where CBAC posts from.
+_observing: ContextVar[bool] = ContextVar("agentdna_observing", default=True)
+
+
+@contextmanager
+def not_observed():
+    """AgentDNA's own work: calls made in here are not the run's hops."""
+    token = _observing.set(False)
+    try:
+        yield
+    finally:
+        _observing.reset(token)
+
+
+@contextmanager
+def observed():
+    """The tool's own work, inside a not_observed() block: record it."""
+    token = _observing.set(True)
+    try:
+        yield
+    finally:
+        _observing.reset(token)
+
+
 def install(dna=None, source: str = SOURCE_SERVER_OUT) -> None:
     """Start recording outbound calls. Safe to call more than once.
 
@@ -90,17 +124,19 @@ def install(dna=None, source: str = SOURCE_SERVER_OUT) -> None:
 def _patch_httpx(client_class, dna, source, is_async):
     """Append our hook to every client this class builds.
 
-    It has to be a "request" event hook. httpx applies `auth` inside send(), so
-    a hook on send() sees the request before the credential is on it - every
-    OAuth call would record no login at all.
+    A "response" event hook, not a "request" one. Both see the credential -
+    httpx applies `auth` inside send(), so only a hook on send() itself would
+    miss it - but the response is what carries the destination's answer, and
+    that answer is the difference between "a credential was presented" and
+    "a credential was refused".
     """
     original_init = client_class.__init__
 
     def patched_init(self, *args, **kwargs):
         hooks = dict(kwargs.pop("event_hooks", None) or {})
-        listeners = list(hooks.get("request", []))
+        listeners = list(hooks.get("response", []))
         listeners.append(_make_hook(dna, source, is_async))
-        hooks["request"] = listeners
+        hooks["response"] = listeners
         kwargs["event_hooks"] = hooks
         original_init(self, *args, **kwargs)
 
@@ -108,14 +144,24 @@ def _patch_httpx(client_class, dna, source, is_async):
 
 
 def _make_hook(dna, source, is_async):
-    def record(request):
-        _record(dna, source, request.headers, request.url.host, _httpx_body(request))
+    def observed(response):
+        """`response.request` is the request as it was actually sent."""
+        request = response.request
+        return (
+            request.headers,
+            request.url.host,
+            _httpx_body(request),
+            response.status_code,
+        )
+
+    def record(response):
+        _record(dna, source, *observed(response))
 
     if not is_async:
         return record
 
-    async def record_async(request):
-        _record(dna, source, request.headers, request.url.host, _httpx_body(request))
+    async def record_async(response):
+        _record(dna, source, *observed(response))
 
     return record_async
 
@@ -150,28 +196,38 @@ def _patch_requests(dna, source):
     original_send = HTTPAdapter.send
 
     def patched_send(self, request, *args, **kwargs):
-        _record(
-            dna,
-            source,
-            request.headers,
-            urlparse(request.url).hostname or "",
-            request.body,
-        )
-        return original_send(self, request, *args, **kwargs)
+        status = None
+        try:
+            response = original_send(self, request, *args, **kwargs)
+            status = response.status_code
+            return response
+        finally:
+            # In `finally`, so a call that never reached the destination is
+            # still recorded - with no verdict, because none was given.
+            _record(
+                dna,
+                source,
+                request.headers,
+                urlparse(request.url).hostname or "",
+                request.body,
+                status,
+            )
 
     HTTPAdapter.send = patched_send
 
 
-def _record(dna, source, headers, host, body=None) -> None:
+def _record(dna, source, headers, host, body=None, status=None) -> None:
     """One outbound call. Never raises: evidence must not break a request."""
+    if sink.is_sender_thread():
+        return  # AgentDNA posting evidence - recording it would post again
+    if not _observing.get():
+        return  # AgentDNA's own checks and signing, not a hop
+
     dna = dna if dna is not None else _current_dna() or _remembered_dna
     if dna is None:
         return  # installed without one, and no run in context to borrow from
 
     try:
-        if host in _own_services(dna):
-            return
-
         # The call's own workflow, when it carried one. Read off the wire, so
         # it works on threads where the context is invisible.
         wire = _envelope_from_body(body)
@@ -199,32 +255,30 @@ def _record(dna, source, headers, host, body=None) -> None:
                 request_id=request_id,
                 source=source,
                 destination=str(host),
-                auth_status=STATUS_UNKNOWN,
+                auth_status=_auth_status(status),
                 observed_at=time.time(),
             ),
-            dna.api_key,
+            dna,
         )
     except Exception as exc:
         dna.logger.warning("agentdna.authevidence.outbound_failed", error=str(exc))
 
 
-def _own_services(dna) -> set:
-    """The hosts AgentDNA talks to on its own behalf.
+def _auth_status(status_code) -> str:
+    """What the destination's answer says about the credential.
 
-    Three of them, and the third is the important one: evidence is posted with
-    `requests`, `requests` is patched, so recording a call to the evidence
-    endpoint records a call to the evidence endpoint. It does not stop.
-
-    The other two are the admin server and the provenance layer. Recording
-    those fills a run with rows about AgentDNA's own bookkeeping - a whitelist
-    check is not a hop the agent made.
+    Only a refusal is a verdict on the credential itself. A 5xx is the
+    destination failing, a 404 is the wrong path, a redirect is neither -
+    none of them judged the credential, and calling them "accepted" would
+    claim more than was observed.
     """
-    urls = (
-        getattr(dna, "agentdna_admin_url", "") or "",
-        getattr(getattr(dna, "provenance", None), "provenance_url", "") or "",
-        os.environ.get(sink.ENV_URL, ""),
-    )
-    return {host for host in (urlparse(url).hostname for url in urls if url) if host}
+    if status_code is None:
+        return STATUS_UNKNOWN
+    if status_code in (401, 403):
+        return STATUS_REJECTED
+    if 200 <= status_code < 300:
+        return STATUS_ACCEPTED
+    return STATUS_UNKNOWN
 
 
 def _envelope_from_body(body) -> dict | None:
