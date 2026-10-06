@@ -1,12 +1,25 @@
 from __future__ import annotations
 
+import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 load_dotenv()
+
+
+def _json_env(name: str) -> dict:
+    """Read a JSON object from the environment. Empty or unreadable means none."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return value if isinstance(value, dict) else {}
 
 
 @dataclass(frozen=True)
@@ -35,6 +48,13 @@ class Settings:
     sqlite_mcp_url: str = os.getenv("SQLITE_MCP_URL", "http://127.0.0.1:8544/mcp")
     mcp_timeout_seconds: int = 3000
     mcp_server_name: str = os.getenv("MCP_SERVER_NAME", "sqlite-analytics-mcp")
+
+    # Headers the agent sends to the MCP server. Nothing here needs them to
+    # reach SQLite - they exist so a run can carry a credential, which is what
+    # AgentDNA's authentication evidence observes.
+    #
+    #   SQLITE_MCP_HEADERS='{"Authorization": "Bearer <token>"}'
+    sqlite_mcp_headers: dict = field(default_factory=lambda: _json_env("SQLITE_MCP_HEADERS"))
 
     mcp_host: str = os.getenv("MCP_HOST", "127.0.0.1")
     mcp_port: int = int(os.getenv("MCP_PORT", "8544"))

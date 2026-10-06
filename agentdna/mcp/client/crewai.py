@@ -7,6 +7,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
+from agentdna.auth import httpobserver
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import get_context
 from agentdna.mcp.metadata import (
@@ -59,6 +60,10 @@ def install_mcp_client() -> None:
                 "CrewAI MCP support is not available. "
                 "Install it with `pip install 'crewai-tools[mcp]'`."
             ) from exc
+
+        # Record the credential on the calls this client makes. No-op unless
+        # evidence collection is switched on.
+        httpobserver.install(source=httpobserver.SOURCE_CLIENT_OUT)
 
         original_tools = mcpadapt.core.MCPAdapt.tools
         original_adapt = CrewAIToolAdapter.adapt
@@ -131,6 +136,10 @@ def install_mcp_client() -> None:
                         ),
                         self.loop,
                     ).result()
+
+                # Hand the instance to the outbound hook. This runs on a
+                # thread that can see the context; the hook does not.
+                httpobserver.remember_dna(context.dna)
 
                 async def _agentdna_call() -> Any:
                     call_handle = await context.begin_mcp_call()
