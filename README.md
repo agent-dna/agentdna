@@ -540,11 +540,11 @@ Currently supported MCP server integrations:
 - [FastMCP](https://github.com/PrefectHQ/fastmcp) - `from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware`
 - [MCP v2 Python SDK](https://github.com/modelcontextprotocol/python-sdks) - Refer [here](./examples/rss_research_agent/mcp_server_mcp2.py) for a complete usage example
 
-## Authentication evidence (off by default)
+## Authentication evidence 
 
-AgentDNA can record **how each request authenticated**, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.
+AgentDNA can record how each request authenticated, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.
 
-Authentication evidence is **disabled by default**. When it is off, AgentDNA does not read or record authentication headers.
+Authentication evidence is disabled by default. When it is off, AgentDNA does not read or record authentication headers.
 
 ### Enable authentication evidence
 
@@ -556,7 +556,7 @@ AGENTDNA_AUTH_EVIDENCE=true
 
 ### Credential handling
 
-AgentDNA **never stores raw credentials**. When authentication evidence is enabled, detected credentials are converted into fingerprints.
+AgentDNA never stores raw credentials. When authentication evidence is enabled, detected credentials are converted into fingerprints.
 
 ### What is covered
 
@@ -569,11 +569,11 @@ AgentDNA currently observes:
   - `Api-Key`
 - Authentication used by MCP servers when making HTTP calls to their own backends
 
-AgentDNA's own outbound calls are **not recorded**.
+AgentDNA's own outbound calls are not recorded.
 
 ### What is not covered
 
-Authentication evidence does **not** currently cover:
+Authentication evidence does not currently cover:
 
 - `aiohttp`
 - Database connections
