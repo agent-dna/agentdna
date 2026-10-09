@@ -24,6 +24,7 @@ class Settings:
     github_api_url: str = os.getenv("GITHUB_API_URL", "https://api.github.com")
     github_repository_owner: str = os.getenv("GITHUB_REPOSITORY_OWNER", "")
     github_repository_name: str = os.getenv("GITHUB_REPOSITORY_NAME", "")
+    github_mcp_url: str = os.getenv("GITHUB_MCP_URL", "http://127.0.0.1:8011/mcp")
     mcp_host: str = os.getenv("MCP_HOST", "127.0.0.1")
     mcp_port: int = int(os.getenv("MCP_PORT", "8011"))
     mcp_timeout_seconds: float = float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "30"))
@@ -33,19 +34,11 @@ class Settings:
     )
 
     # AgentDNA related env variables
-    #
-    # AGENTDNA_API_KEY, AGENTDNA_PROVENANCE_LAYER_URL and AGENTDNA_AGENT_NAME are
-    # also read by the AgentDNA MCP Gateway, so the gateway signs tool calls with
-    # the same agent identity this application uses.
     agentdna_api_key: str = os.getenv("AGENTDNA_API_KEY", "")
-    provenance_layer_url: str = os.getenv("AGENTDNA_PROVENANCE_LAYER_URL") or "https://chain-connector-2.rubix.net"
+    provenance_layer_url: str = os.getenv("PROVENANCE_LAYER_URL", "https://chain-connector-2.rubix.net")
     user_name: str = os.getenv("USER_NAME", "")
-    github_agent_name: str = os.getenv("AGENTDNA_AGENT_NAME", "")
+    github_agent_name: str = os.getenv("GITHUB_AGENT_NAME", "")
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "https://agentdna-admin.agentdna.io")
-
-    # AgentDNA MCP Gateway. The agent reaches the GitHub MCP server only through it.
-    agentdna_gateway_url: str = os.getenv("AGENTDNA_GATEWAY_URL", "http://127.0.0.1:8090")
-    agentdna_gateway_token: str = os.getenv("AGENTDNA_GATEWAY_TOKEN", "")
 
     @property
     def repository(self) -> str:
