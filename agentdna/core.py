@@ -6,7 +6,7 @@ import time
 from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urljoin
 
 import requests
@@ -50,6 +50,9 @@ from .verifier import (
     verify_heavy,
     verify_light,
 )
+
+if TYPE_CHECKING:
+    from .mcp.gateway import MCPGateway
 
 
 class AgentDNA:
@@ -674,6 +677,30 @@ class AgentDNA:
 
         self.logger.info("agentdna.verify.success", verification_mode=mode)
         return RESULT_OK
+
+    def mcp_gateway(
+        self,
+        servers: dict[str, str] | None = None,
+        *,
+        url: str = "",
+        token: str = "",
+    ) -> "MCPGateway":
+        """
+        Returns an MCP gateway that signs this actor's MCP tool calls.
+
+        `servers` maps a name to each MCP server's Streamable HTTP URL; the
+        gateway then runs inside this process, starting on first use. Pass
+        `url` (and `token`) instead to use a standalone `agentdna-gateway`.
+
+            MCP = AGENT.mcp_gateway({"github": "http://127.0.0.1:8011/mcp"})
+
+            async with MCP.session(incoming_workflow) as session:
+                ...  # point any MCP client at session.url("github")
+            reply = session.reply(output)
+        """
+        from .mcp.gateway import MCPGateway
+
+        return MCPGateway(self, servers, url=url, token=token)
 
     def __append_to_intent_workflow_card_with_retry(
         self,

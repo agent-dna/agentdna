@@ -35,7 +35,7 @@ class Settings:
 
     # AgentDNA related env variables
     agentdna_api_key: str = os.getenv("AGENTDNA_API_KEY", "")
-    provenance_layer_url: str = os.getenv("PROVENANCE_LAYER_URL", "https://chain-connector-2.rubix.net")
+    provenance_layer_url: str = os.getenv("PROVENANCE_LAYER_URL") or "https://chain-connector-2.rubix.net"
     user_name: str = os.getenv("USER_NAME", "")
     github_agent_name: str = os.getenv("GITHUB_AGENT_NAME", "")
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "https://agentdna-admin.agentdna.io")

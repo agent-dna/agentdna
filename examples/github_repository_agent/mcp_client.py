@@ -8,7 +8,7 @@ from config import settings
 
 
 def build_client(mcp_url: str) -> MultiServerMCPClient:
-    """A plain MCP client: AgentDNA propagation is done by the gateway at `mcp_url`."""
+    """A plain MCP client. `mcp_url` is an AgentDNA gateway session URL, which signs its tool calls."""
     return MultiServerMCPClient(
         {
             "github": StreamableHttpConnection(
@@ -22,5 +22,5 @@ def build_client(mcp_url: str) -> MultiServerMCPClient:
 
 
 async def load_tools(mcp_url: str) -> list[BaseTool]:
-    """Discover the server-owned GitHub capabilities through the gateway run at `mcp_url`."""
+    """Discover the server-owned GitHub capabilities through MCP."""
     return await build_client(mcp_url).get_tools()

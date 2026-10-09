@@ -1,6 +1,8 @@
-"""Gateway configuration, read from the environment.
+"""Gateway configuration.
 
-Everything is validated at startup so a misconfigured gateway refuses to start
+In-process gateways (`AgentDNA.mcp_gateway(servers)`) are configured in code.
+A standalone gateway (`agentdna-gateway`) reads the environment. Either way
+everything is validated at startup so a misconfigured gateway refuses to start
 instead of failing on the first tool call.
 
 The agent identity:
@@ -16,7 +18,8 @@ The agent identity:
 
 The gateway itself:
 
-    AGENTDNA_GATEWAY_UPSTREAM_URL      Required. Streamable HTTP URL of the MCP server.
+    AGENTDNA_GATEWAY_UPSTREAMS         Required. The MCP servers to front, by name:
+                                       "github=http://127.0.0.1:8011/mcp,jira=https://..."
     AGENTDNA_GATEWAY_HOST              Bind address. Default 127.0.0.1.
     AGENTDNA_GATEWAY_PORT              Bind port. Default 8090.
     AGENTDNA_GATEWAY_TOKEN             When set, required as a bearer token on the
@@ -29,8 +32,9 @@ The gateway itself:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -41,12 +45,16 @@ ENV_ADMIN_SERVER_URL = "AGENTDNA_ADMIN_SERVER_URL"
 ENV_CONFIG_DIR = "AGENTDNA_CONFIG_DIR"
 ENV_AGENT_POLICY_FILE = "AGENTDNA_AGENT_POLICY_FILE"
 
-ENV_UPSTREAM_URL = "AGENTDNA_GATEWAY_UPSTREAM_URL"
+ENV_UPSTREAMS = "AGENTDNA_GATEWAY_UPSTREAMS"
 ENV_HOST = "AGENTDNA_GATEWAY_HOST"
 ENV_PORT = "AGENTDNA_GATEWAY_PORT"
 ENV_TOKEN = "AGENTDNA_GATEWAY_TOKEN"
 ENV_RUN_TTL_SECONDS = "AGENTDNA_GATEWAY_RUN_TTL_SECONDS"
 ENV_UPSTREAM_TIMEOUT_SECONDS = "AGENTDNA_GATEWAY_UPSTREAM_TIMEOUT_SECONDS"
+
+
+# Server names appear in run URLs: /runs/{run_id}/mcp/{name}
+_SERVER_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class ConfigError(ValueError):
@@ -89,7 +97,8 @@ class AgentIdentityConfig:
 
 @dataclass(frozen=True)
 class GatewayConfig:
-    upstream_url: str
+    # MCP server name -> its Streamable HTTP URL.
+    upstreams: Mapping[str, str] = field(default_factory=dict)
     host: str = "127.0.0.1"
     port: int = 8090
     token: str = ""
@@ -97,12 +106,19 @@ class GatewayConfig:
     upstream_timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
-        parsed = urlparse(self.upstream_url)
-        if parsed.scheme not in ("http", "https") or not parsed.netloc:
-            raise ConfigError(
-                f"{ENV_UPSTREAM_URL} must be an http(s) URL, got {self.upstream_url!r}"
-            )
-        if not 0 < self.port < 65536:
+        if not self.upstreams:
+            raise ConfigError("at least one MCP server is required")
+        for name, url in self.upstreams.items():
+            if not _SERVER_NAME.match(name):
+                raise ConfigError(
+                    f"MCP server name {name!r} may only contain letters, digits, '-' and '_'"
+                )
+            parsed = urlparse(url)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                raise ConfigError(f"MCP server {name!r} must have an http(s) URL, got {url!r}")
+        # A private copy: the config must not change under a running gateway.
+        object.__setattr__(self, "upstreams", dict(self.upstreams))
+        if not 0 <= self.port < 65536:
             raise ConfigError(f"{ENV_PORT} must be a valid TCP port, got {self.port}")
         if self.run_ttl_seconds <= 0:
             raise ConfigError(f"{ENV_RUN_TTL_SECONDS} must be positive")
@@ -113,12 +129,8 @@ class GatewayConfig:
     def from_env(cls, env: Mapping[str, str] | None = None) -> GatewayConfig:
         env = os.environ if env is None else env
 
-        upstream_url = env.get(ENV_UPSTREAM_URL, "").strip()
-        if not upstream_url:
-            raise ConfigError(f"{ENV_UPSTREAM_URL} is required")
-
         return cls(
-            upstream_url=upstream_url,
+            upstreams=parse_upstreams(env.get(ENV_UPSTREAMS, "")),
             host=env.get(ENV_HOST, "").strip() or "127.0.0.1",
             port=_number(env, ENV_PORT, 8090, int),
             token=env.get(ENV_TOKEN, "").strip(),
@@ -135,3 +147,21 @@ def _number(env: Mapping[str, str], name: str, default, kind):
         return kind(raw)
     except ValueError:
         raise ConfigError(f"{name} must be a number, got {raw!r}")
+
+
+def parse_upstreams(raw: str) -> dict[str, str]:
+    """`name=url,name=url` -> {name: url}."""
+
+    if not raw.strip():
+        raise ConfigError(f"{ENV_UPSTREAMS} is required, e.g. 'github=http://127.0.0.1:8011/mcp'")
+
+    upstreams: dict[str, str] = {}
+    for entry in raw.split(","):
+        name, sep, url = entry.partition("=")
+        name, url = name.strip(), url.strip()
+        if not sep or not name or not url:
+            raise ConfigError(f"{ENV_UPSTREAMS} entries must look like name=url, got {entry!r}")
+        if name in upstreams:
+            raise ConfigError(f"{ENV_UPSTREAMS} names MCP server {name!r} twice")
+        upstreams[name] = url
+    return upstreams

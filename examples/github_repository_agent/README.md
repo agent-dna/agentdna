@@ -7,7 +7,19 @@ An independent LangGraph ReAct workload that analyses one configured GitHub repo
 `scripts/run.*` starts the FastMCP streamable-HTTP server, then starts `github-repository-agent`. The named agent discovers the server's tools using `langchain_mcp_adapters` and executes a LangGraph ReAct loop. Repository text is explicitly treated as untrusted data.
 
 ```text
-github-repository-agent -> langchain_mcp_adapters -> FastMCP -> GitHub REST API
+github-repository-agent -> langchain_mcp_adapters -> AgentDNA MCP gateway -> FastMCP -> GitHub REST API
+```
+
+AgentDNA signs the agent's MCP tool calls through an MCP gateway that runs inside the agent's process. The MCP client carries no AgentDNA patch: it is pointed at the gateway session's URL instead of the MCP server's.
+
+```py
+MCP_GATEWAY = GITHUB_AGENT.mcp_gateway({"github": settings.github_mcp_url})
+
+async with MCP_GATEWAY.session(adna_workflow) as session:   # verifies the incoming workflow
+    tools = await load_tools(session.url("github"))
+    result = await workflow.ainvoke(...)
+
+reply_workflow = session.reply(str(final_message.content))  # signed on top of every tool call
 ```
 
 ## Prerequisites
@@ -44,7 +56,7 @@ Set `GITHUB_ANALYSIS_TASK` to one of the following before an execution:
 
 ### Manual
 
-From the `examples` parent directory, start the MCP server and provide a task directly to the Python CLI:
+From this project directory, start the MCP server and provide a task directly to the Python CLI:
 
 ```sh
 python3 mcp_server.py
@@ -72,7 +84,7 @@ python3 automated.py
 
 ## Security And Observability
 
-The GitHub token remains in the MCP server process and never enters an LLM prompt or tool argument. The agent's skills and restrictions are in [agents/github_repository_agent/SKILLS.md](agents/github_repository_agent/SKILLS.md). Each run emits a JSON event with a stable agent identity and a new execution ID.
+The GitHub token remains in the MCP server process and never enters an LLM prompt or tool argument. Every tool call is signed as the agent and verified by the MCP server's AgentDNA middleware; a tool result is only handed to the agent once the server's signed response has been verified. The agent's skills and restrictions are in [agents/github_repository_agent/SKILLS.md](agents/github_repository_agent/SKILLS.md). Each run emits a JSON event with a stable agent identity and a new execution ID.
 
 ## Tests
 

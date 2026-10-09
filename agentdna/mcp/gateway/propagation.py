@@ -3,7 +3,7 @@
 Transport-neutral: works on parsed JSON-RPC messages, so the HTTP layer only
 has to find the messages and hand them over.
 
-The semantics are those of the in-process client adapters
+The semantics are those of the client adapters
 (`agentdna.mcp.client.langchain`), so a call is recorded the same way whether
 it went through an adapter or through the gateway:
 

@@ -8,7 +8,7 @@ Run endpoints, for the agent application:
 
 MCP endpoint, for the agent's MCP client:
 
-    /runs/{run_id}/mcp        Streamable HTTP, forwarded to the upstream server
+    /runs/{run_id}/mcp/{server}   Streamable HTTP, forwarded to the named MCP server
 
 The MCP endpoint is a pass-through that understands just enough of the
 protocol to find tools/call requests and their responses, in either a JSON or
@@ -126,6 +126,7 @@ def create_app(
             {
                 "run_id": run.run_id,
                 "mcp_path": f"/runs/{run.run_id}/mcp",
+                "servers": sorted(config.upstreams),
                 "ttl_seconds": config.run_ttl_seconds,
             },
             status_code=201,
@@ -168,6 +169,10 @@ def create_app(
         if run is None:
             return _problem(404, "unknown or expired run")
 
+        upstream_url = config.upstreams.get(request.path_params["server"])
+        if upstream_url is None:
+            return _problem(404, f"unknown MCP server {request.path_params['server']!r}")
+
         body = await request.body()
         pending: PendingCall | None = None
 
@@ -203,7 +208,7 @@ def create_app(
         client: httpx.AsyncClient = request.app.state.upstream
         upstream_request = client.build_request(
             request.method,
-            _upstream_url(config, request),
+            _upstream_url(upstream_url, request),
             headers=_forward_headers(request),
             content=body if body else None,
             timeout=_timeout(config, request.method),
@@ -233,8 +238,8 @@ def create_app(
         Route("/runs", open_run, methods=["POST"]),
         Route("/runs/{run_id}", run_status, methods=["GET"]),
         Route("/runs/{run_id}", close_run, methods=["DELETE"]),
-        Route("/runs/{run_id}/mcp", mcp, methods=["GET", "POST", "DELETE"]),
-        Route("/runs/{run_id}/mcp/", mcp, methods=["GET", "POST", "DELETE"]),
+        Route("/runs/{run_id}/mcp/{server}", mcp, methods=["GET", "POST", "DELETE"]),
+        Route("/runs/{run_id}/mcp/{server}/", mcp, methods=["GET", "POST", "DELETE"]),
     ]
 
     app = Starlette(routes=routes, lifespan=lifespan)
@@ -372,9 +377,9 @@ def _response_headers(response: httpx.Response) -> dict[str, str]:
     }
 
 
-def _upstream_url(config: GatewayConfig, request: Request) -> str:
+def _upstream_url(base: str, request: Request) -> str:
     query = request.url.query
-    return f"{config.upstream_url}?{query}" if query else config.upstream_url
+    return f"{base}?{query}" if query else base
 
 
 def _timeout(config: GatewayConfig, method: str) -> httpx.Timeout:
