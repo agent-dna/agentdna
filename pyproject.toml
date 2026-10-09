@@ -30,6 +30,15 @@ dependencies = [
   "colorama"
 ]
 
+[project.optional-dependencies]
+# AgentDNA MCP Gateway server. The client side (GatewayClient) needs only httpx.
+gateway = [
+  "starlette>=0.37",
+  "uvicorn>=0.30",
+]
+
+[project.scripts]
+agentdna-gateway = "agentdna.mcp.gateway.__main__:main"
 
 [project.urls]
 Homepage = "https://agentdna.io"

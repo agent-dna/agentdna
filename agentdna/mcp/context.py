@@ -36,6 +36,10 @@ class MCPExecutionBatch:
         IntentWorkflow,
     ] = field(default_factory=dict)
 
+    # Calls that ended without a successor workflow. They still count
+    # towards completing the batch, but contribute nothing to its frontier.
+    cancelled_calls: set[int] = field(default_factory=set)
+
     def allocate_call(
         self,
     ) -> int:
@@ -62,6 +66,9 @@ class MCPExecutionBatch:
         if sequence in self.completed_workflows:
             raise RuntimeError(f"MCP call sequence {sequence} already has a recorded workflow")
 
+        if sequence in self.cancelled_calls:
+            raise RuntimeError(f"MCP call sequence {sequence} was already cancelled")
+
         self.completed_workflows[sequence] = workflow
 
         self.active_calls -= 1
@@ -69,18 +76,42 @@ class MCPExecutionBatch:
         if self.active_calls < 0:
             raise RuntimeError("MCP execution batch active-call count became negative")
 
+    def record_cancellation(
+        self,
+        sequence: int,
+    ) -> bool:
+        """
+        Record that one MCP call ended without a successor workflow.
+
+        Returns False when the call was already resolved, so a late or
+        repeated cancellation never disturbs the batch.
+        """
+
+        if sequence in self.completed_workflows or sequence in self.cancelled_calls:
+            return False
+
+        self.cancelled_calls.add(sequence)
+
+        self.active_calls -= 1
+
+        if self.active_calls < 0:
+            raise RuntimeError("MCP execution batch active-call count became negative")
+
+        return True
+
     @property
     def complete(
         self,
     ) -> bool:
         """
-        True when every call belonging to this batch has completed.
+        True when every call belonging to this batch has either
+        completed or been cancelled.
         """
 
         return (
             self.active_calls == 0
             and self.next_sequence > 0
-            and len(self.completed_workflows) == self.next_sequence
+            and len(self.completed_workflows) + len(self.cancelled_calls) == self.next_sequence
         )
 
     def terminal_frontier(
@@ -89,7 +120,9 @@ class MCPExecutionBatch:
         """
         Return terminal workflows in call-start order.
 
-        Completion order is deliberately NOT used.
+        Completion order is deliberately NOT used. Cancelled calls have
+        no successor and are skipped, so the list is empty when every
+        call in the batch was cancelled.
         """
 
         if not self.complete:
@@ -97,7 +130,11 @@ class MCPExecutionBatch:
                 "Cannot obtain terminal frontier before MCP execution batch completes"
             )
 
-        return [self.completed_workflows[sequence] for sequence in range(self.next_sequence)]
+        return [
+            self.completed_workflows[sequence]
+            for sequence in range(self.next_sequence)
+            if sequence in self.completed_workflows
+        ]
 
 
 @dataclass(frozen=True)
@@ -191,23 +228,17 @@ class AgentDNAContext:
                 workflow,
             )
 
-            if not current_batch.complete:
-                return
-
-            new_frontier = current_batch.terminal_frontier()
-
-            self.workflows = list(new_frontier)
-
-            self.active_mcp_batch = None
+            self._close_batch_if_complete()
 
     async def cancel_mcp_call(
         self,
         handle: MCPCallHandle,
     ) -> None:
         """
-        Remove a failed MCP call from its active batch.
+        Resolve a failed MCP call without a successor workflow.
 
-        No fake successor workflow is created.
+        No fake successor workflow is created. Successors already
+        recorded by other calls in the same batch are kept.
         """
 
         async with self.lock:
@@ -219,13 +250,35 @@ class AgentDNAContext:
             if current_batch is not handle.batch:
                 return
 
-            if handle.sequence in (current_batch.completed_workflows):
+            if not current_batch.record_cancellation(handle.sequence):
                 return
 
-            current_batch.active_calls -= 1
+            self._close_batch_if_complete()
 
-            if current_batch.active_calls == 0:
-                self.active_mcp_batch = None
+    def _close_batch_if_complete(
+        self,
+    ) -> None:
+        """
+        Once every call in the active batch is resolved, its successful
+        successors become the new causal frontier.
+
+        If every call was cancelled there is nothing to advance to, and
+        the frontier the batch started from stays in place.
+
+        Must be called with `lock` held.
+        """
+
+        current_batch = self.active_mcp_batch
+
+        if current_batch is None or not current_batch.complete:
+            return
+
+        new_frontier = current_batch.terminal_frontier()
+
+        if new_frontier:
+            self.workflows = list(new_frontier)
+
+        self.active_mcp_batch = None
 
     def get_workflows(
         self,

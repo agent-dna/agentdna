@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -11,6 +10,7 @@ from agentdna.mcp.metadata import (
     workflow_from_metadata,
     workflow_to_metadata,
 )
+from agentdna.mcp.payload import build_mcp_tool_call_payload
 from agentdna.types import RESULT_OK
 
 _PATCH_INSTALLED = False
@@ -274,27 +274,3 @@ def _extract_result_text(
         return None
 
     return " | ".join(messages)
-
-
-def build_mcp_tool_call_payload(
-    name: str,
-    arguments: dict[str, Any] | None,
-) -> str:
-    """
-    Build the canonical AgentDNA representation of one MCP
-    tools/call request.
-
-    JSON-RPC framing is intentionally excluded.
-    """
-
-    return json.dumps(
-        {
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments,
-            },
-        },
-        separators=(",", ":"),
-        sort_keys=True,
-    )

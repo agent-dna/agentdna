@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import threading
 from collections.abc import Callable
 from functools import partial
@@ -14,6 +13,7 @@ from agentdna.mcp.metadata import (
     workflow_from_metadata,
     workflow_to_metadata,
 )
+from agentdna.mcp.payload import build_mcp_tool_call_payload
 
 _PATCH_INSTALLED = False
 _PATCH_LOCK = threading.Lock()
@@ -402,30 +402,3 @@ def _raise_crewai_terminal_failure(
     )
 
     raise ToolExecutionFailedError(record)
-
-
-def build_mcp_tool_call_payload(
-    name: str,
-    arguments: dict[str, Any] | None,
-) -> str:
-    """
-    Build the canonical AgentDNA representation of one MCP
-    tools/call request.
-
-    JSON-RPC transport framing is intentionally excluded.
-    """
-
-    return json.dumps(
-        {
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments,
-            },
-        },
-        separators=(
-            ",",
-            ":",
-        ),
-        sort_keys=True,
-    )

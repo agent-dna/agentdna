@@ -540,6 +540,67 @@ Currently supported MCP server integrations:
 - [FastMCP](https://github.com/PrefectHQ/fastmcp) - `from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware`
 - [MCP v2 Python SDK](https://github.com/modelcontextprotocol/python-sdks) - Refer [here](./examples/rss_research_agent/mcp_server_mcp2.py) for a complete usage example
 
+### MCP Gateway
+
+The client adapters above work by patching a specific MCP client library. The **AgentDNA MCP Gateway** does the same job at the protocol boundary instead, so an agent can use **any** Streamable HTTP MCP client, unmodified.
+
+```text
+Agent app ──── POST /runs (incoming IntentWorkflow) ──────────▶ ┐
+MCP client ─── /runs/{run_id}/mcp ─▶ AgentDNA MCP Gateway ─▶ MCP Server
+Agent app ◀─── DELETE /runs/{run_id} (final IntentWorkflows) ── ┘
+```
+
+For every `tools/call` the gateway signs a request workflow as the agent, attaches it to `_meta`, verifies the successor the server returns and advances the run's causal frontier. Everything else (initialisation, tool listing, notifications, session headers) passes through untouched.
+
+**1. Run the gateway** next to the agent:
+
+```bash
+pip install 'agent-dna[gateway]'
+
+export AGENTDNA_AGENT_NAME="<Agent name, as used by the agent application>"
+export AGENTDNA_API_KEY="<AgentDNA API Key>"
+export AGENTDNA_GATEWAY_UPSTREAM_URL="http://127.0.0.1:8013/mcp"
+
+agentdna-gateway   # listens on 127.0.0.1:8090
+```
+
+| Variable | Description |
+| -------- | ----------- |
+| `AGENTDNA_AGENT_NAME` | Required. The AgentDNA name the gateway signs tool calls as. |
+| `AGENTDNA_GATEWAY_UPSTREAM_URL` | Required. Streamable HTTP URL of the MCP server. |
+| `AGENTDNA_API_KEY`, `AGENTDNA_PROVENANCE_LAYER_URL`, `AGENTDNA_ADMIN_SERVER_URL`, `AGENTDNA_CONFIG_DIR` | Passed to `AgentDNA`. SDK defaults when unset. |
+| `AGENTDNA_AGENT_POLICY_FILE` | When set, the agent is registered at startup. Otherwise registration is left to the agent application. |
+| `AGENTDNA_GATEWAY_HOST`, `AGENTDNA_GATEWAY_PORT` | Bind address. Default `127.0.0.1:8090`. |
+| `AGENTDNA_GATEWAY_TOKEN` | When set, required as a bearer token to open, read and close runs. |
+| `AGENTDNA_GATEWAY_RUN_TTL_SECONDS` | Idle runs are dropped after this. Default `3600`. |
+| `AGENTDNA_GATEWAY_UPSTREAM_TIMEOUT_SECONDS` | Read timeout for one upstream request. Default `300`. |
+
+**2. Hand the workflow over from the agent application.** The gateway is a separate process, so the agent opens a *run* with the workflow it received, points its MCP client at the run's URL, and closes the run to get back the workflows to build its reply on:
+
+```py
+from agentdna.mcp.gateway import GatewayClient
+
+gateway = GatewayClient("http://127.0.0.1:8090")
+
+async with gateway.run(incoming_workflow) as run:
+    client = MultiServerMCPClient(
+        {"sqlite": {"transport": "streamable_http", "url": run.mcp_url}}
+    )
+    result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
+    workflows = await run.aclose()
+
+reply_workflow = AGENT.build(payload=str(result), previous_workflows=workflows)
+```
+
+`with gateway.run(...)` and `run.close()` work the same way in synchronous code.
+
+Notes:
+
+- Each run's URL contains an unguessable run ID. Anyone who has the URL can make tool calls signed for that run, so treat it as a secret.
+- The gateway signs with the agent's AgentDNA identity. Run it with the same `AGENTDNA_AGENT_NAME` and `AGENTDNA_CONFIG_DIR` as the agent application.
+- Do not also call `install_mcp_client()` on an MCP client that talks to the gateway.
+- A successful tool result is only returned once its successor workflow has been verified, and that successor must continue the request it answers. Otherwise the agent receives a JSON-RPC error (code `-32050`) instead of the result.
+
 ## Authentication evidence 
 
 AgentDNA can record how each request authenticated, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.
