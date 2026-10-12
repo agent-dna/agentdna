@@ -9,6 +9,7 @@ AgentDNA middleware, a real MCP client - is in test_gateway_e2e.py.
 import asyncio
 import json
 import time
+from typing import Any
 
 import httpx
 import pytest
@@ -19,15 +20,17 @@ from starlette.routing import Route
 
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.helpers import _hash_content
+from agentdna.mcp.gateway import MCPGateway, WorkflowRejected
 from agentdna.mcp.gateway.app import create_app
-from agentdna.mcp.gateway.config import (
-    AgentIdentityConfig,
-    ConfigError,
-    GatewayConfig,
-)
+from agentdna.mcp.gateway.config import ConfigError, GatewayConfig
 from agentdna.mcp.gateway.propagation import AGENTDNA_GATEWAY_ERROR
+from agentdna.mcp.gateway.service import (
+    CallsInFlight,
+    RunNotFound,
+    WorkflowFailedVerification,
+)
 from agentdna.mcp.metadata import workflow_from_metadata, workflow_to_metadata
-from agentdna.types import Envelope, IntentWorkflow, load_workflow
+from agentdna.types import Envelope, IntentWorkflow
 
 UPSTREAM_URL = "http://upstream/mcp"
 VERIFICATION_FAILED = 2003
@@ -186,27 +189,23 @@ class Upstream:
 
 
 class Harness:
-    def __init__(self, upstream: Upstream, token: str = "") -> None:
+    def __init__(self, upstream: Upstream) -> None:
         self.user = FakeDNA("user")
         self.agent = FakeDNA("agent")
         self.upstream = upstream
         upstream_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app()))
-        config = GatewayConfig(upstreams={"up": UPSTREAM_URL}, token=token)
-        self.app = create_app(self.agent, config, upstream=upstream_client)  # type: ignore[arg-type]
+        config = GatewayConfig(upstreams={"up": UPSTREAM_URL})
+        self.app = create_app(config, upstream=upstream_client)
+        self.service = self.app.state.service
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=self.app), base_url="http://gateway"
         )
         self.next_id = 0
 
-    async def open_run(self, workflows=None, headers=None) -> str:
+    async def open_run(self, workflows=None) -> str:
         workflows = workflows or [self.user.build(payload="summarise the repo")]
-        response = await self.client.post(
-            "/runs",
-            json={"workflows": [json.loads(w.serialize()) for w in workflows]},
-            headers=headers,
-        )
-        assert response.status_code == 201, response.text
-        return response.json()["run_id"]
+        run = await self.service.open(self.agent, workflows)
+        return run.run_id
 
     async def call(self, run_id: str, tool: str, meta: dict | None = None) -> dict:
         self.next_id += 1
@@ -221,9 +220,10 @@ class Harness:
         return decode(response)
 
     async def frontier(self, run_id: str) -> list[IntentWorkflow]:
-        response = await self.client.get(f"/runs/{run_id}")
-        assert response.status_code == 200, response.text
-        return [load_workflow(w) for w in response.json()["workflows"]]
+        return (await self.service.frontier(run_id)).context.get_workflows()
+
+    async def in_flight(self, run_id: str) -> int:
+        return (await self.service.frontier(run_id)).calls_in_flight
 
 
 def decode(response: httpx.Response) -> dict:
@@ -248,7 +248,7 @@ def run(coro):
 # -- run lifecycle --------------------------------------------------------------
 
 
-def test_open_run_returns_an_mcp_path_and_keeps_the_workflow():
+def test_open_run_keeps_the_workflow():
     async def scenario():
         h = Harness(Upstream())
         incoming = h.user.build(payload="summarise the repo")
@@ -263,52 +263,39 @@ def test_open_run_refuses_a_workflow_that_fails_verification():
     async def scenario():
         h = Harness(Upstream())
         FakeDNA.distrusted = {"did:user"}
-        workflow = h.user.build(payload="intent")
-        response = await h.client.post(
-            "/runs", json={"workflows": [json.loads(workflow.serialize())]}
-        )
-        assert response.status_code == 422
-        assert response.json()["status_code"] == VERIFICATION_FAILED
+        with pytest.raises(WorkflowFailedVerification) as raised:
+            await h.open_run([h.user.build(payload="intent")])
+        assert raised.value.details == {"status_code": VERIFICATION_FAILED}
 
     run(scenario())
 
 
-@pytest.mark.parametrize(
-    "body",
-    [{}, {"workflows": []}, {"workflows": ["not json"]}, {"workflows": [{"id": "x"}]}, []],
-)
-def test_open_run_rejects_malformed_requests(body):
+def test_there_are_no_run_endpoints():
+    """Runs are opened in memory only: nothing can open one over HTTP and have
+    tool calls signed as an agent."""
+
     async def scenario():
         h = Harness(Upstream())
-        response = await h.client.post("/runs", json=body)
-        assert response.status_code == 400
-
-    run(scenario())
-
-
-def test_run_endpoints_require_the_token_when_configured():
-    async def scenario():
-        h = Harness(Upstream(), token="s3cret")
         workflow = h.user.build(payload="intent")
         body = {"workflows": [json.loads(workflow.serialize())]}
+        assert (await h.client.post("/runs", json=body)).status_code == 404
 
-        assert (await h.client.post("/runs", json=body)).status_code == 401
-        wrong = {"authorization": "Bearer nope"}
-        assert (await h.client.post("/runs", json=body, headers=wrong)).status_code == 401
-
-        run_id = await h.open_run([workflow], headers={"authorization": "Bearer s3cret"})
-        assert (await h.client.get(f"/runs/{run_id}")).status_code == 401
-        assert (await h.client.delete(f"/runs/{run_id}")).status_code == 401
+        run_id = await h.open_run([workflow])
+        assert (await h.client.get(f"/runs/{run_id}")).status_code == 404
+        assert (await h.client.delete(f"/runs/{run_id}")).status_code == 404
+        assert "result" in await h.call(run_id, "echo")
 
     run(scenario())
 
 
-def test_unknown_run_is_404_on_every_endpoint():
+def test_unknown_run_is_refused_everywhere():
     async def scenario():
         h = Harness(Upstream())
-        assert (await h.client.get("/runs/nope")).status_code == 404
-        assert (await h.client.delete("/runs/nope")).status_code == 404
         assert (await h.client.post("/runs/nope/mcp/up", json={})).status_code == 404
+        with pytest.raises(RunNotFound):
+            await h.service.frontier("nope")
+        with pytest.raises(RunNotFound):
+            await h.service.close("nope")
         assert h.upstream.seen == []
 
     run(scenario())
@@ -320,10 +307,10 @@ def test_closing_returns_the_final_frontier_and_forgets_the_run():
         run_id = await h.open_run()
         await h.call(run_id, "echo")
 
-        response = await h.client.delete(f"/runs/{run_id}")
-        assert response.status_code == 200
-        assert payloads([load_workflow(w) for w in response.json()["workflows"]]) == ["echo done"]
-        assert (await h.client.get(f"/runs/{run_id}")).status_code == 404
+        assert payloads(await h.service.close(run_id)) == ["echo done"]
+        with pytest.raises(RunNotFound):
+            await h.service.frontier(run_id)
+        assert (await h.client.post(f"/runs/{run_id}/mcp/up", json={})).status_code == 404
 
     run(scenario())
 
@@ -337,13 +324,23 @@ def test_closing_with_a_call_in_flight_is_refused_unless_forced():
         while h.upstream.waiting == 0:
             await asyncio.sleep(0.01)
 
-        response = await h.client.delete(f"/runs/{run_id}")
-        assert response.status_code == 409
-        assert (await h.client.get(f"/runs/{run_id}")).json()["calls_in_flight"] == 1
+        with pytest.raises(CallsInFlight):
+            await h.service.close(run_id)
+        assert await h.in_flight(run_id) == 1
 
         h.upstream.release.set()
         await call
-        assert (await h.client.delete(f"/runs/{run_id}")).status_code == 200
+        assert payloads(await h.service.close(run_id)) == ["wait done"]
+
+        # Forced, a close does not wait.
+        run_id = await h.open_run()
+        h.upstream.release.clear()
+        call = asyncio.create_task(h.call(run_id, "wait"))
+        while h.upstream.waiting < 2:
+            await asyncio.sleep(0.01)
+        assert payloads(await h.service.close(run_id, force=True)) == ["summarise the repo"]
+        h.upstream.release.set()
+        await call
 
     run(scenario())
 
@@ -354,7 +351,8 @@ def test_idle_runs_expire():
         h.app.state.runs.ttl_seconds = 0.05
         run_id = await h.open_run()
         await asyncio.sleep(0.1)
-        assert (await h.client.get(f"/runs/{run_id}")).status_code == 404
+        with pytest.raises(RunNotFound):
+            await h.service.frontier(run_id)
 
     run(scenario())
 
@@ -592,7 +590,7 @@ def test_upstream_http_error_passes_through_and_leaves_the_frontier():
             },
         )
         assert response.status_code == 500
-        assert (await h.client.get(f"/runs/{run_id}")).json()["calls_in_flight"] == 0
+        assert await h.in_flight(run_id) == 0
 
     run(scenario())
 
@@ -614,8 +612,7 @@ def test_unreachable_upstream_is_a_jsonrpc_error_and_leaves_the_frontier():
         assert response.status_code == 502
         assert response.json()["id"] == 9
         assert response.json()["error"]["code"] == AGENTDNA_GATEWAY_ERROR
-        status = (await h.client.get(f"/runs/{run_id}")).json()
-        assert status["calls_in_flight"] == 0
+        assert await h.in_flight(run_id) == 0
         assert payloads(await h.frontier(run_id)) == ["summarise the repo"]
 
     run(scenario())
@@ -686,59 +683,35 @@ def test_runs_are_isolated():
 # -- configuration -------------------------------------------------------------------
 
 
-def test_config_requires_the_agent_name_and_upstream():
-    with pytest.raises(ConfigError, match="AGENTDNA_AGENT_NAME"):
-        AgentIdentityConfig.from_env({})
-    with pytest.raises(ConfigError, match="AGENTDNA_GATEWAY_UPSTREAMS"):
-        GatewayConfig.from_env({})
+@pytest.mark.parametrize(
+    "servers",
+    [
+        {},
+        {"x": "ftp://x/mcp"},
+        {"x": "not a url"},
+        {"a/b": "http://x/mcp"},
+        {"a b": "http://x/mcp"},
+    ],
+)
+def test_invalid_servers_are_refused(servers):
+    with pytest.raises(ConfigError):
+        GatewayConfig(upstreams=servers)
+    with pytest.raises(ConfigError):
+        MCPGateway(servers)
 
 
 @pytest.mark.parametrize(
-    "env",
-    [
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "x=ftp://x/mcp"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "http://x/mcp"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "a/b=http://x/mcp"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "x=http://x/mcp,x=http://y/mcp"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "x=http://x/mcp", "AGENTDNA_GATEWAY_PORT": "abc"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "x=http://x/mcp", "AGENTDNA_GATEWAY_PORT": "70000"},
-        {"AGENTDNA_GATEWAY_UPSTREAMS": "x=http://x/mcp", "AGENTDNA_GATEWAY_RUN_TTL_SECONDS": "0"},
-    ],
+    "field, value",
+    [("port", -1), ("port", 65536), ("run_ttl_seconds", 0), ("upstream_timeout_seconds", 0)],
 )
-def test_invalid_gateway_config_is_refused(env):
+def test_invalid_gateway_settings_are_refused(field, value):
     with pytest.raises(ConfigError):
-        GatewayConfig.from_env(env)
+        GatewayConfig(upstreams={"x": "http://x/mcp"}, **{field: value})
 
 
-def test_config_reads_the_environment(tmp_path):
-    policy = tmp_path / "SKILLS.md"
-    policy.write_text("# skills")
-    identity = AgentIdentityConfig.from_env(
-        {
-            "AGENTDNA_AGENT_NAME": " sqlite-agent ",
-            "AGENTDNA_API_KEY": "key",
-            "AGENTDNA_AGENT_POLICY_FILE": str(policy),
-        }
-    )
-    assert identity.name == "sqlite-agent"
-    assert identity.policy_file == policy
-
-    with pytest.raises(ConfigError, match="AGENTDNA_AGENT_POLICY_FILE"):
-        AgentIdentityConfig.from_env(
-            {"AGENTDNA_AGENT_NAME": "a", "AGENTDNA_AGENT_POLICY_FILE": str(tmp_path / "nope")}
-        )
-
-    config = GatewayConfig.from_env(
-        {
-            "AGENTDNA_GATEWAY_UPSTREAMS": "github=http://127.0.0.1:8013/mcp, jira=https://jira/mcp",
-            "AGENTDNA_GATEWAY_PORT": "9000",
-        }
-    )
-    assert (config.host, config.port, config.token) == ("127.0.0.1", 9000, "")
-    assert config.upstreams == {
-        "github": "http://127.0.0.1:8013/mcp",
-        "jira": "https://jira/mcp",
-    }
+def test_config_defaults():
+    config = GatewayConfig(upstreams={"github": "http://127.0.0.1:8013/mcp"})
+    assert (config.host, config.port) == ("127.0.0.1", 0)  # loopback, OS-chosen port
 
 
 # -- several MCP servers ---------------------------------------------------------------
@@ -761,13 +734,13 @@ def test_one_run_spans_several_servers_with_one_frontier():
             async def handle_async_request(self, request):
                 return await self.transports[request.url.host].handle_async_request(request)
 
-        app = create_app(agent, config, upstream=httpx.AsyncClient(transport=Router()))  # type: ignore[arg-type]
+        app = create_app(config, upstream=httpx.AsyncClient(transport=Router()))
         client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://gw")
 
         incoming = FakeDNA("user").build(payload="triage")
-        opened = await client.post("/runs", json={"workflows": [json.loads(incoming.serialize())]})
-        assert opened.json()["servers"] == ["github", "jira"]
-        run_id = opened.json()["run_id"]
+        service = app.state.service
+        assert service.servers == ["github", "jira"]
+        run_id = (await service.open(agent, [incoming])).run_id
 
         def call(server, tool, call_id):
             return client.post(
@@ -786,9 +759,7 @@ def test_one_run_spans_several_servers_with_one_frontier():
         assert [m["params"]["name"] for m in jira.seen] == ["tickets"]
 
         # The jira call was built on the github call's successor.
-        [tip] = [
-            load_workflow(w) for w in (await client.get(f"/runs/{run_id}")).json()["workflows"]
-        ]
+        [tip] = (await service.frontier(run_id)).context.get_workflows()
         assert tip.get_latest_envelope().payload == "tickets done"
         assert "commits done" in [e.payload for e in tip.unwrap()]
 
@@ -798,102 +769,161 @@ def test_one_run_spans_several_servers_with_one_frontier():
     run(scenario())
 
 
-# -- the session API ------------------------------------------------------------------
+# -- the session API, on a real in-process gateway -------------------------------------
+
+
+def _serve(app) -> tuple[str, Any]:
+    import socket
+    import threading
+
+    import uvicorn
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="critical"))
+    threading.Thread(target=server.run, daemon=True).start()
+    deadline = time.monotonic() + 10
+    while not server.started:
+        assert time.monotonic() < deadline, "server did not start"
+        time.sleep(0.01)
+    return f"http://127.0.0.1:{port}", server
 
 
 @pytest.fixture
-def session_gateway(monkeypatch):
-    """An MCPGateway whose HTTP calls reach an in-memory gateway app."""
-
-    from agentdna.mcp.gateway import MCPGateway
-
+def served_upstream():
     upstream = Upstream()
+    url, server = _serve(upstream.app())
+    yield upstream, f"{url}/mcp"
+    server.should_exit = True
+
+
+@pytest.fixture
+def gateway(served_upstream):
+    _, url = served_upstream
+    gateway = MCPGateway({"github": url})
+    yield gateway
+    gateway.close()
+
+
+async def _tool_call(url: str, tool: str = "echo") -> dict:
+    async with httpx.AsyncClient() as client:
+        response = await client.post(
+            url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool}},
+        )
+    return response.json()
+
+
+def test_session_returns_the_final_workflows(gateway):
     agent = FakeDNA("agent")
-    config = GatewayConfig(upstreams={"github": UPSTREAM_URL}, token="t0k")
-    upstream_client = httpx.AsyncClient(transport=httpx.ASGITransport(app=upstream.app()))
-    app = create_app(agent, config, upstream=upstream_client)  # type: ignore[arg-type]
-    transport = httpx.ASGITransport(app=app)
-
-    real_async_client = httpx.AsyncClient
-
-    def async_client(*args, **kwargs):
-        kwargs["transport"] = transport
-        return real_async_client(*args, **kwargs)
-
-    monkeypatch.setattr(httpx, "AsyncClient", async_client)
-
-    gateway = MCPGateway(agent, url="http://gw", token="t0k")  # type: ignore[arg-type]
-    return gateway, agent, real_async_client, transport
-
-
-def test_session_opens_signs_and_replies(session_gateway):
-    gateway, agent, real_async_client, transport = session_gateway
 
     async def scenario():
         incoming = FakeDNA("user").build(payload="summarise")
-        async with gateway.session(incoming) as session:
+        async with gateway.session(agent, incoming) as session:
+            assert session.agent is agent
             assert session.servers == ["github"]
             assert session.url() == session.url("github")
             assert session.url("github").endswith(f"/runs/{session.run_id}/mcp/github")
             with pytest.raises(KeyError):
                 session.url("jira")
+            with pytest.raises(RuntimeError, match="still open"):
+                session.workflows  # noqa: B018 - not final while open
 
-            async with real_async_client(transport=transport) as mcp_client:
-                response = await mcp_client.post(
-                    session.url("github"),
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "tools/call",
-                        "params": {"name": "echo"},
-                    },
-                )
-                assert "result" in response.json()
+            assert "result" in await _tool_call(session.url("github"))
 
         assert session.closed
-        reply = await session.areply("the summary")
-        envelope = reply.get_latest_envelope()
-        assert envelope.from_ == "did:agent"
-        assert envelope.payload == "the summary"
-        assert [p.payload for p in envelope.parent_envelope] == ["echo done"]
-        assert reply.id == incoming.id
+        [final] = session.workflows
+        assert final.get_latest_envelope().payload == "echo done"
+        assert final.id == incoming.id
+        assert incoming.envelope.hash in [e.hash for e in final.unwrap()]
+
+        reply = agent.build(payload="the summary", previous_workflows=session.workflows)
+        assert [p.payload for p in reply.get_latest_envelope().parent_envelope] == ["echo done"]
 
     run(scenario())
 
 
-def test_session_rejects_an_unverified_workflow(session_gateway):
-    from agentdna.mcp.gateway import WorkflowRejected
+def test_one_gateway_signs_as_each_sessions_agent(gateway, served_upstream):
+    """No identity of its own: each session signs as the agent that opened it."""
 
-    gateway, *_ = session_gateway
+    upstream, _ = served_upstream
+    orchestrator, worker = FakeDNA("orchestrator"), FakeDNA("worker")
+
+    async def scenario():
+        async with gateway.session(orchestrator, FakeDNA("user").build(payload="a")) as first:
+            async with gateway.session(worker, FakeDNA("user").build(payload="b")) as second:
+                await _tool_call(first.url())
+                await _tool_call(second.url())
+
+        signers = [
+            workflow_from_metadata(m["params"]["_meta"]).get_latest_envelope().from_
+            for m in upstream.seen
+        ]
+        assert signers == ["did:orchestrator", "did:worker"]
+        assert first.workflows[0].get_latest_envelope().payload == "echo done"
+        assert second.workflows[0].get_latest_envelope().payload == "echo done"
+
+    run(scenario())
+
+
+def test_session_rejects_an_unverified_workflow(gateway):
     FakeDNA.distrusted = {"did:user"}
 
     async def scenario():
         with pytest.raises(WorkflowRejected) as raised:
-            async with gateway.session(FakeDNA("user").build(payload="x")):
+            async with gateway.session(FakeDNA("agent"), FakeDNA("user").build(payload="x")):
                 pass
         assert raised.value.status_code == VERIFICATION_FAILED
 
     run(scenario())
 
 
-def test_session_is_force_closed_when_the_block_raises(session_gateway):
-    gateway, *_ = session_gateway
+def test_session_from_synchronous_code(gateway):
+    incoming = FakeDNA("user").build(payload="x")
+    with gateway.session(FakeDNA("agent"), incoming) as session:
+        assert [w.get_latest_envelope().hash for w in session.frontier()] == [
+            incoming.envelope.hash
+        ]
+        workflows = session.close()
+    assert [w.get_latest_envelope().hash for w in workflows] == [incoming.envelope.hash]
+    assert [w.get_latest_envelope().hash for w in session.workflows] == [incoming.envelope.hash]
 
+
+def test_close_inside_the_block_returns_the_final_workflows(gateway):
+    async def scenario():
+        incoming = FakeDNA("user").build(payload="x")
+        async with gateway.session(FakeDNA("agent"), incoming) as session:
+            workflows = await session.aclose()
+        assert [w.get_latest_envelope().hash for w in workflows] == [incoming.envelope.hash]
+
+    run(scenario())
+
+
+def test_session_is_force_closed_when_the_block_raises(gateway):
     async def scenario():
         with pytest.raises(RuntimeError, match="agent blew up"):
-            async with gateway.session(FakeDNA("user").build(payload="x")) as session:
+            async with gateway.session(
+                FakeDNA("agent"), FakeDNA("user").build(payload="x")
+            ) as session:
                 raise RuntimeError("agent blew up")
         assert session.closed
 
     run(scenario())
 
 
-def test_mcp_gateway_needs_servers_or_url():
-    from agentdna.mcp.gateway import MCPGateway
+def test_gateways_get_their_own_os_chosen_ports():
+    """One port per gateway, however many sessions; never a fixed port that a
+    second agent process would collide with."""
 
-    with pytest.raises(ValueError):
-        MCPGateway(FakeDNA("agent"))  # type: ignore[arg-type]
-    with pytest.raises(ValueError):
-        MCPGateway(FakeDNA("agent"), {"a": "http://a/mcp"}, url="http://gw")  # type: ignore[arg-type]
-    with pytest.raises(ConfigError):
-        MCPGateway(FakeDNA("agent"), {"a b": "http://a/mcp"})  # type: ignore[arg-type]
+    first = MCPGateway({"up": UPSTREAM_URL})
+    second = MCPGateway({"up": UPSTREAM_URL})
+    try:
+        bases = set()
+        for gateway in (first, second, first, second):
+            with gateway.session(FakeDNA("agent"), FakeDNA("user").build(payload="x")) as session:
+                bases.add(session.url().rsplit("/runs/", 1)[0])
+        assert len(bases) == 2  # one per gateway, reused across its sessions
+    finally:
+        first.close()
+        second.close()

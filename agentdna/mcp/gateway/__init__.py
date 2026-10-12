@@ -3,16 +3,14 @@
 Moves IntentWorkflow propagation out of framework-specific MCP client patches
 and onto the MCP protocol boundary, so any MCP client works unmodified:
 
-    MCP = AGENT.mcp_gateway({"github": "http://127.0.0.1:8011/mcp"})
+    MCP_GATEWAY = MCPGateway({"github": "http://127.0.0.1:8011/mcp"})
 
-    async with MCP.session(incoming_workflow) as session:
+    async with MCP_GATEWAY.session(AGENT, incoming_workflow) as session:
         ...  # point any MCP client at session.url("github")
-    reply = session.reply(output)
+    reply = AGENT.build(payload=output, previous_workflows=session.workflows)
 
-By default the gateway runs inside the agent's process. It can also run as a
-standalone service (`agentdna-gateway`), reached with
-`AGENT.mcp_gateway(url=...)`. Either way it needs the `gateway` extra:
-`pip install 'agent-dna[gateway]'`.
+The gateway runs inside the agent's process, on a background thread, and
+starts on first use.
 """
 
 from .client import GatewayError, GatewaySession, MCPGateway, WorkflowRejected

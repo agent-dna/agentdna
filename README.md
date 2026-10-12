@@ -542,65 +542,39 @@ Currently supported MCP server integrations:
 
 ### MCP Gateway
 
-The client adapters above work by patching a specific MCP client library. The **AgentDNA MCP Gateway** does the same job at the protocol boundary instead, so an agent can use **any** Streamable HTTP MCP client, unmodified. It runs inside the agent's process: nothing extra to start or configure.
+The client adapters above work by patching a specific MCP client library. The **AgentDNA MCP Gateway** does the same job at the protocol boundary instead, so an agent can use **any** Streamable HTTP MCP client, unmodified. It comes with `agent-dna` and runs inside the agent's process: nothing extra to install, start or configure.
 
 ```py
 from agentdna import AgentDNA
+from agentdna.mcp.gateway import MCPGateway
 
 AGENT = AgentDNA(name="Assistant", type="agent", ...)
 
-# Name each MCP server the agent uses
-MCP = AGENT.mcp_gateway({"sqlite": "http://127.0.0.1:8013/mcp"})
+# Create once per process: name each MCP server the agent uses
+MCP_GATEWAY = MCPGateway({"sqlite": "http://127.0.0.1:8013/mcp"})
 
-async with MCP.session(incoming_workflow) as session:   # verifies incoming_workflow
+async with MCP_GATEWAY.session(AGENT, incoming_workflow) as session:   # verifies incoming_workflow
     client = MultiServerMCPClient(
         {"sqlite": {"transport": "streamable_http", "url": session.url("sqlite")}}
     )
     result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
 
-reply_workflow = session.reply(str(result))               # signed on top of every tool call
+# The final IntentWorkflow(s): the incoming workflow plus every tool call
+reply_workflow = AGENT.build(payload=str(result), previous_workflows=session.workflows)
 ```
 
-- `session()` verifies the incoming workflow and raises `WorkflowRejected` if it fails.
+- `session(AGENT, ...)` verifies the incoming workflow with `AGENT` and raises `WorkflowRejected` if it fails.
 - Every `tools/call` made through `session.url(...)` is signed as `AGENT`, carried to the server in `_meta`, and the server's signed response is verified before the result reaches the agent. Everything else (initialisation, tool listing, notifications, session headers) passes through untouched.
-- `session.reply(...)` builds the agent's response on everything the tool calls produced; pass it to the next actor or `record()` it.
-- `with MCP.session(...)` works the same way in synchronous code.
-
-Install the extra it needs with `pip install 'agent-dna[gateway]'`.
+- Once the session is closed, `session.workflows` holds the final IntentWorkflow(s). Build the agent's response on them, then pass it to the next actor or `record()` it. Inside the block, `await session.aclose()` (or `session.close()`) returns them.
+- `with MCP_GATEWAY.session(...)` works the same way in synchronous code.
+- The gateway holds no identity of its own: one gateway can serve every agent in a process, each session signing as the agent that opened it.
 
 Notes:
 
+- The gateway listens on a loopback port chosen by the OS, one per gateway, shared by all its sessions. Sessions are opened and closed in memory; the only HTTP endpoints are the session URLs.
 - `session.url(...)` contains an unguessable ID. Anyone who has it can make tool calls signed for that session, so treat it as a secret.
 - Do not also call `install_mcp_client()` on an MCP client that talks to the gateway.
 - When a tool result cannot be verified, the agent receives a JSON-RPC error (code `-32050`) instead of the result.
-
-#### Standalone gateway
-
-The gateway can also run as its own service, for example as a sidecar shared by several agent processes:
-
-```bash
-export AGENTDNA_AGENT_NAME="<Agent name, as used by the agent application>"
-export AGENTDNA_API_KEY="<AgentDNA API Key>"
-export AGENTDNA_GATEWAY_UPSTREAMS="sqlite=http://127.0.0.1:8013/mcp"
-export AGENTDNA_GATEWAY_TOKEN="<a long random secret>"
-
-agentdna-gateway   # listens on 127.0.0.1:8090
-```
-
-The agent then uses `AGENT.mcp_gateway(url="http://127.0.0.1:8090", token=...)`; the rest of the code is unchanged. The standalone gateway signs with the agent's identity, so run it with the same `AGENTDNA_AGENT_NAME` and `AGENTDNA_CONFIG_DIR` as the agent application.
-
-| Variable | Description |
-| -------- | ----------- |
-| `AGENTDNA_AGENT_NAME` | Required. The AgentDNA name the gateway signs tool calls as. |
-| `AGENTDNA_GATEWAY_UPSTREAMS` | Required. The MCP servers, by name: `name=url,name=url`. |
-| `AGENTDNA_API_KEY`, `AGENTDNA_PROVENANCE_LAYER_URL`, `AGENTDNA_ADMIN_SERVER_URL`, `AGENTDNA_CONFIG_DIR` | Passed to `AgentDNA`. SDK defaults when unset. |
-| `AGENTDNA_AGENT_POLICY_FILE` | When set, the agent is registered at startup. Otherwise registration is left to the agent application. |
-| `AGENTDNA_GATEWAY_HOST`, `AGENTDNA_GATEWAY_PORT` | Bind address. Default `127.0.0.1:8090`. |
-| `AGENTDNA_GATEWAY_TOKEN` | When set, required as a bearer token to open sessions. |
-| `AGENTDNA_GATEWAY_RUN_TTL_SECONDS` | Idle sessions are dropped after this. Default `3600`. |
-| `AGENTDNA_GATEWAY_UPSTREAM_TIMEOUT_SECONDS` | Read timeout for one upstream request. Default `300`. |
-
-The gateway also loads a `.env` file from the directory it is started in.
 
 ## Authentication evidence 
 

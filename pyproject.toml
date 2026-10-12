@@ -27,18 +27,11 @@ dependencies = [
   "py-multiformats-cid>=0.4.4",
   "pyyaml>=6.0",
   "structlog>=24.0.0",
-  "colorama"
-]
-
-[project.optional-dependencies]
-# AgentDNA MCP Gateway server. The client side (GatewayClient) needs only httpx.
-gateway = [
+  "colorama",
+  # The in-process MCP gateway (agentdna.mcp.gateway).
   "starlette>=0.37",
   "uvicorn>=0.30",
 ]
-
-[project.scripts]
-agentdna-gateway = "agentdna.mcp.gateway.__main__:main"
 
 [project.urls]
 Homepage = "https://agentdna.io"

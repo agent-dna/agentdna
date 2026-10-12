@@ -1,6 +1,6 @@
 """The gateway end to end, with nothing faked but the admin whitelist.
 
-    user ─▶ agent ── AGENT.mcp_gateway(...).session(...) ──▶ gateway
+    user ─▶ agent ── MCPGateway(...).session(AGENT, ...) ──▶ gateway
                 └── plain fastmcp.Client ──▶ gateway ──▶ FastMCP + AgentDNAMCPMiddleware
 
 Real signatures against the provenance node, real MCP servers running the
@@ -24,9 +24,7 @@ from fastmcp import Client, FastMCP
 import agentdna.mcp.server.fastmcp as fastmcp_middleware
 from agentdna.core import AgentDNA
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
-from agentdna.mcp.gateway import WorkflowRejected
-from agentdna.mcp.gateway.app import create_app
-from agentdna.mcp.gateway.config import GatewayConfig
+from agentdna.mcp.gateway import MCPGateway, WorkflowRejected
 from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware
 from agentdna.types import ACTOR_TYPE_TOOL, VERIFY_HEAVY
 from tests.conftest import CONFIG_DIR, DUMMY_API_KEY, ONLINE_PROVENANCE_NODE
@@ -113,12 +111,12 @@ def servers(monkeypatch):
 
 def test_in_process_gateway_with_a_plain_mcp_client(servers, user, agent):
     urls, maths_dna, words_dna = servers
-    mcp = agent.mcp_gateway(urls)
+    mcp = MCPGateway(urls)
 
     incoming = user.build(payload="add some numbers and shout")
 
     async def agent_run():
-        async with mcp.session(incoming) as session:
+        async with mcp.session(agent, incoming) as session:
             async with Client(session.url("maths")) as maths, Client(session.url("words")) as words:
                 first = await maths.call_tool("add", {"a": 1, "b": 2})
                 second, third = await asyncio.gather(
@@ -142,7 +140,7 @@ def test_in_process_gateway_with_a_plain_mcp_client(servers, user, agent):
     assert tip.get_latest_envelope_actor() == maths_dna.get_actor_id()
     assert tip.get_latest_envelope().status_code == TOOL_EXECUTION_FAILED
 
-    reply = session.reply("3, 5, 9 and DONE")
+    reply = agent.build(payload="3, 5, 9 and DONE", previous_workflows=session.workflows)
     assert reply.get_latest_envelope_actor() == agent.get_actor_id()
     assert agent.verify(reply, mode=VERIFY_HEAVY) == RESULT_OK
     assert reply.id == incoming.id
@@ -164,82 +162,71 @@ def test_in_process_gateway_with_a_plain_mcp_client(servers, user, agent):
 
 def test_in_process_gateway_from_synchronous_code(servers, user, agent):
     urls, *_ = servers
-    mcp = agent.mcp_gateway(urls)
+    mcp = MCPGateway(urls)
     incoming = user.build(payload="nothing to do")
 
     try:
-        with mcp.session(incoming) as session:
+        with mcp.session(agent, incoming) as session:
             assert session.servers == ["maths", "words"]
             assert [w.get_latest_envelope().hash for w in session.frontier()] == [
                 incoming.envelope.hash
             ]
-        reply = session.reply("nothing done")
     finally:
         mcp.close()
 
-    assert [p.hash for p in reply.get_latest_envelope().parent_envelope] == [incoming.envelope.hash]
+    # No tool calls: the final workflow is the incoming one, unchanged.
+    assert [w.get_latest_envelope().hash for w in session.workflows] == [incoming.envelope.hash]
 
 
 def test_in_process_gateway_refuses_a_tampered_workflow(servers, user, agent):
     urls, *_ = servers
-    mcp = agent.mcp_gateway(urls)
+    mcp = MCPGateway(urls)
     incoming = user.build(payload="MFA is mandatory")
     incoming.envelope.payload = "MFA is optional"
 
     try:
-        with pytest.raises(WorkflowRejected), mcp.session(incoming):
+        with pytest.raises(WorkflowRejected), mcp.session(agent, incoming):
             pass
     finally:
         mcp.close()
 
 
-def test_in_process_gateway_is_not_open_to_other_local_processes(servers, user, agent):
+def test_in_process_gateway_has_no_run_endpoints(servers, user, agent):
+    """Runs are opened in memory, so nothing else on the machine can open one
+    and have tool calls signed as this agent. Only the session's MCP URL works."""
+
     urls, *_ = servers
-    mcp = agent.mcp_gateway(urls)
+    mcp = MCPGateway(urls)
 
     try:
-        with mcp.session(user.build(payload="intent")):
-            gateway_url, _ = mcp._endpoint()
+        with mcp.session(agent, user.build(payload="intent")) as session:
+            assert mcp._embedded is not None
+            gateway_url = mcp._embedded.url
             workflow = user.build(payload="someone else's intent")
+
             response = httpx.post(
                 f"{gateway_url}/runs", json={"workflows": [json.loads(workflow.serialize())]}
             )
-            assert response.status_code == 401
+            assert response.status_code == 404
+            assert httpx.get(f"{gateway_url}/runs/{session.run_id}").status_code == 404
+            assert httpx.delete(f"{gateway_url}/runs/{session.run_id}").status_code == 404
+
+            # The session itself is unaffected.
+            assert len(session.frontier()) == 1
     finally:
         mcp.close()
 
 
-def test_standalone_gateway(servers, user, agent):
-    urls, maths_dna, _ = servers
-    gateway_url, gateway = _serve(create_app(agent, GatewayConfig(upstreams=urls, token="s3cret")))
-
-    try:
-        mcp = agent.mcp_gateway(url=gateway_url, token="s3cret")
-        incoming = user.build(payload="add")
-
-        async def agent_run():
-            async with mcp.session(incoming) as session:
-                async with Client(session.url("maths")) as maths:
-                    result = await maths.call_tool("add", {"a": 20, "b": 22})
-            return result, session
-
-        result, session = asyncio.run(agent_run())
-        assert result.data == 42
-        reply = session.reply("42")
-        assert agent.verify(reply, mode=VERIFY_HEAVY) == RESULT_OK
-        assert _tool_calls(reply, agent) == [("add", '{"a": 20, "b": 22}')]
-    finally:
-        gateway.should_exit = True
-
-
-def test_unknown_run_never_reaches_the_server(servers, agent):
+def test_unknown_run_never_reaches_the_server(servers, user, agent):
     urls, *_ = servers
-    gateway_url, gateway = _serve(create_app(agent, GatewayConfig(upstreams=urls)))
+    mcp = MCPGateway(urls)
     try:
-        response = httpx.post(
-            f"{gateway_url}/runs/not-a-run/mcp/maths",
-            json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "add"}},
-        )
-        assert response.status_code == 404
+        with mcp.session(agent, user.build(payload="intent")):
+            assert mcp._embedded is not None
+            response = httpx.post(
+                f"{mcp._embedded.url}/runs/not-a-run/mcp/maths",
+                json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "add"}},
+            )
+            assert response.status_code == 404
     finally:
-        gateway.should_exit = True
+        mcp.close()

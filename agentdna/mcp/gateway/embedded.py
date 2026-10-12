@@ -1,47 +1,44 @@
 """The gateway, running inside the agent's own process.
 
-Same application as the standalone gateway, served by uvicorn on a thread of
-its own with its own event loop, on a loopback port picked by the OS. Nothing
-for the developer to start, configure or keep in sync: it signs with the very
-`AgentDNA` instance the agent uses.
+The gateway application, served by uvicorn on a thread of its own with its own
+event loop, on a loopback port picked by the OS. Nothing for the developer to
+start or configure, and no identity of its own: each session signs with the
+`AgentDNA` instance of the agent that opened it.
+
+Runs are opened and closed by calling the gateway directly, not over HTTP, so
+nothing else on the machine can open a run and have tool calls signed as an
+agent. The only HTTP surface is each run's MCP endpoint, reachable only
+through its unguessable URL.
 
 Its own thread matters. The agent's MCP client talks to it over HTTP, and the
-agent may call it synchronously from inside its own event loop; a gateway on
-that same loop would deadlock.
+agent may wait on it synchronously from inside its own event loop; a gateway
+on that same loop would deadlock.
 """
 
 from __future__ import annotations
 
+import asyncio
 import atexit
-import secrets
 import socket
 import threading
 import time
-from dataclasses import replace
-
-from agentdna import AgentDNA
+from collections.abc import Coroutine
+from concurrent.futures import Future
+from typing import Any, TypeVar
 
 from .config import GatewayConfig
+from .service import RunService
 
 STARTUP_TIMEOUT_SECONDS = 10.0
 
+T = TypeVar("T")
+
 
 class EmbeddedGateway:
-    def __init__(self, dna: AgentDNA, config: GatewayConfig) -> None:
-        try:
-            import uvicorn
+    def __init__(self, config: GatewayConfig) -> None:
+        import uvicorn
 
-            from .app import create_app
-        except ImportError as exc:
-            raise ImportError(
-                f"the AgentDNA MCP gateway needs {exc.name}; "
-                "install it with `pip install 'agent-dna[gateway]'`"
-            ) from exc
-
-        # Anything else on this machine could otherwise open runs and have
-        # tool calls signed as this agent. Only this process knows the token.
-        config = replace(config, token=config.token or secrets.token_urlsafe(32))
-        self.token = config.token
+        from .app import create_app
 
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -49,9 +46,12 @@ class EmbeddedGateway:
         host, port = sock.getsockname()[:2]
         self.url = f"http://{host}:{port}"
 
+        app = create_app(config)
+        self.service: RunService = app.state.service
+
         self._server = uvicorn.Server(
             uvicorn.Config(
-                create_app(dna, config),
+                app,
                 log_config=None,  # leave the host application's logging alone
                 access_log=False,
                 lifespan="on",
@@ -72,7 +72,14 @@ class EmbeddedGateway:
                 raise RuntimeError("the AgentDNA MCP gateway failed to start")
             time.sleep(0.01)
 
+        # Set by the app's lifespan, which has run by the time `started` is set.
+        self._loop: asyncio.AbstractEventLoop = app.state.loop
+
         atexit.register(self.stop)
+
+    def submit(self, coroutine: Coroutine[Any, Any, T]) -> Future[T]:
+        """Run a gateway operation on the gateway's own event loop."""
+        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
 
     def stop(self) -> None:
         self._server.should_exit = True

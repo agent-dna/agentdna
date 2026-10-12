@@ -13,13 +13,16 @@ github-repository-agent -> langchain_mcp_adapters -> AgentDNA MCP gateway -> Fas
 AgentDNA signs the agent's MCP tool calls through an MCP gateway that runs inside the agent's process. The MCP client carries no AgentDNA patch: it is pointed at the gateway session's URL instead of the MCP server's.
 
 ```py
-MCP_GATEWAY = GITHUB_AGENT.mcp_gateway({"github": settings.github_mcp_url})
+from agentdna.mcp.gateway import MCPGateway
 
-async with MCP_GATEWAY.session(adna_workflow) as session:   # verifies the incoming workflow
+MCP_GATEWAY = MCPGateway({"github": settings.github_mcp_url})
+
+async with MCP_GATEWAY.session(GITHUB_AGENT, adna_workflow) as session:   # verifies the incoming workflow
     tools = await load_tools(session.url("github"))
     result = await workflow.ainvoke(...)
 
-reply_workflow = session.reply(str(final_message.content))  # signed on top of every tool call
+# session.workflows: the final IntentWorkflow(s), including every tool call
+reply_workflow = GITHUB_AGENT.build(payload=str(final_message.content), previous_workflows=session.workflows)
 ```
 
 ## Prerequisites

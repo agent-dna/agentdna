@@ -19,19 +19,21 @@ can use any Streamable HTTP MCP client, with no framework-specific patch
 For a developer, the whole integration looks like this:
 
 ```py
-MCP = AGENT.mcp_gateway({"github": "http://127.0.0.1:8011/mcp"})
+from agentdna.mcp.gateway import MCPGateway
 
-async with MCP.session(incoming_workflow) as session:   # verifies incoming_workflow
-    tools = await load_tools(session.url("github"))      # any MCP client, unpatched
+MCP_GATEWAY = MCPGateway({"github": "http://127.0.0.1:8011/mcp"})   # once per process
+
+async with MCP_GATEWAY.session(AGENT, incoming_workflow) as session:   # verifies incoming_workflow
+    tools = await load_tools(session.url("github"))                    # any MCP client, unpatched
     result = await agent.ainvoke(...)
 
-reply = session.reply(str(result))                       # signed on top of every tool call
+reply = AGENT.build(payload=str(result), previous_workflows=session.workflows)
 ```
 
-By default the gateway runs **inside the agent's process**, on a background
-thread, and starts on first use. It can also run as a standalone service
-(`agentdna-gateway`), reached with `AGENT.mcp_gateway(url=..., token=...)`
-and the same session code.
+The gateway comes with `agent-dna` (no extra install) and runs **inside the
+agent's process**, on a background thread, starting on first use. It holds no
+identity of its own: each session verifies and signs with the `AgentDNA`
+instance passed to it.
 
 ## 2. Problem
 
@@ -56,31 +58,33 @@ The gateway removes that coupling.
 | Causal continuity across sequential and concurrent calls, per run | Done |
 | Reuse `AgentDNA` for identity, signing, serialisation and verification | Done |
 | Keep transport separate from workflow logic | Done: `app.py` vs `propagation.py` |
-| Minimal developer effort | Done: one `mcp_gateway(...)` call plus a `session` block; no extra process or configuration (§6.1) |
+| Minimal developer effort | Done: one `MCPGateway(...)` plus a `session` block; nothing extra to install, start or configure (§6) |
+| Several agents per process | Done: one gateway, each session signing as the agent that opened it (§6) |
 | Several MCP servers per agent | Done: named servers, one session and one frontier across them |
 
 ## 4. Architecture
 
 ```text
-Agent application                       (MCP.session(...) does 1 and 3)
-   │  1. POST /runs  {workflows: [incoming IntentWorkflow]}
+Agent application        (MCP_GATEWAY.session(AGENT, ...) does 1 and 3)
+   │  1. open run  {workflows: [incoming IntentWorkflow]}
    │     ◀── {run_id, mcp_path, servers}
    │
    │  2. any MCP client ── /runs/{run_id}/mcp/{server} ──▶ ┌──────────────────────┐
    │                                                       │ AgentDNA MCP Gateway │──▶ MCP server "github"
    │                                                       │  ├─ HTTP pass-through │──▶ MCP server "jira"
-   │                                                       │  ├─ propagation       │    (AgentDNAMCPMiddleware)
+   │                                                       │  ├─ propagation       │
    │                                                       │  ├─ runs (frontiers)  │◀──
-   │                                                       │  └─ AgentDNA (agent)  │
+   │                                                       │  └─ each run's agent  │
    │                                                       └──────────────────────┘
-   │  3. DELETE /runs/{run_id}
+   │  3. close run
    │     ◀── {workflows: [final frontier]}
    ▼
-session.reply(payload)  =  AGENT.build(payload, previous_workflows=final_frontier)
+AGENT.build(payload, previous_workflows=session.workflows)   # the final frontier
 ```
 
-The gateway is the same HTTP application in both deployment modes. In
-process, it is served on a loopback port chosen by the OS (§6.1).
+Steps 1 and 3 are direct calls into the gateway, in the agent's process:
+there is no `/runs` endpoint. Step 2, the MCP traffic, is HTTP to a loopback
+port chosen by the OS (§6).
 
 The gateway understands MCP, not only HTTP. It parses JSON-RPC
 messages in both `application/json` and `text/event-stream` responses so it
@@ -88,36 +92,104 @@ can find `tools/call` requests and their responses. Everything else is
 forwarded byte for byte: `initialize`, `tools/list`, notifications, the GET
 notification stream, `DELETE`, and `mcp-session-id` and other headers.
 
+### 4.1 End-to-end flow
+
+One agent execution, from the user's intent to the recorded reply, with the
+in-process gateway. Overlapping tool calls follow the same path in parallel;
+they share one parent frontier and merge in call-start order (§8).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User (AgentDNA user)
+    participant A as Agent app<br/>(AGENT + any MCP client)
+    participant G as MCP Gateway<br/>(in-process)
+    participant S as MCP server
+    participant P as Provenance layer
+
+    U->>U: build(intent) signs root envelope
+    U->>A: IntentWorkflow W0
+
+    rect rgba(127, 127, 127, 0.08)
+    Note over A,G: Open the session
+    A->>G: MCP_GATEWAY.session(AGENT, W0) opens a run (direct call)
+    Note over G: Started on first use: own thread and event loop,<br/>loopback port
+    G->>P: verify W0 with AGENT
+    alt W0 fails verification
+        G-->>A: raises WorkflowRejected
+    else W0 is valid
+        G-->>A: returns run_id, MCP URL, servers
+    end
+    end
+
+    A->>G: tools/list via session.url("github")
+    G->>S: forwarded unchanged
+    S-->>G: tool list
+    G-->>A: tool list
+
+    loop each tools/call the LLM makes
+        A->>G: tools/call (name, arguments)
+        G->>G: begin call, build request workflow on the<br/>run's frontier, sign it as AGENT
+        G->>S: tools/call + _meta.agentdna.intent_workflow
+        S-->>G: result, with a signed successor workflow in _meta
+        alt successful result with a successor
+            G->>G: successor builds directly on our request?
+            G->>P: verify successor
+            alt successor verified
+                G->>G: complete call, frontier advances
+                G-->>A: tool result, unchanged
+            else unrelated or invalid
+                G->>P: record verification failure (invalid signature only)
+                G-->>A: JSON-RPC error -32050 (result withheld, frontier unchanged)
+            end
+        else successful result without a successor
+            G-->>A: JSON-RPC error -32050 (result withheld, frontier unchanged)
+        else error result
+            G-->>A: passed through unchanged<br/>(frontier advances only on a verified tool-failure successor)
+        end
+    end
+
+    rect rgba(127, 127, 127, 0.08)
+    Note over A,G: Close the session
+    A->>G: leaving the with block closes the run (direct call)
+    G-->>A: final frontier, exposed as session.workflows
+    end
+
+    A->>A: AGENT.build(answer, previous_workflows=session.workflows)
+    A-->>U: reply IntentWorkflow
+    U->>P: record(reply) creates the Workflow Provenance Card
+```
+
 ## 5. Handing the workflow to the gateway: runs
 
 This was the central open question. With the client adapters, the
 agent sets `agentdna_context(AGENT, incoming_workflow)` and the adapter
-reads it. A separate gateway process cannot see that context, and it cannot
-start a chain on its own: `AgentDNA.build()` without a parent is allowed only
-for `user` actors.
+reads it. The gateway sees only MCP traffic, which says nothing about which
+agent execution it belongs to. And it cannot start a chain on its own:
+`AgentDNA.build()` without a parent is allowed only for `user` actors.
 
 **Decision: explicit, run-scoped URLs.**
 
-1. The agent application opens a run by sending the workflow(s) it received
-   to `POST /runs`. The gateway verifies them before accepting (`422` if
-   verification fails).
+1. The agent opens a run with its `AgentDNA` instance and the workflow(s)
+   it received. The gateway verifies them with that agent before accepting.
 2. The gateway returns an unguessable `run_id` (`secrets.token_urlsafe(24)`)
    and the run's MCP path `/runs/{run_id}/mcp`.
 3. The agent points any MCP client at that URL. Every `tools/call` on it
    builds on, and advances, that run's frontier and no other.
-4. The agent closes the run with `DELETE /runs/{run_id}` and receives the
-   final frontier. That is the equivalent of `ctx.workflows`, and the agent
+4. The agent closes the run and receives the final frontier. That is the equivalent of `ctx.workflows`, and the agent
    builds its reply on it.
 
 The developer never sees runs or frontiers directly. `GatewaySession`
-(from `MCP.session(...)`) wraps the protocol:
+(from `MCP_GATEWAY.session(AGENT, workflow)`) wraps them:
 
 | Session API | Does |
 | ----------- | ---- |
-| `with` / `async with` | Opens the run (the gateway verifies the incoming workflow; `WorkflowRejected` carries the status code on failure). On exit, closes it. If the block raised, it force-closes and lets the original exception propagate |
+| `with` / `async with` | Opens the run (the incoming workflow is verified with `AGENT`; `WorkflowRejected` carries the status code on failure). On exit, closes it. If the block raised, it force-closes and lets the original exception propagate |
 | `session.url(name)` | The MCP URL to give the agent's MCP client for that server (`url()` works when there is only one) |
-| `session.reply(payload)` / `await session.areply(...)` | Closes the run if needed and signs the agent's answer on the final frontier |
+| `session.workflows` | The final IntentWorkflow(s), once the session is closed: the incoming workflow plus every tool call. The agent builds its reply on them with `AGENT.build()`, as it did on `ctx.workflows` with the client adapters. Reading it while the session is open raises rather than returning the not-yet-final incoming workflow |
+| `session.close()` / `await session.aclose()` | Closes early and returns the final workflows, for use inside the block |
 | `session.frontier()` / `afrontier()` | The workflows produced so far, without closing |
+| `session.agent` | The `AgentDNA` instance the session verifies and signs with |
 
 Verification of the incoming workflow moved into the session. The agent no
 longer calls `AGENT.verify()` itself for this; doing so would only verify the
@@ -134,53 +206,44 @@ workflow twice.
 
 **Run lifecycle:**
 - Runs live in memory (`RunRegistry`).
-- A run is dropped after `AGENTDNA_GATEWAY_RUN_TTL_SECONDS` idle (default 3600), but never while a call is in flight.
-- Closing a run with calls in flight returns `409` unless `?force=true`.
+- A run is dropped after `run_ttl_seconds` idle (default 3600), but never while a call is in flight.
+- Closing a run with calls in flight is refused (`GatewayError`, status 409) unless forced. Leaving a `with` block because of an exception force-closes.
 
-## 6. Deployment modes, identity and signing
+## 6. Where it runs, identity and signing
 
-### 6.1 In process (default)
+`MCPGateway(servers)` is cheap to create; nothing starts until the first
+session. That session starts the gateway application (`embedded.py`) under
+uvicorn, on a thread of its own with its own event loop, bound to `127.0.0.1`
+on a port the OS picks. One gateway, one port, shared by all its sessions.
 
-`AGENT.mcp_gateway(servers)` returns an `MCPGateway`. On the first session
-it starts the gateway application (`embedded.py`) under uvicorn, on a thread
-of its own with its own event loop, bound to `127.0.0.1` on a port the OS
-picks. It signs with **the agent's own `AgentDNA` instance**, so the gateway
-cannot sign as the wrong identity.
-
+- **No identity of its own.** `session(AGENT, workflow)` verifies the
+  incoming workflow with `AGENT` and signs every tool call in the session as
+  `AGENT`, using that very instance. The gateway cannot sign as the wrong
+  agent, and one gateway can serve several agents in a process (an
+  orchestrator and its workers), each session signing as its own agent.
 - **Own thread and loop.** The agent's MCP client calls the gateway over
-  HTTP, and `session.reply()` makes a synchronous call even when it is
-  invoked from async code. A gateway on the agent's own loop would deadlock.
+  HTTP, and synchronous `session.close()` can be called even from async
+  code. A gateway on the agent's own loop would deadlock.
   Runs survive across `asyncio.run()` calls.
-- **Private token.** The in-process gateway generates a random bearer token
-  that only this process knows, so other local processes cannot open runs
-  and have tool calls signed as the agent.
+- **No run endpoints.** Sessions open and close runs by calling the
+  gateway's `RunService` directly, scheduled onto the gateway's event loop.
+  That keeps a close atomic with the tool calls the loop is processing. There
+  is no `/runs` endpoint, so nothing else on the machine can open a run and
+  have tool calls signed as an agent, and there is no token to manage. The
+  only HTTP surface is each run's MCP endpoint, reachable only through its
+  unguessable URL.
 - **Host application untouched.** uvicorn is started with `log_config=None`,
   so it does not reconfigure the host's logging. Signal handlers are not
   installed off the main thread. The server is stopped at exit, or with
-  `MCP.close()`.
+  `MCP_GATEWAY.close()`.
 - **Trust.** The agent process signs, as it did with the client adapters.
 
-### 6.2 Standalone
-
-`agentdna-gateway` initialises a normal `AgentDNA(type="agent")` from the
-environment, with `AGENTDNA_AGENT_NAME` as its name. The agent reaches it
-with `AGENT.mcp_gateway(url=..., token=...)`. No separate identity resolver
-or registry exists.
-
-- **Same identity as the agent app.** The DID comes from the name and the
-  config dir, so the gateway must run with the same `AGENTDNA_AGENT_NAME`
-  and `AGENTDNA_CONFIG_DIR` (default `~/.agentdna`) as the agent application.
-  The gateway loads `.env` from its working directory, and existing
-  environment variables take precedence.
-- **Registration.** When `AGENTDNA_AGENT_POLICY_FILE` is set, the gateway
-  registers the agent at startup. Otherwise it skips registration and leaves
-  it to the agent application, which owns the policy.
-- **Key custody.** v1 is a sidecar: the gateway uses the same local key
-  material as the agent. Remote signing is out of scope (§13).
-- **Trust semantics.** A request envelope signed by a standalone gateway
-  means "a client holding this run's URL made this call", where the adapter
-  meant "the agent process made this call". In both modes the run URL is a
-  bearer capability and must be treated as a secret.
+**Why in-process only.** A standalone sidecar (`agentdna-gateway`, configured
+from the environment, runs opened over HTTP with a bearer token) was
+prototyped and removed. It needed a separate install and process, its own
+copy of the agent's identity kept in sync by name and config dir, and its own
+endpoint security. In process, none of that exists, and signing stays in the
+agent's process.
 
 ## 7. Request and response lifecycle
 
@@ -211,7 +274,7 @@ after its successor has been verified.
 | Success, successor does not build directly on our request (wrong `id`, or no parent matching the request's hash and signature) | JSON-RPC error `-32050` | Unchanged |
 | Success, successor fails `AgentDNA.verify()` | JSON-RPC error `-32050` with `data.agentdna_status_code`; the failure is built and recorded on the provenance layer, as the adapters do | Unchanged |
 | `isError` with a `TOOL_EXECUTION_FAILED` successor | Result unchanged | Advances (the failure is part of the chain) |
-| `isError` with no successor (a server-side whitelist, CoCA or CBAC refusal, which the server records itself) | Result unchanged | Unchanged |
+| `isError` with no successor (the server refused the call before running the tool) | Result unchanged | Unchanged |
 | JSON-RPC `error` | Unchanged | Unchanged |
 | `resultType` other than `complete` (`input_required`, tasks) | Unchanged; the follow-up call gets its own workflow | Unchanged |
 | HTTP ≥ 400, or a non-MCP content type | Passed through | Unchanged |
@@ -254,53 +317,51 @@ The format is unchanged:
 ```
 
 The gateway uses the existing helpers (`workflow_to_metadata`,
-`workflow_from_metadata`, `AGENTDNA_META_KEY`). The upstream server needs no
-change: the existing `AgentDNAMCPMiddleware` cannot tell gateway traffic
-from adapter traffic.
+`workflow_from_metadata`, `AGENTDNA_META_KEY`).
+
+This format is the gateway's whole contract with an MCP server. The server
+reads the request workflow from `params._meta` and returns a signed successor
+in the result's `_meta`. Requests from the gateway look exactly like requests
+from the client adapters, so a server that already works with the adapters
+needs no change.
 
 ## 10. Error handling and security
 
 | Case | Behaviour |
 | ---- | --------- |
-| Unknown or expired run, or unknown server name | `404`; nothing is forwarded upstream |
-| Invalid run request | `400` |
-| Incoming workflow fails verification | `422` with `status_code` |
-| Verification cannot be performed | `503` |
+| MCP request for an unknown or expired run, or unknown server name | `404`; nothing is forwarded upstream |
+| Incoming workflow fails verification | `WorkflowRejected` (status 422, with `status_code`) |
+| Verification cannot be performed | `GatewayError` (status 503) |
 | Batched JSON-RPC containing `tools/call` | `400` (batching was removed from MCP 2025-06-18) |
 | Signing fails | JSON-RPC error; the call is cancelled |
-| Missing or invalid configuration | The gateway refuses to start, with a message naming the variable |
+| Invalid server map or settings | `MCPGateway(...)` raises `ConfigError` |
 
 **Security properties:**
-- The gateway binds to `127.0.0.1` by default.
-- The run endpoints (`/runs`, `/runs/{id}`) require a bearer token when one
-  is configured. The token is compared in constant time. The in-process
-  gateway always has one, generated at random (§6.1); the standalone gateway
-  uses `AGENTDNA_GATEWAY_TOKEN`.
+- The gateway binds to `127.0.0.1`, on a port the OS picks.
+- The gateway does no authorisation of tool calls: whether an agent may call
+  a tool is for the MCP server to decide. What it protects is agents' signing
+  identities. Opening a run means "sign tool calls as this agent", and
+  workflows are not secret (they travel in `_meta` and are recorded), so a
+  verified workflow alone must not be enough to open one. Runs can only be
+  opened in process, by code holding the agent's `AgentDNA` instance (§6).
 - The MCP endpoint is protected by the unguessable run ID.
 - Request headers, including the agent's `Authorization` for the upstream,
   are forwarded unchanged except hop-by-hop headers and `accept-encoding`.
   Transport authentication stays separate from workflow verification.
-- The gateway never logs headers, tokens or keys.
+- The gateway never logs headers, credentials or keys.
 
 ## 11. Configuration
 
-The in-process gateway needs no configuration beyond the server map passed to
-`mcp_gateway()`. The standalone gateway reads:
+Nothing is read from the environment. `MCPGateway` takes:
 
-| Variable | Description |
-| -------- | ----------- |
-| `AGENTDNA_AGENT_NAME` | Required. The agent identity the gateway signs as. |
-| `AGENTDNA_GATEWAY_UPSTREAMS` | Required. The MCP servers by name: `github=http://127.0.0.1:8011/mcp,jira=https://...`. Names may contain letters, digits, `-` and `_`. |
-| `AGENTDNA_API_KEY`, `AGENTDNA_PROVENANCE_LAYER_URL`, `AGENTDNA_ADMIN_SERVER_URL`, `AGENTDNA_CONFIG_DIR` | Passed to `AgentDNA`. SDK defaults when unset. |
-| `AGENTDNA_AGENT_POLICY_FILE` | When set, the agent is registered at startup. |
-| `AGENTDNA_GATEWAY_HOST` / `AGENTDNA_GATEWAY_PORT` | Default `127.0.0.1:8090`. |
-| `AGENTDNA_GATEWAY_TOKEN` | Optional bearer token for the run endpoints. |
-| `AGENTDNA_GATEWAY_RUN_TTL_SECONDS` | Idle run expiry. Default `3600`. |
-| `AGENTDNA_GATEWAY_UPSTREAM_TIMEOUT_SECONDS` | Read timeout per upstream request. Default `300`; GET streams have no read timeout. |
+| Parameter | Description |
+| --------- | ----------- |
+| `servers` | Required. MCP server name to Streamable HTTP URL, e.g. `{"github": "http://127.0.0.1:8011/mcp"}`. Names may contain letters, digits, `-` and `_`. |
+| `run_ttl_seconds` | Idle run expiry. Default `3600`. |
+| `upstream_timeout_seconds` | Read timeout per upstream request. Default `300`; GET streams have no read timeout. |
 
-Both modes need `pip install 'agent-dna[gateway]'`, which adds `starlette` and
-`uvicorn`. Run the standalone gateway with `agentdna-gateway` or
-`python -m agentdna.mcp.gateway`.
+The gateway comes with `pip install agent-dna`: `starlette` and `uvicorn` are
+regular dependencies.
 
 ## 12. Module layout
 
@@ -309,13 +370,12 @@ agentdna/mcp/payload.py          canonical tools/call payload (shared with the c
 agentdna/mcp/gateway/
   __init__.py                    exports MCPGateway, GatewaySession, GatewayError, WorkflowRejected
   client.py                      MCPGateway / GatewaySession: the developer-facing API
-  embedded.py                    in-process mode: the app under uvicorn on its own thread
-  config.py                      environment configuration and validation
+  embedded.py                    the app under uvicorn on its own thread and loop
+  service.py                     RunService: open / frontier / close, run on the gateway's loop
+  config.py                      GatewayConfig and its validation
   runs.py                        Run / RunRegistry: one AgentDNAContext per run
   propagation.py                 transport-neutral build → inject → verify → advance
-  app.py                         Starlette app: run endpoints + Streamable HTTP pass-through
-  __main__.py                    standalone CLI entry point
-agentdna/core.py                 AgentDNA.mcp_gateway(): the one-line entry point
+  app.py                         Starlette app: the Streamable HTTP pass-through
 ```
 
 ## 13. Decisions
@@ -323,41 +383,44 @@ agentdna/core.py                 AgentDNA.mcp_gateway(): the one-line entry poin
 | Question (from the original draft) | Decision |
 | ---------------------------------- | -------- |
 | First transport | Streamable HTTP. stdio is not supported yet. |
-| Deployment | In process by default; standalone (`agentdna-gateway`) optional, same session API (§6). |
+| Deployment | In process only; a standalone sidecar was prototyped and dropped (§6). |
+| Identity | None of its own: each session verifies and signs with the agent passed to it (§6). |
 | Several MCP servers | Named servers behind one gateway; one frontier per session across all of them. |
 | Identifying and isolating runs | Explicit runs with unguessable, run-scoped URLs (§5). |
 | Missing or invalid successor | Fail closed for successful results; pass error results through (§7). |
 | Merge policy for concurrent branches | Successful successors in call-start order; cancelled calls contribute nothing (§8). |
 | Reuse the existing context? | Yes, after fixing the batch bugs (§8). |
-| Remote signing interface | Not in v1. The gateway signs with the agent's own identity: the same instance in process, or the same name and config dir as a sidecar. |
+| Remote signing interface | Not needed: signing stays in the agent's process, with the session's own `AgentDNA` instance. |
 
 ## 14. Testing
 
-- **`tests/test_gateway.py`** (48 tests, no network): a fake signer and a fake
+- **`tests/test_gateway.py`** (47 tests, no network): a fake signer and a fake
   upstream drive every row of the §7 policy in both JSON and SSE. Also
   covered:
   - preservation of unrelated `_meta`;
   - pass-through of non-tool traffic;
-  - the run lifecycle (TTL, `409`, token);
+  - the run lifecycle (TTL, close refused with calls in flight unless forced, unknown runs);
   - run isolation;
   - concurrent calls, including one failing alongside one succeeding;
   - one run spanning two MCP servers, with routing by name and a shared frontier;
-  - the session API: open, `url()`, `reply()`, `WorkflowRejected`, force-close on error;
+  - the session API on a real in-process gateway: open, `url()`, `workflows` (final only once closed), `WorkflowRejected`, sync use, force-close on error;
+  - one gateway serving two agents, each session signing as its own agent;
+  - no `/runs` endpoints;
+  - one OS-chosen port per gateway, reused by all its sessions, and two gateways in one process coexisting;
   - configuration validation.
 
   The suite was checked against mutations: disabling the "builds on our
   request" check, or reverting the context fix, makes tests fail.
 - **`tests/test_gateway_e2e.py`** (real signatures on the provenance dev
-  node, two real FastMCP servers with `AgentDNAMCPMiddleware`, and a plain
+  node, two real AgentDNA-enabled FastMCP servers, and a plain
   `fastmcp.Client`). It covers:
-  - the in-process gateway, with sequential, concurrent and failing calls
-    across both servers; the agent's reply verifies in `heavy` mode;
+  - sequential, concurrent and failing calls across both servers; the
+    agent's reply verifies in `heavy` mode;
   - synchronous use;
   - rejection of a tampered incoming workflow;
-  - that other local processes cannot open runs on the in-process gateway;
-  - the standalone gateway with a token.
+  - no run endpoints, and unknown runs never reaching a server.
 
-  Only the admin whitelist is stubbed.
+  Only the servers' admin whitelist lookup is stubbed.
 - **`tests/test_mcp_context.py`, `tests/test_unwrap.py`**: the SDK fixes in §8
   and §15.
 - **GitHub example, run manually** (`langchain-mcp-adapters` 0.3.2,
@@ -386,12 +449,12 @@ agentdna/core.py                 AgentDNA.mcp_gateway(): the one-line entry poin
   content but a different history could be substituted without breaking any
   signature. Fixing this means a Merkle-style hash, which changes the format
   of stored records.
-- **Single instance.** Runs are held in memory. For the in-process gateway
-  this is natural; a standalone gateway cannot be scaled horizontally
-  without a shared run store.
+- **Runs are per process.** They live in the gateway's memory, in the agent's
+  process. A session cannot span processes, which matches how agent
+  executions run.
 - **No stdio transport.** Desktop MCP clients that launch servers over stdio
-  cannot use the gateway yet. A wrapper process
-  (`agentdna-gateway -- <server command>`) is the likely shape.
+  cannot use the gateway yet. Having the gateway launch the server command
+  itself and proxy its stdio is the likely shape.
 - **Client adapters.** The RSS and SQLite examples still use
   `install_mcp_client`. Once they are migrated, the adapters in
   `agentdna/mcp/client/` can be removed. Before then, check CrewAI's
@@ -401,5 +464,3 @@ agentdna/core.py                 AgentDNA.mcp_gateway(): the one-line entry poin
 - **Auth evidence.** The gateway sees the upstream's response status, so it
   could record `auth_status` for the server hop, which
   `mcp/server/observer.py` currently records as `unknown`. Not wired yet.
-- **Remote signing.** Needed before the gateway can be deployed anywhere
-  other than next to the agent.

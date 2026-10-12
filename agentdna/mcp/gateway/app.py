@@ -1,14 +1,9 @@
-"""The gateway's HTTP surface.
-
-Run endpoints, for the agent application:
-
-    POST   /runs              open a run on the workflow(s) the agent received
-    GET    /runs/{run_id}     the run's current frontier
-    DELETE /runs/{run_id}     close the run and return its final frontier
-
-MCP endpoint, for the agent's MCP client:
+"""The gateway's HTTP surface: one MCP endpoint per run and server.
 
     /runs/{run_id}/mcp/{server}   Streamable HTTP, forwarded to the named MCP server
+
+Runs themselves are opened and closed by calling `app.state.service`
+directly, so there is no endpoint for them.
 
 The MCP endpoint is a pass-through that understands just enough of the
 protocol to find tools/call requests and their responses, in either a JSON or
@@ -19,7 +14,6 @@ the GET stream, session headers - reaches the upstream server untouched.
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -33,10 +27,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
-from agentdna import AgentDNA
-from agentdna.error import RESULT_OK
 from agentdna.log import get_logger
-from agentdna.types import IntentWorkflow, load_workflow
 
 from .config import GatewayConfig
 from .propagation import (
@@ -50,6 +41,7 @@ from .propagation import (
     jsonrpc_error,
 )
 from .runs import Run, RunRegistry
+from .service import RunService
 
 logger = get_logger("agentdna.gateway")
 
@@ -78,89 +70,29 @@ _RESPONSE_HEADERS_DROPPED = {
 
 
 def create_app(
-    dna: AgentDNA,
     config: GatewayConfig,
     upstream: httpx.AsyncClient | None = None,
 ) -> Starlette:
     """Build the gateway application.
 
-    `upstream` is for tests; by default the gateway owns its own client.
+    Runs are opened and closed through `app.state.service`; tool calls in a
+    run are signed as the agent that opened it. `upstream` is for tests; by
+    default the gateway owns its own client.
     """
 
     runs = RunRegistry(ttl_seconds=config.run_ttl_seconds)
+    service = RunService(config, runs)
 
     @asynccontextmanager
     async def lifespan(app: Starlette) -> AsyncIterator[None]:
+        # For callers on other threads: run operations execute on this loop.
+        app.state.loop = asyncio.get_running_loop()
         if upstream is not None:
             yield  # attached below, and owned by whoever passed it in
             return
         async with httpx.AsyncClient() as client:
             app.state.upstream = client
             yield
-
-    # -- run endpoints ------------------------------------------------------
-
-    async def open_run(request: Request) -> Response:
-        if (denied := _check_token(request, config)) is not None:
-            return denied
-
-        try:
-            body = await request.json()
-            workflows = _workflows_from_body(body)
-        except (ValueError, TypeError) as exc:
-            return _problem(400, f"invalid run request: {exc}")
-
-        for workflow in workflows:
-            try:
-                code = await asyncio.to_thread(dna.verify, workflow)
-            except Exception as exc:
-                logger.error("gateway.run.verify_error", error=str(exc))
-                return _problem(503, f"unable to verify the workflow: {exc}")
-            if code != RESULT_OK:
-                return _problem(422, "the workflow failed AgentDNA verification", status_code=code)
-
-        run = runs.create(dna, workflows)
-        logger.info("gateway.run.opened", run_id=run.run_id, workflows=len(workflows))
-
-        return JSONResponse(
-            {
-                "run_id": run.run_id,
-                "mcp_path": f"/runs/{run.run_id}/mcp",
-                "servers": sorted(config.upstreams),
-                "ttl_seconds": config.run_ttl_seconds,
-            },
-            status_code=201,
-        )
-
-    async def run_status(request: Request) -> Response:
-        if (denied := _check_token(request, config)) is not None:
-            return denied
-
-        run = runs.get(request.path_params["run_id"])
-        if run is None:
-            return _problem(404, "unknown or expired run")
-        return JSONResponse(_run_body(run))
-
-    async def close_run(request: Request) -> Response:
-        if (denied := _check_token(request, config)) is not None:
-            return denied
-
-        run_id = request.path_params["run_id"]
-        run = runs.get(run_id)
-        if run is None:
-            return _problem(404, "unknown or expired run")
-
-        force = request.query_params.get("force", "").lower() in ("1", "true", "yes")
-        if run.calls_in_flight and not force:
-            return _problem(
-                409,
-                f"{run.calls_in_flight} tool call(s) still in flight; "
-                "wait for them or close with ?force=true",
-            )
-
-        runs.remove(run_id)
-        logger.info("gateway.run.closed", run_id=run_id, forced=force)
-        return JSONResponse(_run_body(run))
 
     # -- MCP endpoint -------------------------------------------------------
 
@@ -234,16 +166,13 @@ def create_app(
         return await _tool_call_response(run, pending, upstream_response)
 
     routes = [
-        Route("/healthz", lambda request: JSONResponse({"status": "ok"}), methods=["GET"]),
-        Route("/runs", open_run, methods=["POST"]),
-        Route("/runs/{run_id}", run_status, methods=["GET"]),
-        Route("/runs/{run_id}", close_run, methods=["DELETE"]),
         Route("/runs/{run_id}/mcp/{server}", mcp, methods=["GET", "POST", "DELETE"]),
         Route("/runs/{run_id}/mcp/{server}/", mcp, methods=["GET", "POST", "DELETE"]),
     ]
 
     app = Starlette(routes=routes, lifespan=lifespan)
     app.state.runs = runs
+    app.state.service = service
     if upstream is not None:
         app.state.upstream = upstream
     return app
@@ -393,44 +322,6 @@ def _parse_json(raw: bytes | str) -> Any:
         return json.loads(raw) if raw else None
     except ValueError:
         return None
-
-
-def _workflows_from_body(body: object) -> list[IntentWorkflow]:
-    if not isinstance(body, dict):
-        raise ValueError("body must be a JSON object")
-
-    raw = body.get("workflows")
-    if not isinstance(raw, list) or not raw:
-        raise ValueError("'workflows' must be a non-empty list")
-
-    workflows = []
-    for item in raw:
-        if isinstance(item, str):
-            item = json.loads(item)
-        if not isinstance(item, dict):
-            raise ValueError("each workflow must be an object")
-        workflow = load_workflow(item)
-        if not workflow.id or workflow.envelope is None:
-            raise ValueError("each workflow needs an id and an envelope")
-        workflows.append(workflow)
-    return workflows
-
-
-def _run_body(run: Run) -> dict[str, Any]:
-    return {
-        "run_id": run.run_id,
-        "workflows": [json.loads(w.serialize()) for w in run.context.get_workflows()],
-        "calls_in_flight": run.calls_in_flight,
-    }
-
-
-def _check_token(request: Request, config: GatewayConfig) -> Response | None:
-    if not config.token:
-        return None
-    scheme, _, presented = request.headers.get("authorization", "").partition(" ")
-    if scheme.lower() == "bearer" and hmac.compare_digest(presented.strip(), config.token):
-        return None
-    return _problem(401, "missing or invalid gateway token")
 
 
 def _problem(status: int, message: str, **extra: Any) -> JSONResponse:
