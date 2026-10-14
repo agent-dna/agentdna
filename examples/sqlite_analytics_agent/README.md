@@ -1,14 +1,28 @@
 # SQLite Analytics Agent
 
-An independent CrewAI workload that analyses a local SQLite database through a FastMCP stdio server. The database and deterministic sample data initialise automatically, and the agent can only inspect it through MCP.
+An independent CrewAI workload that analyses a local SQLite database through a FastMCP server. The database and deterministic sample data initialise automatically, and the agent can only inspect it through MCP.
 
 ## Architecture
 
-`sqlite-analytics-agent` uses CrewAI to plan an analytical task. It discovers MCP tools with `langchain_mcp_adapters`, which starts `mcp_server.py` via stdio. A small bridge presents those discovered tools to CrewAI while preserving the MCP capability boundary.
+`sqlite-analytics-agent` uses CrewAI to plan an analytical task. It discovers the MCP tools with CrewAI's own MCP client (`MCPServerAdapter` from `crewai-tools`), connected over Streamable HTTP to `mcp_server.py`.
 
 ```text
-sqlite-analytics-agent -> langchain_mcp_adapters (stdio) -> FastMCP -> SQLite
+sqlite-analytics-agent -> MCPServerAdapter -> AgentDNA MCP gateway -> FastMCP -> SQLite
 ```
+
+AgentDNA signs the agent's MCP tool calls through an MCP gateway that runs inside the agent's process. The CrewAI MCP client carries no AgentDNA patch; it is pointed at the gateway session's URL instead of the MCP server's:
+
+```py
+MCP_GATEWAY = MCPGateway({"sqlite": settings.sqlite_mcp_url})
+
+with MCP_GATEWAY.session(SQLITE_AGENT, adna_workflow) as session:   # verifies the incoming workflow
+    with sqlite_tools(session.url("sqlite")) as tools:              # MCPServerAdapter on the session URL
+        output = Crew(...).kickoff()
+
+reply_workflow = SQLITE_AGENT.build(payload=str(output), previous_workflows=session.workflows)
+```
+
+When a tool result cannot be verified, the gateway returns an error in its place, so the agent never acts on output that is missing from the provenance chain.
 
 ## Setup
 
@@ -51,17 +65,20 @@ python3 seed_data.py
 
 ### Manual
 
-From the `examples` parent directory, pass an analysis task to the Python CLI:
+From this project directory, start the MCP server, then pass an analysis task to the Python CLI:
 
 ```sh
-python  manual.py "Identify high-revenue products and unusual pending-order trends."
-```
+# Terminal 1
+python3 mcp_server.py
 
-The stdio MCP server is started and managed by the adapter. The manual CLI prints a human-readable report by default. Add `--json` after the prompt when a script needs the structured execution event instead. On Windows, replace `python3` with `python`.
+# Terminal 2
+python3 manual.py "Identify high-revenue products and unusual pending-order trends."
+```
+ The manual CLI prints a human-readable report by default. Add `--json` after the prompt when a script needs the structured execution event instead. On Windows, replace `python3` with `python`.
 
 ### Automated
 
-`automated.py` randomly selects one of ten predefined read-only analytical tasks for every execution. The platform launchers run that entrypoint and exit after one workload:
+`automated.py` randomly selects one of ten predefined read-only analytical tasks for every execution. With the MCP server running (`python3 mcp_server.py`):
 
 ```
 python3 automated.py

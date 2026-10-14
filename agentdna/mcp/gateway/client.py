@@ -183,6 +183,18 @@ class GatewaySession:
         embedded = self._open_gateway()
         return _wait(embedded, embedded.service.frontier(self.run_id)).context.get_workflows()
 
+    def advance(self, workflows: IntentWorkflow | list[IntentWorkflow]) -> None:
+        """Move the session's frontier forward to workflows the agent signed itself.
+
+        For hops that happen outside MCP - a hand-off to another agent, say -
+        so the session's next tool calls build on them. The workflows must
+        build on the session's current frontier (`frontier()`); the chain can
+        only be extended. Refused while tool calls are in flight.
+        """
+
+        embedded = self._open_gateway()
+        _wait(embedded, embedded.service.advance(self.run_id, _as_list(workflows)))
+
     def close(self, force: bool = False) -> list[IntentWorkflow]:
         """Close the session and return its final workflows. Idempotent."""
 
@@ -222,6 +234,10 @@ class GatewaySession:
         embedded = self._open_gateway()
         run = await _await(embedded, embedded.service.frontier(self.run_id))
         return run.context.get_workflows()
+
+    async def aadvance(self, workflows: IntentWorkflow | list[IntentWorkflow]) -> None:
+        embedded = self._open_gateway()
+        await _await(embedded, embedded.service.advance(self.run_id, _as_list(workflows)))
 
     async def aclose(self, force: bool = False) -> list[IntentWorkflow]:
         if not self.closed:
@@ -269,6 +285,10 @@ class GatewaySession:
     def _closed(self, workflows: list[IntentWorkflow]) -> None:
         self._workflows = workflows
         self.closed = True
+
+
+def _as_list(workflows: IntentWorkflow | list[IntentWorkflow]) -> list[IntentWorkflow]:
+    return [workflows] if isinstance(workflows, IntentWorkflow) else list(workflows)
 
 
 def _wait(embedded: EmbeddedGateway, coroutine: Coroutine[Any, Any, T]) -> T:

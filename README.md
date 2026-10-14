@@ -350,94 +350,42 @@ Consider the previous example with an MCP server added as the resource provider:
 Alice ─────────▶ Assistant ─────────▶ MCP Server
 ```
 
-To secure this interaction, AgentDNA must be integrated at the LLM execution layer, the MCP client layer, and the MCP server layer.
+To secure this interaction, AgentDNA is integrated on both sides of the MCP connection: the agent's MCP calls go through the AgentDNA MCP Gateway, and the MCP server runs the AgentDNA MCP Server Middleware.
 
-**1. LLM invocation**
+**1. MCP client side: the AgentDNA MCP Gateway**
 
-Assume the AI Assistant uses LangGraph to invoke the LLM:
+The gateway signs every MCP tool call the agent makes and verifies the MCP server's signed reply. It runs inside the agent's process and works with any Streamable HTTP MCP client, unmodified: the client is simply pointed at a gateway session URL instead of the MCP server's URL.
 
-```py
-result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
-final_message = result["messages"][-1]
-```
-
-AgentDNA provides `agentdna_context`() for maintaining the current workflow state during agent execution. MCP client integrations use this context to retrieve the current workflow and propagate it to MCP requests.
-
-AgentDNA context takes two params:
-
-- AgentDNA instance representing the current actor
-- Current `IntentWorkflow`
+Assume the AI Assistant uses LangGraph with `langchain-mcp-adapters`:
 
 ```py
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
 from agentdna.core import AgentDNA
-from agentdna.mcp.context import agentdna_context
+from agentdna.mcp.gateway import MCPGateway
 
 AGENT = AgentDNA(...)
+MCP_GATEWAY = MCPGateway({"rss": "http://127.0.0.1:8013/mcp"})   # once per process
 
-with agentdna_context(AGENT, existing_intent_workflow) as ctx:
+# existing_intent_workflow: the IntentWorkflow the Assistant received
+async with MCP_GATEWAY.session(AGENT, existing_intent_workflow) as session:   # verifies it
+    client = MultiServerMCPClient(
+        {"rss": {"transport": "streamable_http", "url": session.url("rss")}}
+    )
+    workflow = create_react_agent(llm, await client.get_tools())
     result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
-    final_message = result["messages"][-1]
 
-    # ctx.workflows consists of the update Intent Workflow(s) propagated
-    # from the MCP server
-    if len(ctx.workflows) == 0:
-        raise RuntimeError("No workflows were created during agent execution")
-
-    # Use ctx.workflows to build the IntentWorkflow and pass to the next actor
-    adna_workflow_from_agent = SQLITE_AGENT.build(
-        payload=str(output),
-        previous_workflows=ctx.workflows,
-    )
+# session.workflows: the final IntentWorkflow(s), including every tool call.
+# Build on them and pass the result to the next actor.
+adna_workflow_from_agent = AGENT.build(
+    payload=str(result["messages"][-1].content),
+    previous_workflows=session.workflows,
+)
 ```
 
-**2. MCP Client Adapter**
+The gateway adds the workflow to each MCP request's `_meta` field, so the MCP server can verify it before running the tool, and it checks the server's signed reply before the agent sees the result. See [MCP Gateway](#mcp-gateway) below for the details.
 
-AgentDNA provides framework-specific MCP client adapters that intercept MCP tool calls and propagate the current `IntentWorkflow` through MCP request metadata.
-
-The adapter should be installed in the application before the MCP client is used.
-
-For instance, when use `langchain-mcp-adapters` for building the MCP Client:
-
-```py
-from __future__ import annotations
-
-from langchain_core.tools import BaseTool
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.sessions import StreamableHttpConnection
-
-from config import settings
-
-# Import and use the AgentDNA MCP Client Adapter
-from agentdna.mcp.client.langchain import install_mcp_client
-install_mcp_client()
-
-def build_client() -> MultiServerMCPClient:
-    return MultiServerMCPClient(
-        {
-            "rss": StreamableHttpConnection(
-                transport="streamable_http",
-                url=settings.rss_mcp_url,
-                timeout=settings.mcp_timeout_seconds,
-                sse_read_timeout=settings.mcp_timeout_seconds,
-            )
-        },
-    )
-
-
-async def load_tools() -> list[BaseTool]:
-    """Discover the configured RSS server's tools; direct network access is prohibited for agents."""
-    return await build_client().get_tools()
-```
-
-The AgentDNA client adapter adds the workflow to the MCP request `_meta` field. The MCP server can then extract and verify the workflow before executing the requested tool.
-
-Currently supported MCP client integrations are:
-
-- [Langchain MCP Adaptors](https://github.com/langchain-ai/langchain-mcp-adapters) - `from agentdna.mcp.client.langchain import install_mcp_client`
-- [CrewAI Tools](https://github.com/crewAIInc/crewAI/tree/main/lib/crewai-tools) - `from agentdna.mcp.client.crewai import install_mcp_client`
-
-
-**3. MCP Server Middleware**
+**2. MCP Server Middleware**
 
 `AgentDNAMCPMiddleware` intercepts protected MCP requests on the server side and performs security checks before allowing the underlying MCP handler to execute.
 
@@ -542,7 +490,7 @@ Currently supported MCP server integrations:
 
 ### MCP Gateway
 
-The client adapters above work by patching a specific MCP client library. The **AgentDNA MCP Gateway** does the same job at the protocol boundary instead, so an agent can use **any** Streamable HTTP MCP client, unmodified. It comes with `agent-dna` and runs inside the agent's process: nothing extra to install, start or configure.
+The **AgentDNA MCP Gateway** works at the MCP protocol boundary, so an agent can use **any** Streamable HTTP MCP client, unmodified: LangChain, CrewAI, FastMCP or any other. It comes with `agent-dna` and runs inside the agent's process: nothing extra to install, start or configure.
 
 ```py
 from agentdna import AgentDNA
@@ -568,12 +516,12 @@ reply_workflow = AGENT.build(payload=str(result), previous_workflows=session.wor
 - Once the session is closed, `session.workflows` holds the final IntentWorkflow(s). Build the agent's response on them, then pass it to the next actor or `record()` it. Inside the block, `await session.aclose()` (or `session.close()`) returns them.
 - `with MCP_GATEWAY.session(...)` works the same way in synchronous code.
 - The gateway holds no identity of its own: one gateway can serve every agent in a process, each session signing as the agent that opened it.
+- For hops that happen outside MCP, such as one agent handing off to another, `await session.aadvance(workflow)` (or `session.advance(...)`) moves the session's chain forward to a workflow the agent signed itself, so its next tool calls build on it. `examples/adk_travel_swarm` uses it to sign every hand-off in a swarm of Google ADK agents. `examples/langgraph_fanout_research` shows the orchestrator–worker pattern: workers spawned at runtime share one identity, and each opens its session on its own signed delegation.
 
 Notes:
 
 - The gateway listens on a loopback port chosen by the OS, one per gateway, shared by all its sessions. Sessions are opened and closed in memory; the only HTTP endpoints are the session URLs.
 - `session.url(...)` contains an unguessable ID. Anyone who has it can make tool calls signed for that session, so treat it as a secret.
-- Do not also call `install_mcp_client()` on an MCP client that talks to the gateway.
 - When a tool result cannot be verified, the agent receives a JSON-RPC error (code `-32050`) instead of the result.
 
 ## Authentication evidence 

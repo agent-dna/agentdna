@@ -1,0 +1,6 @@
+google-adk>=2.11.0
+fastmcp==3.4.7
+httpx>=0.28.0
+python-dotenv>=1.0.0
+
+-e ../../../agentdna

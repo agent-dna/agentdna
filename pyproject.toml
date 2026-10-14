@@ -106,4 +106,4 @@ venvPath = "."
 venv = ".venv"
 include = ["agentdna"]
 # examples/ has its own heavy deps that aren't in the dev env; ruff still covers it, pyright does not.
-exclude = ["examples", ".venv", "**/__pycache__", "agentdna/mcp/client", "agentdna/mcp/server"]
+exclude = ["examples", ".venv", "**/__pycache__", "agentdna/mcp/server"]

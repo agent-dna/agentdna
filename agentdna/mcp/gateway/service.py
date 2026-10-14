@@ -51,6 +51,10 @@ class VerificationUnavailable(RunError):
     status = 503
 
 
+class NotAContinuation(RunError):
+    status = 400
+
+
 def mcp_path(run_id: str) -> str:
     """Where a run's MCP servers are reached: `{mcp_path}/{server name}`."""
     return f"/runs/{run_id}/mcp"
@@ -88,6 +92,42 @@ class RunService:
 
     async def frontier(self, run_id: str) -> Run:
         return self._get(run_id)
+
+    async def advance(self, run_id: str, workflows: list[IntentWorkflow]) -> list[IntentWorkflow]:
+        """Move the run's frontier forward to `workflows`, signed by the app itself.
+
+        For hops that happen outside MCP - a hand-off to another agent, say -
+        so the run's next tool calls build on them. The new workflows must
+        contain every workflow on the current frontier: the chain can only be
+        extended, never cut. Refused while tool calls are in flight, whose
+        results would otherwise land on a frontier they were not built for.
+        """
+
+        run = self._get(run_id)
+        if not workflows:
+            raise NotAContinuation("advance needs at least one workflow")
+        if run.calls_in_flight:
+            raise CallsInFlight(
+                f"{run.calls_in_flight} tool call(s) still in flight; advance after they finish"
+            )
+
+        reachable = {
+            (envelope.hash, envelope.signature)
+            for workflow in workflows
+            for envelope in workflow.unwrap()
+        }
+        current = run.context.get_workflows()
+        for workflow in current:
+            tip = workflow.get_latest_envelope()
+            if (tip.hash, tip.signature) not in reachable:
+                raise NotAContinuation(
+                    "the new workflows do not build on the run's current frontier"
+                )
+
+        async with run.context.lock:
+            run.context.workflows = list(workflows)
+        logger.info("gateway.run.advanced", run_id=run_id, workflows=len(workflows))
+        return run.context.get_workflows()
 
     async def close(self, run_id: str, force: bool = False) -> list[IntentWorkflow]:
         """Close the run and return its final frontier."""

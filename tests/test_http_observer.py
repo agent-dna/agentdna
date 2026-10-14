@@ -395,7 +395,7 @@ def test_the_server_side_still_falls_back_to_the_hop(serving):
 
 # --- installing before there is an AgentDNA --------------------------------
 #
-# `install_mcp_client()` runs at import, long before a run starts, so the
+# A client-side install runs at import, long before a run starts, so the
 # client side has no instance to hand over. It borrows one from the context.
 
 

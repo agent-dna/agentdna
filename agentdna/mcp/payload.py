@@ -12,9 +12,8 @@ def build_mcp_tool_call_payload(
     Build the canonical AgentDNA representation of one MCP
     tools/call request.
 
-    Every integration that signs a tools/call - the client adapters and
-    the gateway - uses this, so a call is recorded the same way whichever
-    path it took.
+    The gateway signs exactly this, so a tools/call is always recorded in
+    one canonical form, independent of the MCP client that made it.
 
     JSON-RPC framing is intentionally excluded.
     """

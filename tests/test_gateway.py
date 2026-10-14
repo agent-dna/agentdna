@@ -373,7 +373,7 @@ def test_tool_call_carries_a_workflow_built_on_the_run_frontier():
         assert envelope.from_ == "did:agent"
         assert sent.id == incoming.id
         assert [p.hash for p in envelope.parent_envelope] == [incoming.envelope.hash]
-        # Same canonical payload as the in-process client adapters.
+        # The canonical tools/call payload (agentdna.mcp.payload).
         assert json.loads(envelope.payload) == {
             "method": "tools/call",
             "params": {"name": "echo", "arguments": {"n": 1}},
@@ -927,3 +927,106 @@ def test_gateways_get_their_own_os_chosen_ports():
     finally:
         first.close()
         second.close()
+
+
+# -- advancing a session's frontier with hops made outside MCP -------------------------
+
+
+def test_advance_moves_the_frontier_and_the_next_call_builds_on_it():
+    async def scenario():
+        h = Harness(Upstream())
+        incoming = h.user.build(payload="plan a trip")
+        run_id = await h.open_run([incoming])
+
+        hop = h.agent.build(payload="handoff", previous_workflows=[incoming])
+        assert payloads(await h.service.advance(run_id, [hop])) == ["handoff"]
+
+        await h.call(run_id, "echo")
+        sent = workflow_from_metadata(h.upstream.seen[0]["params"]["_meta"])
+        assert [p.hash for p in sent.get_latest_envelope().parent_envelope] == [hop.envelope.hash]
+        assert payloads(await h.frontier(run_id)) == ["echo done"]
+
+    run(scenario())
+
+
+def test_advance_must_build_on_the_current_frontier():
+    from agentdna.mcp.gateway.service import NotAContinuation
+
+    async def scenario():
+        h = Harness(Upstream())
+        incoming = h.user.build(payload="plan a trip")
+        run_id = await h.open_run([incoming])
+
+        unrelated = h.agent.build(
+            payload="elsewhere", previous_workflows=[h.user.build(payload="x")]
+        )
+        with pytest.raises(NotAContinuation):
+            await h.service.advance(run_id, [unrelated])
+        with pytest.raises(NotAContinuation):
+            await h.service.advance(run_id, [])
+        assert [w.envelope.hash for w in await h.frontier(run_id)] == [incoming.envelope.hash]
+
+    run(scenario())
+
+
+def test_advance_is_refused_while_a_call_is_in_flight():
+    async def scenario():
+        h = Harness(Upstream())
+        incoming = h.user.build(payload="plan a trip")
+        run_id = await h.open_run([incoming])
+
+        call = asyncio.create_task(h.call(run_id, "wait"))
+        while h.upstream.waiting == 0:
+            await asyncio.sleep(0.01)
+        with pytest.raises(CallsInFlight):
+            await h.service.advance(
+                run_id, [h.agent.build(payload="hop", previous_workflows=[incoming])]
+            )
+
+        h.upstream.release.set()
+        await call
+
+    run(scenario())
+
+
+def test_a_handoff_between_two_agents_joins_their_chains(gateway, served_upstream):
+    """The swarm pattern: agent A hands off to agent B by signing a hop on both
+    their frontiers; B's session advances to it and B's tool calls build on it."""
+
+    from agentdna.mcp.gateway import GatewayError
+
+    upstream, _ = served_upstream
+    a, b = FakeDNA("agent-a"), FakeDNA("agent-b")
+    incoming = FakeDNA("user").build(payload="plan a trip")
+
+    async def scenario():
+        async with gateway.session(a, incoming) as sa, gateway.session(b, incoming) as sb:
+            await _tool_call(sa.url())  # A works first
+
+            hop = a.build(
+                payload="handoff to agent-b",
+                previous_workflows=[*await sa.afrontier(), *await sb.afrontier()],
+                recipient_id=b.get_actor_id(),
+            )
+            await sb.aadvance(hop)
+            await _tool_call(sb.url())  # then B, on top of the hand-off
+
+            with pytest.raises(GatewayError) as refused:
+                await sb.aadvance(a.build(payload="stale", previous_workflows=[incoming]))
+            assert refused.value.status == 400
+
+        return sa, sb
+
+    sa, sb = run(scenario())
+    signers = [
+        workflow_from_metadata(m["params"]["_meta"]).get_latest_envelope().from_
+        for m in upstream.seen
+    ]
+    assert signers == ["did:agent-a", "did:agent-b"]
+
+    # B's final chain runs: user -> A's call -> A's hand-off -> B's call.
+    [tip] = sb.workflows
+    chain = [e.payload for e in tip.unwrap()]
+    assert "handoff to agent-b" in chain
+    assert sum(p == "echo done" for p in chain) == 2
+    assert chain[-1] == "plan a trip"
