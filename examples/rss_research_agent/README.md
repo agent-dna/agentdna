@@ -8,8 +8,18 @@ An independent LangGraph orchestrator workload that researches public, explicitl
 
 ```text
 orchestrator -> security worker -----\
-                                      -> RSS MCP -> configured public feeds
+                                      -> AgentDNA Provenance Relay -> RSS MCP -> configured public feeds
 orchestrator -> technology worker ---/
+```
+
+Both workers reach the RSS MCP server through one AgentDNA Provenance Relay, which runs inside the process (`mcp_client.py`). Each worker opens its own relay session with the workflow the orchestrator handed it, so its tool calls are signed as that worker's own AgentDNA identity and chained onto the orchestrator's delegation. The `langchain_mcp_adapters` client carries no AgentDNA patch; it is pointed at the session's URL:
+
+```py
+async with PROVENANCE_RELAY.session(RSS_SECURITY_AGENT, adna_workflow) as session:   # verifies the incoming workflow
+    tools = await load_tools(session.url("rss"))
+    result = await agent.ainvoke(...)
+
+security_adna_workflow = RSS_SECURITY_AGENT.build(payload=..., previous_workflows=session.workflows)
 ```
 
 ## Setup
