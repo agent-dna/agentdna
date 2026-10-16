@@ -732,7 +732,9 @@ def test_each_agent_on_one_relay_gets_its_own_records(monkeypatch, tmp_path):
     monkeypatch.setenv(ENV_FILE, str(tmp_path / "evidence.jsonl"))
 
     sent = []
-    monkeypatch.setattr(sink, "send", lambda evidence, dna: sent.append((evidence.as_dict(), dna.api_key)))
+    monkeypatch.setattr(
+        sink, "send", lambda evidence, dna: sent.append((evidence.as_dict(), dna.api_key))
+    )
 
     agents = {}
     for name in ("a", "b"):
@@ -742,12 +744,19 @@ def test_each_agent_on_one_relay_gets_its_own_records(monkeypatch, tmp_path):
     def relay_forward(name, i):
         step = FakeEnvelope(run_id=f"run-{name}", signature=f"sig-{name}-{i}")
         httpobserver.record_call(
-            agents[name], step, SOURCE_CLIENT_OUT,
-            {"Authorization": CREDENTIAL}, "mcp.example.com", 200,
+            agents[name],
+            step,
+            SOURCE_CLIENT_OUT,
+            {"Authorization": CREDENTIAL},
+            "mcp.example.com",
+            200,
         )
 
-    calls = [threading.Thread(target=relay_forward, args=(name, i))
-             for i in range(20) for name in ("a", "b")]
+    calls = [
+        threading.Thread(target=relay_forward, args=(name, i))
+        for i in range(20)
+        for name in ("a", "b")
+    ]
     for call in calls:
         call.start()
     for call in calls:
