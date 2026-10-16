@@ -352,7 +352,7 @@ Alice ─────────▶ Assistant ─────────▶ MC
 
 To secure this interaction, AgentDNA is added on both sides of the MCP connection:
 
-- on the agent's side, the **Provenance Relay** signs every MCP tool call the agent makes;
+- on the agent's side, the **Provenance Relay** signs every MCP tool call the agent makes (it handles only agent-to-MCP-server traffic, not communication between agents);
 - on the MCP server's side, the **MCP Server Middleware** verifies each call before the tool runs, and signs its answer.
 
 ```text
@@ -368,6 +368,8 @@ Your agent keeps using the MCP client it already uses: `langchain-mcp-adapters`,
 1. signs the request as your agent and attaches the current `IntentWorkflow` to it;
 2. forwards the request to the real MCP server;
 3. checks the server's signed answer before your agent sees the result.
+
+The relay is only for an agent's calls to MCP servers. Communication between agents, such as one agent handing a task or its result to another, doesn't go through it: secure it with `build()` and `verify()`, as shown in [Securing Agent-User Interaction](#securing-agent-user-interaction).
 
 Using it takes three steps. Assume the AI Assistant uses LangGraph with `langchain-mcp-adapters`:
 
