@@ -11,7 +11,7 @@ coordinator ⇄ package_agent ⇄ security_agent ⇄ ecosystem_agent      Google
                     │               │                 │
                     └──────── AgentDNA Provenance Relay ────┘       one session per turn
                                     │
-                    package-intelligence MCP server                 FastMCP 3.4.7 + AgentDNA middleware
+                    package-intelligence MCP server                 FastMCP 3.4.7 + AgentDNA middleware + CBAC
                                     │
                     PyPI · pypistats · OSV.dev · deps.dev (OpenSSF Scorecard)
 ```
@@ -29,7 +29,7 @@ Each specialist's MCP tools are filtered to its own (`swarm.py`).
 
 ## How AgentDNA fits in
 
-All of the agent side is in `swarm.py`; the server side is `AgentDNAMCPMiddleware` in `mcp_server.py`.
+All of the agent side is in `swarm.py`. The server side is `AgentDNAMCPMiddleware` in `mcp_server.py`: it verifies each tool call's chain, checks that the calling agent is whitelisted, has the CBAC service (the `cbac` package's `authorize`) decide whether the call fits the user's intent, and signs the answer.
 
 - **An identity per member.** `identities()` creates the four members' `AgentDNA` instances, each registered with its policy from `policies/`. `manual.py` has the user sign the request, and records the finished chain.
 - **Each turn is a relay session.** `Custody.before_agent` is every member's `before_agent_callback`, so it runs whenever a member takes control. It opens a `ProvenanceRelay` session for that member on the workflow it just received: the user's request for the coordinator's first turn, a hand-off after that. Opening the session verifies the workflow, and the member's tool calls through it are signed as that member, on top of it.
@@ -78,7 +78,7 @@ ADK: security_agent runs; each of its tool calls is signed on top of the hand-of
 | File | What it is |
 |---|---|
 | `package_tools.py` | The tools, as plain async functions; no MCP or ADK code |
-| `mcp_server.py` | Serves the tools over MCP (Streamable HTTP), behind AgentDNA's middleware |
+| `mcp_server.py` | Serves the tools over MCP (Streamable HTTP), behind AgentDNA's middleware and CBAC |
 | `swarm.py` | The agents, their instructions and tools, their AgentDNA identities and chain of custody, and `run_swarm()` |
 | `policies/` | Each member's AgentDNA policy, registered with its identity |
 | `manual.py` | Runs one request from the command line |

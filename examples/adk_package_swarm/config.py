@@ -53,6 +53,8 @@ class Settings:
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL") or "https://agentdna-admin.agentdna.io"
     user_name: str = os.getenv("USER_NAME", "")
     mcp_server_name: str = os.getenv("MCP_SERVER_NAME") or "package-intelligence-mcp"
+    # CBAC decision service. Empty: the `cbac` package's own default (production).
+    cbac_url: str = os.getenv("CBAC_URL", "")
     coordinator_agent_name: str = os.getenv("COORDINATOR_AGENT_NAME") or "package-coordinator"
     package_agent_name: str = os.getenv("PACKAGE_AGENT_NAME") or "package-agent"
     security_agent_name: str = os.getenv("SECURITY_AGENT_NAME") or "package-security-agent"
