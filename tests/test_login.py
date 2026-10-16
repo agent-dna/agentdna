@@ -13,7 +13,7 @@ from agentdna.provenance import Provenance
 
 def _offline(monkeypatch, email="alice@corp.com", run_id="RUN-123", api_key="KEY-abc"):
     monkeypatch.setattr(core, "originate", lambda **k: (run_id, email, api_key))
-    monkeypatch.setattr(AgentDNA, "create_user_card", lambda self: "")  # no network
+    monkeypatch.setattr(AgentDNA, "create_user_card", lambda self: "card-offline")  # no network
 
 
 def test_top_level_login_is_the_classmethod():
@@ -40,6 +40,17 @@ def test_carried_run_id_lands_on_the_envelope(monkeypatch, tmp_path):
     wf = user.build(payload="p", recipient_id="svc")
 
     assert wf.envelope.run_id == "RUN-123"
+
+
+def test_later_envelopes_copy_the_run_id(monkeypatch, tmp_path):
+    _offline(monkeypatch)
+    monkeypatch.setattr(Provenance, "sign_envelope", lambda self, env: "sig")
+
+    user = agentdna.login(skip_actor_id_registration=True, config_dir=str(tmp_path))
+    asked = user.build(payload="p", recipient_id="svc")
+    answer = user.build(payload="done", previous_workflows=asked)
+
+    assert answer.envelope.run_id == "RUN-123"
 
 
 def test_no_idp_login_has_empty_run_id_and_carries_key(monkeypatch, tmp_path):
