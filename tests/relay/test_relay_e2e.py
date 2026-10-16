@@ -21,10 +21,11 @@ import pytest
 import uvicorn
 from fastmcp import Client, FastMCP
 
+import agentdna.mcp.server.checks as server_checks
 import agentdna.mcp.server.fastmcp as fastmcp_middleware
 from agentdna.core import AgentDNA
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
-from agentdna.mcp.relay import ProvenanceRelay, WorkflowRejected
+from agentdna.mcp.relay import ChainTerminated, ProvenanceRelay, WorkflowRejected
 from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware
 from agentdna.types import ACTOR_TYPE_TOOL, VERIFY_HEAVY
 from tests.conftest import CONFIG_DIR, DUMMY_API_KEY, ONLINE_PROVENANCE_NODE
@@ -230,3 +231,53 @@ def test_unknown_run_never_reaches_the_server(servers, user, agent):
             assert response.status_code == 404
     finally:
         mcp.close()
+
+
+def test_in_process_relay_ends_the_run_when_the_server_refuses_a_call(monkeypatch, user, agent):
+    """A CBAC denial: the tool never runs, the server records the refusal, and the run ends."""
+
+    monkeypatch.setattr(fastmcp_middleware, "agent_whitelist_check", lambda *args, **kwargs: None)
+    recorded: list[int] = []
+    monkeypatch.setattr(
+        server_checks,
+        "build_and_record_failed_workflow",
+        lambda dna, payload, incoming_workflows, verification_code: recorded.append(
+            verification_code
+        ),
+    )
+
+    async def deny(*args):
+        return "deny", 3002, "hash-of-the-decision"
+
+    ran: list[bool] = []
+    guarded = FastMCP("guarded")
+    guarded.add_middleware(AgentDNAMCPMiddleware(_tool_actor(), cbac_fn=deny))
+
+    @guarded.tool
+    def secret() -> str:
+        """Reads the protected resource."""
+        ran.append(True)
+        return "the secret"
+
+    url, server = _serve(guarded.http_app(path="/mcp"))
+    relay = ProvenanceRelay({"guarded": f"{url}/mcp"})
+
+    async def agent_run():
+        async with relay.session(agent, user.build(payload="read the secret")) as session:
+            async with Client(session.url()) as client:
+                refusal = await client.call_tool("secret", raise_on_error=False)
+                assert refusal.is_error
+                # The relay refuses anything more in this run.
+                with pytest.raises(Exception, match="chain has ended"):
+                    await client.call_tool("secret")
+
+    try:
+        with pytest.raises(ChainTerminated) as ended:
+            asyncio.run(agent_run())
+    finally:
+        relay.close()
+        server.should_exit = True
+
+    assert ran == []  # the resource was never touched
+    assert recorded == [3002]  # the server recorded the refusal
+    assert "did not pass CBAC verification" in ended.value.reason
