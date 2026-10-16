@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import suppress
 from dataclasses import dataclass, field
 from functools import cache
 from pathlib import Path
@@ -326,8 +327,10 @@ async def run_swarm(
                     run.result, run.answered_by = text, event.author
         workflows = await custody.close()
     except BaseException:
+        # End the last turn; its error, if any, is the one already being raised.
         if custody.session is not None:
-            await custody.close(force=True)
+            with suppress(Exception):
+                await custody.close(force=True)
         raise
     finally:
         await runner.close()  # also closes the MCP toolsets

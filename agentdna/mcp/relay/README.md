@@ -65,14 +65,23 @@ Tool calls that overlap in time form a *batch*. Every call in a batch is signed 
 
 The agent never acts on a result that is missing from the chain. When the relay can't sign a request or can't verify an answer, the agent gets a JSON-RPC error with code `-32050` instead of the result.
 
-| What happened | What the agent gets | Frontier |
+A server passes a successor workflow down only for a success (`1000`) or a tool execution failure (`4001`). Any other failure, such as a whitelist, CoCA or CBAC check, is recorded on the provenance layer by the server, and a recorded IntentWorkflow is never passed forward: that chain has ended. The same goes for an answer the relay itself records because it fails verification. When the chain ends, so does the run:
+
+- the agent sees the error as it was worded;
+- every further tool call in the run is refused by the relay, without reaching the server;
+- closing the session raises `ChainTerminated` instead of returning workflows, so there is nothing to build on or pass forward.
+
+The relay can't stop the agent's framework in the middle of the failing call, because MCP clients hand error results back to the model as data. Closing the session is where the run stops, and until then nothing more reaches the server.
+
+| What happened | What the agent gets | The run |
 |---|---|---|
-| Successor verified | the server's result | moves to the successor |
-| No successor, or one not built on this request | `-32050` error | unchanged |
-| Successor fails verification | `-32050` error; the failure is recorded on the provenance layer | unchanged |
-| Tool error, recorded by the server as a tool execution failure (`4001`) | the server's error result | moves to the failure envelope |
-| Any other error result, or a JSON-RPC error | the server's error, unchanged | unchanged |
-| Request can't be signed, or the server is unreachable | `-32050` error | unchanged |
+| Successor verified | the server's result | the frontier moves to the successor |
+| Tool error, recorded by the server as a tool execution failure (`4001`) | the server's error result | the frontier moves to the failure envelope |
+| No successor on a successful result, or one not built on this request | `-32050` error | goes on; the frontier is unchanged |
+| Request can't be signed, or the server is unreachable | `-32050` error | goes on; the frontier is unchanged |
+| Server refused the call: an error result without a `4001` successor, or a JSON-RPC error | the server's error, unchanged | **ends** |
+| Successor fails verification | `-32050` error; the relay records the failure | **ends** |
+| Any tool call after the run ended | `-32050` error | stays ended |
 
 ## API
 
@@ -89,12 +98,16 @@ Create one relay per process and reuse it. It holds no identity of its own: each
 | | |
 |---|---|
 | `url(name=None)` | The MCP URL to give the agent's MCP client for server `name`. `name` may be left out when the relay fronts a single server. |
-| `workflows` | The final workflow(s), once the session is closed. Raises while it is open. |
+| `workflows` | The final workflow(s), once the session is closed. Raises while it is open, and raises `ChainTerminated` if the run's chain ended. |
 | `frontier()` / `await afrontier()` | The workflows the tool calls have produced so far. |
 | `advance(workflows)` / `await aadvance(...)` | Moves the frontier forward to workflows the agent signed itself, for hops outside MCP such as a hand-off to another agent. The new workflows must contain the current frontier, and it is refused while calls are in flight. |
-| `close(force=False)` / `await aclose(force=False)` | Closes the session and returns its final workflows. Refused while calls are in flight, unless `force`. Leaving the `with` block closes it, with `force` when the block raised. |
+| `close(force=False)` / `await aclose(force=False)` | Closes the session and returns its final workflows. Refused while calls are in flight, unless `force`. Raises `ChainTerminated` instead if the run's chain ended. Leaving the `with` block closes it, with `force` when the block raised. |
 
-Errors: `RelayError` (with `.status` and `.body`) when the relay refuses a session operation; `WorkflowRejected`, a `RelayError` with `.status_code` (the AgentDNA verification code), when the incoming workflow fails verification.
+Errors, all `RelayError`s (with `.status` and `.body`):
+
+- `RelayError` when the relay refuses a session operation;
+- `WorkflowRejected`, with `.status_code` (the AgentDNA verification code), when the incoming workflow fails verification;
+- `ChainTerminated`, with `.reason` (as worded by whoever ended the chain) and `.status_code` when there is one, from closing a session, or reading its `workflows`, after the run's chain ended.
 
 ## Inside the process
 

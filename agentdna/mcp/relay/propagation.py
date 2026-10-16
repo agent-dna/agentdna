@@ -7,9 +7,17 @@ For each call:
 Fail-closed. A successful tool result is only returned to the agent once its
 successor has been verified. When it cannot be, the result is replaced by a
 JSON-RPC error, so the agent never acts on output that is missing from the
-provenance chain. Error results pass through unchanged - they carry no output
-to act on - but only advance the frontier when the server recorded them as a
-tool execution failure.
+provenance chain.
+
+A server passes a successor down only for a success (1000) or a tool
+execution failure (4001). Any other failure - a whitelist, CoCA or CBAC check,
+say - is recorded on the provenance layer by the server, and a recorded
+IntentWorkflow is never passed forward: that chain has ended. The server
+reports it as an error result without a 4001 successor (FastMCP 3) or as a
+JSON-RPC error (FastMCP 4); either one ends the run. The same holds
+when the relay itself records a successor that failed verification. Either
+way the run ends: the agent sees the error, every further tool call in the
+run is refused, and closing the session raises instead of returning a frontier.
 """
 
 from __future__ import annotations
@@ -84,6 +92,11 @@ async def begin_tool_call(run: Run, message: dict[str, Any]) -> PendingCall:
     Unrelated `_meta` fields and namespaces are preserved. AgentDNA owns
     `_meta.agentdna` and overwrites whatever a client put there.
     """
+    if run.ended is not None:
+        raise ToolCallRejected(
+            f"this run's chain has ended ({run.ended.reason}); no further tool calls are made"
+        )
+
     params = message.get("params")
     if not isinstance(params, dict):
         raise ToolCallRejected("tools/call request has no param object")
@@ -157,6 +170,13 @@ async def _finish(pending: PendingCall, response: dict[str, Any]) -> dict[str, A
     context = run.context
 
     if "error" in response:
+        # No successor was passed down: the server refused the call before or
+        # in its checks. FastMCP 4 reports a middleware refusal this way, as an
+        # "Internal server error", so it cannot be told apart from a protocol
+        # error - fail closed and end the run either way.
+        error = response["error"]
+        message = error.get("message") if isinstance(error, dict) else None
+        _end_run(run, str(message or "the MCP server refused the tool call"), None)
         return response
 
     result = response.get("result")
@@ -178,6 +198,14 @@ async def _finish(pending: PendingCall, response: dict[str, Any]) -> dict[str, A
             or successor.envelope is None
             or successor.envelope.status_code != TOOL_EXECUTION_FAILED
         ):
+            # The server refused the call - one of its checks failed - and
+            # recorded it. That chain has ended, and so has the run.
+            status_code = (
+                successor.envelope.status_code if successor and successor.envelope else None
+            )
+            _end_run(
+                run, _result_text(result) or "the MCP server refused the tool call", status_code
+            )
             return response
 
     if successor is None or successor.envelope is None:
@@ -198,6 +226,7 @@ async def _finish(pending: PendingCall, response: dict[str, Any]) -> dict[str, A
 
     if verification_code != RESULT_OK:
         await _record_verification_failure(pending, successor, verification_code)
+        _end_run(run, "an MCP server's answer failed AgentDNA verification", verification_code)
         return _reject(
             pending,
             "upstream AgentDNA successor workflow failed verification",
@@ -224,6 +253,26 @@ def _descends_from(successor: IntentWorkflow, request_workflow: IntentWorkflow) 
     return any(
         parent.hash == request_envelope.hash and parent.signature == request_envelope.signature
         for parent in successor_envelope.parent_envelope or []
+    )
+
+
+def _end_run(run: Run, reason: str, status_code: int | None) -> None:
+    run.end(reason, status_code)
+    logger.warning("relay.run.ended", run_id=run.run_id, reason=reason, status_code=status_code)
+
+
+def _result_text(result: dict[str, Any]) -> str:
+    """The text of a tool result's content, as the server worded it."""
+
+    content = result.get("content")
+    if not isinstance(content, list):
+        return ""
+    return "\n".join(
+        item["text"]
+        for item in content
+        if isinstance(item, dict)
+        and item.get("type") == "text"
+        and isinstance(item.get("text"), str)
     )
 
 

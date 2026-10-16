@@ -19,6 +19,7 @@ from google.genai import types
 from swarm import TOOLS, Custody, Handoff, SessionToolset, build_swarm, run_swarm
 
 from agentdna.helpers import _hash_content
+from agentdna.mcp.relay import ChainTerminated
 from agentdna.types import Envelope, IntentWorkflow
 
 # Each specialist's scripted turn: (tool to call, its arguments, who to hand off to).
@@ -123,6 +124,7 @@ class FakeSession:
         self.frontier = [received] if isinstance(received, IntentWorkflow) else list(received)
         self.closed = False
         self.forced = False
+        self.ended: str | None = None  # set when a server refuses a call
 
     async def aopen(self):
         self.relay.current = self
@@ -133,6 +135,8 @@ class FakeSession:
 
     async def aclose(self, force: bool = False):
         self.closed, self.forced = True, force
+        if self.ended is not None:
+            raise ChainTerminated(410, {"reason": self.ended})
         return list(self.frontier)
 
     def call(self, tool: str) -> None:
@@ -320,3 +324,25 @@ def test_a_session_toolset_follows_the_current_session():
     assert toolset.current is not first
     assert toolset.current._connection_params.url == "http://relay/runs/b/mcp/packages"
     assert toolset.current.tool_filter == ["package_info"]
+
+
+def test_a_refused_tool_call_stops_the_run(relay):
+    """The server refused package_agent's call and recorded it: the chain has
+    ended, so the run stops at the next hand-off, and nothing is signed on it."""
+
+    tools = stub_tools(relay)
+
+    def package_info(name: str) -> dict:
+        relay.current.ended = "did not pass CBAC verification"
+        return {"isError": True}
+
+    tools["package_agent"] = [package_info]
+
+    with pytest.raises(ChainTerminated) as ended:
+        asyncio.run(
+            run_swarm(USER.build(payload="Should we adopt demo?"), tools=tools, model=ScriptedLlm())
+        )
+
+    assert ended.value.reason == "did not pass CBAC verification"
+    assert [s.agent.name for s in relay.sessions] == ["coordinator", "package_agent"]
+    assert all(s.closed for s in relay.sessions)

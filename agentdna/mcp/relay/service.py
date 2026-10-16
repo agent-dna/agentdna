@@ -53,6 +53,12 @@ class NotAContinuation(RunError):
     status = 400
 
 
+class RunEnded(RunError):
+    """The run's chain ended: a failure was recorded, so it has no frontier to return."""
+
+    status = 410
+
+
 def mcp_path(run_id: str) -> str:
     """Where a run's MCP servers are reached: `{mcp_path}/{server name}`."""
     return f"/runs/{run_id}/mcp"
@@ -84,7 +90,7 @@ class RunService:
                 )
 
         run = self.runs.create(agent, workflows)
-        logger.info("relay.run.opened", run_id=run.run_id, workflows=len(workflows))
+        logger.info("agentdna.relay.run.opened", run_id=run.run_id, workflows=len(workflows))
         return run
 
     async def frontier(self, run_id: str) -> Run:
@@ -100,6 +106,7 @@ class RunService:
         """
 
         run = self._get(run_id)
+        _refuse_if_ended(run)
         if not workflows:
             raise NotAContinuation("advance needs at least one workflow")
         if run.calls_in_flight:
@@ -129,6 +136,10 @@ class RunService:
         """Close the run and return its final frontier."""
 
         run = self._get(run_id)
+        if run.ended is not None:
+            self.runs.remove(run_id)
+            logger.info("relay.run.closed", run_id=run_id, forced=force, ended=True)
+            _refuse_if_ended(run)
         if run.calls_in_flight and not force:
             raise CallsInFlight(
                 f"{run.calls_in_flight} tool call(s) still in flight; "
@@ -144,3 +155,12 @@ class RunService:
         if run is None:
             raise RunNotFound("unknown or expired run")
         return run
+
+
+def _refuse_if_ended(run: Run) -> None:
+    if run.ended is not None:
+        raise RunEnded(
+            f"the run's chain has ended: {run.ended.reason}",
+            reason=run.ended.reason,
+            status_code=run.ended.status_code,
+        )

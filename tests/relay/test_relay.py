@@ -21,12 +21,13 @@ from starlette.routing import Route
 from agentdna.error import RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.helpers import _hash_content
 from agentdna.mcp.metadata import workflow_from_metadata, workflow_to_metadata
-from agentdna.mcp.relay import ProvenanceRelay, WorkflowRejected
+from agentdna.mcp.relay import ChainTerminated, ProvenanceRelay, WorkflowRejected
 from agentdna.mcp.relay.app import create_app
 from agentdna.mcp.relay.config import ConfigError, ProvenanceRelayConfig
 from agentdna.mcp.relay.propagation import RELAY_ERROR
 from agentdna.mcp.relay.service import (
     CallsInFlight,
+    RunEnded,
     RunNotFound,
     WorkflowFailedVerification,
 )
@@ -34,6 +35,7 @@ from agentdna.types import Envelope, IntentWorkflow
 
 UPSTREAM_URL = "http://upstream/mcp"
 VERIFICATION_FAILED = 2003
+CBAC_DENIED = 3002
 
 
 class FakeDNA:
@@ -163,6 +165,16 @@ class Upstream:
             return {"resultType": "input_required", "inputRequests": {}, "requestState": "s"}
 
         assert incoming is not None, "the relay must attach a workflow to every tools/call"
+
+        if tool == "refused_with_successor":
+            successor = self.dna.build(
+                payload="denied", previous_workflows=incoming, verification_code=CBAC_DENIED
+            )
+            return {
+                "content": [{"type": "text", "text": "denied by CBAC"}],
+                "isError": True,
+                "_meta": workflow_to_metadata(successor),
+            }
 
         if tool == "tool_fails":
             successor = self.dna.build(
@@ -555,7 +567,7 @@ def test_tool_execution_failure_is_returned_and_kept_in_the_chain():
     run(scenario())
 
 
-@pytest.mark.parametrize("tool", ["refused", "protocol_error", "input_required"])
+@pytest.mark.parametrize("tool", ["input_required"])
 def test_results_without_a_successor_pass_through_and_leave_the_frontier(tool):
     async def scenario():
         h = Harness(Upstream())
@@ -572,6 +584,119 @@ def test_results_without_a_successor_pass_through_and_leave_the_frontier(tool):
     def _expected(tool):
         result = Upstream().result(tool, None)
         return {"error": result} if tool == "protocol_error" else {"result": result}
+
+    run(scenario())
+
+
+# -- a chain that ends --------------------------------------------------------------
+
+
+@pytest.mark.parametrize("sse", [False, True])
+@pytest.mark.parametrize(
+    ("tool", "reason", "status_code"),
+    [
+        # FastMCP 3: an error result without a successor.
+        ("refused", "not whitelisted", None),
+        # An error result whose successor is not a tool execution failure (4001).
+        ("refused_with_successor", "denied by CBAC", CBAC_DENIED),
+        # FastMCP 4: a JSON-RPC error.
+        ("protocol_error", "bad arguments", None),
+    ],
+)
+def test_a_refused_call_ends_the_run(sse, tool, reason, status_code):
+    """The server recorded the refusal, so the chain ends: nothing more is called or returned."""
+
+    async def scenario():
+        h = Harness(Upstream(sse=sse))
+        run_id = await h.open_run()
+
+        # The agent sees the server's refusal as it was worded.
+        answer = await h.call(run_id, tool)
+        if "error" in answer:
+            assert answer["error"]["message"] == reason
+        else:
+            assert answer["result"]["isError"] is True
+            assert answer["result"]["content"][0]["text"] == reason
+
+        # Every further tool call is refused without reaching the server.
+        calls_seen = len(h.upstream.seen)
+        refused = await h.call(run_id, "echo")
+        assert refused["error"]["code"] == RELAY_ERROR
+        assert "chain has ended" in refused["error"]["message"]
+        assert len(h.upstream.seen) == calls_seen
+
+        # Closing returns no frontier to build on, and forgets the run.
+        with pytest.raises(RunEnded) as ended:
+            await h.service.close(run_id)
+        assert ended.value.details == {"reason": reason, "status_code": status_code}
+        with pytest.raises(RunNotFound):
+            await h.service.close(run_id)
+
+    run(scenario())
+
+
+def test_a_successor_failing_verification_ends_the_run():
+    """The relay records the failed verification itself, so the chain ends there too."""
+
+    async def scenario():
+        h = Harness(Upstream())
+        FakeDNA.distrusted = {"did:mallory"}
+        run_id = await h.open_run()
+
+        await h.call(run_id, "forged")
+        refused = await h.call(run_id, "echo")
+        assert "chain has ended" in refused["error"]["message"]
+
+        with pytest.raises(RunEnded) as ended:
+            await h.service.close(run_id)
+        assert ended.value.details["status_code"] == VERIFICATION_FAILED
+
+    run(scenario())
+
+
+def test_an_ended_run_cannot_be_advanced():
+    async def scenario():
+        h = Harness(Upstream())
+        run_id = await h.open_run()
+        await h.call(run_id, "refused")
+
+        [incoming] = await h.frontier(run_id)
+        with pytest.raises(RunEnded):
+            await h.service.advance(
+                run_id, [h.agent.build(payload="hop", previous_workflows=incoming)]
+            )
+
+    run(scenario())
+
+
+def test_an_ended_run_closes_even_with_a_call_in_flight():
+    async def scenario():
+        h = Harness(Upstream())
+        run_id = await h.open_run()
+        waiting = asyncio.create_task(h.call(run_id, "wait"))
+        while h.upstream.waiting == 0:
+            await asyncio.sleep(0.01)
+
+        await h.call(run_id, "refused")
+        with pytest.raises(RunEnded):
+            await h.service.close(run_id)
+
+        h.upstream.release.set()
+        await waiting
+
+    run(scenario())
+
+
+def test_a_tool_execution_failure_does_not_end_the_run():
+    """4001 is the one failure whose successor the server passes down: the chain goes on."""
+
+    async def scenario():
+        h = Harness(Upstream())
+        run_id = await h.open_run()
+
+        await h.call(run_id, "tool_fails")
+        await h.call(run_id, "echo")
+        assert payloads(await h.service.close(run_id)) == ["echo done"]
 
     run(scenario())
 
@@ -1032,3 +1157,35 @@ def test_a_handoff_between_two_agents_joins_their_chains(relay, served_upstream)
     assert "handoff to agent-b" in chain
     assert sum(p == "echo done" for p in chain) == 2
     assert chain[-1] == "plan a trip"
+
+
+def test_a_session_whose_chain_ended_raises_on_close(relay):
+    agent = FakeDNA("agent")
+
+    async def scenario():
+        with pytest.raises(ChainTerminated) as ended:
+            async with relay.session(agent, FakeDNA("user").build(payload="x")) as session:
+                refusal = await _tool_call(session.url(), "refused")
+                assert refusal["result"]["isError"] is True
+                refused = await _tool_call(session.url(), "echo")
+                assert "chain has ended" in refused["error"]["message"]
+
+        assert ended.value.reason == "not whitelisted"
+        assert ended.value.status == 410
+        # Closed, with nothing to build on: reading the workflows raises the same.
+        assert session.closed
+        with pytest.raises(ChainTerminated):
+            session.workflows  # noqa: B018
+        with pytest.raises(ChainTerminated):
+            await session.aclose()
+
+    run(scenario())
+
+
+def test_a_sync_session_whose_chain_ended_raises_on_close(relay):
+    async def refuse(url):
+        return await _tool_call(url, "refused")
+
+    with pytest.raises(ChainTerminated):
+        with relay.session(FakeDNA("agent"), FakeDNA("user").build(payload="x")) as session:
+            asyncio.run(refuse(session.url()))
