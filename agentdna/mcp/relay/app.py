@@ -120,7 +120,10 @@ def create_app(
                 except ToolCallRejected as exc:
                     return JSONResponse(
                         jsonrpc_error(message["id"], f"AgentDNA relay: {exc}"),
-                        status_code=400,
+                        # A call refused because the run ended is a well-formed
+                        # request: answer it as a JSON-RPC error, which MCP clients
+                        # report as a refused call, not as a broken connection.
+                        status_code=200 if run.ended is not None else 400,
                     )
                 except Exception as exc:
                     logger.error("relay.tool_call.build_failed", run_id=run.run_id, error=str(exc))

@@ -19,12 +19,23 @@ from agentdna.mcp.context import AgentDNAContext
 from agentdna.types import IntentWorkflow
 
 
+@dataclass(frozen=True)
+class Termination:
+    """Why a run's chain ended: a failure that was recorded on the provenance layer."""
+
+    reason: str
+    status_code: int | None = None
+
+
 @dataclass
 class Run:
     run_id: str
     context: AgentDNAContext
     created_at: float = field(default_factory=time.monotonic)
     last_used: float = field(default_factory=time.monotonic)
+    # Set once the chain has ended. A recorded IntentWorkflow is never passed
+    # forward, so an ended run makes no more tool calls and returns no frontier.
+    ended: Termination | None = None
 
     @property
     def calls_in_flight(self) -> int:
@@ -33,6 +44,12 @@ class Run:
 
     def touch(self) -> None:
         self.last_used = time.monotonic()
+
+    def end(self, reason: str, status_code: int | None = None) -> None:
+        """End the run's chain. The first reason given is kept."""
+
+        if self.ended is None:
+            self.ended = Termination(reason, status_code)
 
 
 class RunRegistry:

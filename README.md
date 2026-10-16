@@ -406,6 +406,7 @@ Good to know:
 - `session.url("rss")` uses the name from step 1. One relay can front several MCP servers: call `session.url(name)` for each.
 - The agent doesn't have to call a tool. If it calls none, `session.workflows` is simply the workflow it received.
 - If the incoming workflow fails verification, opening the session raises `WorkflowRejected`. If an MCP server's answer can't be verified, the agent gets an error instead of the result, so it never acts on output that's missing from the chain.
+- If an MCP server refuses a tool call (its whitelist, CoCA or CBAC check fails), it records the refusal, and that chain has ended. The relay then refuses the session's further tool calls, and closing the session raises `ChainTerminated`: stop the run there, and don't build on or pass on its workflow.
 - In synchronous code, use `with` instead of `async with`.
 - MCP servers must be reachable over Streamable HTTP.
 

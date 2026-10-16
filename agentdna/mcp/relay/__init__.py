@@ -13,6 +13,18 @@ The relay runs inside the agent's process, on a background thread, and starts
 on first use.
 """
 
-from .client import ProvenanceRelay, RelayError, RelaySession, WorkflowRejected
+from .client import (
+    ChainTerminated,
+    ProvenanceRelay,
+    RelayError,
+    RelaySession,
+    WorkflowRejected,
+)
 
-__all__ = ["ProvenanceRelay", "RelayError", "RelaySession", "WorkflowRejected"]
+__all__ = [
+    "ChainTerminated",
+    "ProvenanceRelay",
+    "RelayError",
+    "RelaySession",
+    "WorkflowRejected",
+]

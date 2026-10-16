@@ -13,6 +13,11 @@ through `session.url(...)` - by any MCP client, unpatched - is signed as AGENT
 and builds on it. Once the session is closed, `session.workflows` is the final
 IntentWorkflow(s): the incoming workflow plus every tool call made through it.
 `with` works the same way in synchronous code.
+
+If an MCP server refuses a call - a whitelist, CoCA or CBAC check fails - it
+records the refusal and that chain ends. The relay then refuses every further
+tool call in the session, and closing it raises `ChainTerminated`: there are
+no workflows to build on or pass forward.
 The relay runs inside this process and starts on first use. It holds no
 identity of its own, so one relay can serve every agent in the process,
 each session signing as the agent that opened it.
@@ -22,7 +27,8 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from collections.abc import Coroutine, Mapping
+from collections.abc import Coroutine, Iterator, Mapping
+from contextlib import contextmanager
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, TypeVar
 
@@ -30,7 +36,7 @@ from agentdna.types import IntentWorkflow
 
 from .config import ProvenanceRelayConfig
 from .runs import Run
-from .service import RunError, mcp_path
+from .service import RunEnded, RunError, mcp_path
 
 if TYPE_CHECKING:
     from agentdna import AgentDNA
@@ -52,6 +58,25 @@ class RelayError(RuntimeError):
 
 class WorkflowRejected(RelayError):
     """The incoming workflow failed AgentDNA verification."""
+
+    @property
+    def status_code(self) -> int | None:
+        return self.body.get("status_code") if isinstance(self.body, dict) else None
+
+
+class ChainTerminated(RelayError):
+    """The run's chain ended: an MCP server refused a tool call, or the relay
+    could not verify an answer, and the failure was recorded on the provenance
+    layer.
+
+    A recorded IntentWorkflow is never passed forward, so the session has no
+    workflows to return: do not build on the run, or pass it on. `reason` is
+    the refusal as worded by whoever ended the chain.
+    """
+
+    @property
+    def reason(self) -> str:
+        return self.body.get("reason", "") if isinstance(self.body, dict) else ""
 
     @property
     def status_code(self) -> int | None:
@@ -127,6 +152,7 @@ class RelaySession:
         self.run_id = ""
         self.servers: list[str] = []
         self.closed = False
+        self._terminated: ChainTerminated | None = None
         self._embedded: EmbeddedRelay | None = None
         self._mcp_base = ""
 
@@ -154,6 +180,8 @@ class RelaySession:
         returns them.
         """
 
+        if self._terminated is not None:
+            raise self._terminated
         if not self.closed:
             raise RuntimeError(
                 "the session is still open: read `workflows` after the `with` block, "
@@ -186,12 +214,16 @@ class RelaySession:
         _wait(embedded, embedded.service.advance(self.run_id, _as_list(workflows)))
 
     def close(self, force: bool = False) -> list[IntentWorkflow]:
-        """Close the session and return its final workflows. Idempotent."""
+        """Close the session and return its final workflows. Idempotent.
+
+        Raises `ChainTerminated` instead when the run's chain has ended.
+        """
 
         if not self.closed:
             embedded = self._open_relay()
-            self._closed(_wait(embedded, embedded.service.close(self.run_id, force=force)))
-        return list(self._workflows)
+            with self._terminating():
+                self._closed(_wait(embedded, embedded.service.close(self.run_id, force=force)))
+        return self.workflows
 
     def __enter__(self) -> RelaySession:
         return self.open()
@@ -232,8 +264,10 @@ class RelaySession:
     async def aclose(self, force: bool = False) -> list[IntentWorkflow]:
         if not self.closed:
             embedded = self._open_relay()
-            self._closed(await _await(embedded, embedded.service.close(self.run_id, force=force)))
-        return list(self._workflows)
+            with self._terminating():
+                workflows = await _await(embedded, embedded.service.close(self.run_id, force=force))
+                self._closed(workflows)
+        return self.workflows
 
     async def __aenter__(self) -> RelaySession:
         return await self.aopen()
@@ -276,6 +310,17 @@ class RelaySession:
         self._workflows = workflows
         self.closed = True
 
+    @contextmanager
+    def _terminating(self) -> Iterator[None]:
+        """A close that finds the chain ended still closes the session."""
+
+        try:
+            yield
+        except ChainTerminated as exc:
+            self._terminated = exc
+            self._closed([])
+            raise
+
 
 def _as_list(workflows: IntentWorkflow | list[IntentWorkflow]) -> list[IntentWorkflow]:
     return [workflows] if isinstance(workflows, IntentWorkflow) else list(workflows)
@@ -299,4 +344,8 @@ async def _await(embedded: EmbeddedRelay, coroutine: Coroutine[Any, Any, T]) -> 
 
 def _error(exc: RunError) -> RelayError:
     body = {"error": str(exc), **exc.details}
-    return WorkflowRejected(exc.status, body) if exc.status == 422 else RelayError(exc.status, body)
+    if isinstance(exc, RunEnded):
+        return ChainTerminated(exc.status, body)
+    if exc.status == 422:
+        return WorkflowRejected(exc.status, body)
+    return RelayError(exc.status, body)
