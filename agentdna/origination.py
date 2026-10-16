@@ -1,15 +1,4 @@
-"""Origination login (SDK side) — run by the developer's app at run start.
-
-Calls the Identity Binding Service to start an OIDC login for the human,
-opens the browser, catches the redirect on a local loopback, and hands the code
-back to complete the login. Returns the `run_id`.
-
-No secret or token touches this process, and the DID is not signed here —
-possession is proven later on the CoCA chain. Self-contained on `requests` +
-stdlib.
-"""
-
-from __future__ import annotations
+"""Start a human login and create an AgentDNA run."""
 
 import os
 import time
@@ -19,102 +8,155 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
-_TIMEOUT = 30
-_LOGIN_PATH = "/agent-admin/v1/run/auth/login"
-_COMPLETE_PATH = "/agent-admin/v1/run/auth/complete"
-_DONE_HTML = (
-    b"<!doctype html><meta charset=utf-8>"
-    b"<body style='font-family:sans-serif'><h2>Sign-in complete.</h2>"
-    b"<p>You can close this tab and return to your app.</p>"
-)
+LOGIN_PATH = "/agent-admin/v1/run/auth/login"
+COMPLETE_PATH = "/agent-admin/v1/run/auth/complete"
+EXCHANGE_PATH = "/agent-admin/v1/run/auth/exchange"
+
+HTTP_TIMEOUT = 30
+
+DONE_PAGE = b"""
+<html>
+    <body>
+        <h2>Sign-in complete.</h2>
+        <p>You can close this tab and return to your app.</p>
+    </body>
+</html>
+"""
 
 
-def originate(*, auth_server_url: str | None = None, timeout: float = 300) -> tuple[str, str, str]:
-    """Drive a full origination login and return ``(run_id, email, api_key)``. Fail-closed.
-
-    The email is the authenticated human's; the SDK builds the actor under it
-    (the signing key is stored by email). ``run_id`` is empty when no IdP is
-    configured (no origination proof), and ``api_key`` is the key the server
-    hands back for this user (empty if the server does not return one).
-    Endpoints are admin-configured; `auth_server_url` defaults to the
-    ``AGENTDNA_AUTH_SERVER_URL`` env var.
+def originate(
+    *,
+    auth_server_url: str | None = None,
+    timeout: float = 300,
+    token: str | None = None,
+) -> tuple[str, str, str]:
     """
-    base = auth_server_url or os.environ.get("AGENTDNA_AUTH_SERVER_URL")
-    if not base:
+    Log in a human and start a run.
+
+    Returns:
+        (run_id, email, api_key)
+    """
+
+    server_url = auth_server_url or os.getenv("AGENTDNA_AUTH_SERVER_URL")
+
+    if not server_url:
         raise RuntimeError("AGENTDNA_AUTH_SERVER_URL is not set")
 
-    started = _post(base, _LOGIN_PATH, {})
-    authorize_url = started["authorize_url"]
+    # If the app already has a user's access token,
+    # we don't need to open a browser.
+    if token:
+        result = post(server_url, EXCHANGE_PATH, {"token": token})
+        return get_login_result(result)
 
-    webbrowser.open(authorize_url) or print(f"Open this URL to sign in:\n{authorize_url}")
-    state, code = _wait_for_callback(_redirect_uri_of(authorize_url), timeout)
+    # 1. Ask IBS to start the login.
+    login = post(server_url, LOGIN_PATH, {})
+    login_url = login["authorize_url"]
 
-    finished = _post(base, _COMPLETE_PATH, {"state": state, "code": code})
-    return finished.get("run_id", ""), finished["email"], finished.get("api_key", "")
+    # 2. Open the human's browser (or show the link if we can't).
+    if not webbrowser.open(login_url):
+        print(f"Open this link to sign in:\n{login_url}")
+
+    # 3. Wait for the browser to redirect back to us.
+    redirect_url = get_redirect_url(login_url)
+    state, code = wait_for_login(redirect_url, timeout)
+
+    # 4. Give the code back to IBS to finish the login.
+    result = post(
+        server_url,
+        COMPLETE_PATH,
+        {
+            "state": state,
+            "code": code,
+        },
+    )
+
+    return get_login_result(result)
 
 
-def _redirect_uri_of(authorize_url: str) -> str:
-    """The loopback the server told the IdP to redirect to — we listen exactly there."""
-    return parse_qs(urlparse(authorize_url).query)["redirect_uri"][0]
+def get_login_result(result: dict) -> tuple[str, str, str]:
+    """Extract the values returned after login."""
+    return (
+        result.get("run_id", ""),
+        result["email"],
+        result.get("api_key", ""),
+    )
 
 
-def _post(base: str, path: str, body: dict) -> dict:
-    """POST to the IBS and unwrap its response; raise on failure."""
-    r = requests.post(urljoin(base, path), json=body, timeout=_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
-    if not data.get("status"):
-        raise RuntimeError(f"{path}: {data.get('message')}")
-    return data.get("data") or {}
+def post(server_url: str, path: str, data: dict) -> dict:
+    """Send a request to IBS and return its data."""
+    response = requests.post(
+        urljoin(server_url, path),
+        json=data,
+        timeout=HTTP_TIMEOUT,
+    )
+
+    response.raise_for_status()
+
+    body = response.json()
+
+    if not body.get("status"):
+        raise RuntimeError(body.get("message", "Request failed"))
+
+    return body.get("data") or {}
 
 
-def _wait_for_callback(redirect_uri: str, timeout: float) -> tuple[str, str]:
-    """Block on the loopback until the IdP redirect arrives; return (state, code).
+def get_redirect_url(login_url: str) -> str:
+    """Get the browser callback URL from the login URL."""
+    query = parse_qs(urlparse(login_url).query)
+    return query["redirect_uri"][0]
 
-    Single-shot listener bound to the redirect's host/port; ignores stray paths
-    and surfaces an IdP `error` at the front door. CSRF (`state`) is validated
-    server-side by the IBS, which minted it.
-    """
-    target = urlparse(redirect_uri)
 
-    class _Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 (stdlib naming)
-            got = urlparse(self.path)
-            if got.path != (target.path or "/"):
+def wait_for_login(
+    redirect_url: str,
+    timeout: float,
+) -> tuple[str, str]:
+    """Wait for the browser to redirect back with state and code."""
+
+    target = urlparse(redirect_url)
+    result = {}
+
+    class CallbackHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            request = urlparse(self.path)
+
+            # Ignore requests that aren't for our callback.
+            if request.path != (target.path or "/"):
                 self.send_response(404)
                 self.end_headers()
                 return
-            self.server.result = {k: v[0] for k, v in parse_qs(got.query).items()}
+
+            result.update({key: value[0] for key, value in parse_qs(request.query).items()})
+
             self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            # Declare the exact body length and close intent so the browser can
-            # render immediately, instead of waiting for the socket to close —
-            # the single-shot server shuts down the instant it has the code, and
-            # that race was showing "can't be reached" instead of the done page.
-            self.send_header("Content-Length", str(len(_DONE_HTML)))
-            self.send_header("Connection", "close")
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(DONE_PAGE)))
             self.end_headers()
-            self.wfile.write(_DONE_HTML)
-            self.wfile.flush()
 
-        def log_message(self, *_):  # silence default logging
-            return
+            self.wfile.write(DONE_PAGE)
 
-    server = HTTPServer((target.hostname or "127.0.0.1", target.port or 80), _Handler)
-    server.result = None
-    server.timeout = 1.0  # re-check the deadline at least this often
+        def log_message(self, *_):
+            pass
+
+    server = HTTPServer(
+        (target.hostname or "127.0.0.1", target.port or 80),
+        CallbackHandler,
+    )
+    server.timeout = 1  # wake up every second to check the deadline
+
     deadline = time.time() + timeout
     try:
-        while server.result is None and time.time() < deadline:
+        while not result and time.time() < deadline:
             server.handle_request()
-        result = server.result
     finally:
         server.server_close()
 
-    if result is None:
-        raise RuntimeError(f"no login callback on {redirect_uri} within {timeout:.0f}s")
+    if not result:
+        raise RuntimeError(f"Login timed out after {timeout:.0f} seconds")
+
     if "error" in result:
-        raise RuntimeError(f"login failed at IdP: {result['error']}")
-    if "code" not in result or "state" not in result:
-        raise RuntimeError("login callback missing state/code")
+        raise RuntimeError(f"Login failed: {result['error']}")
+
+    if "state" not in result or "code" not in result:
+        raise RuntimeError("Login callback is missing state or code")
+
     return result["state"], result["code"]

@@ -138,6 +138,7 @@ class AgentDNA:
     def login(
         cls,
         *,
+        token: str | None = None,
         api_key: str | None = None,
         auth_server_url: str | None = None,
         timeout: float = 300,
@@ -146,8 +147,12 @@ class AgentDNA:
         """
         Log in a human actor via the identity-binding-service (IBS) and return an AgentDNA instance.
 
+        Pass `token` when the person already signed in to your app: it is the
+        access token your app received for them. No browser is opened.
         """
-        run_id, email, server_api_key = originate(auth_server_url=auth_server_url, timeout=timeout)
+        run_id, email, server_api_key = originate(
+            auth_server_url=auth_server_url, timeout=timeout, token=token
+        )
         # precedence: explicit arg > server-returned > env fallback (headless)
         if api_key is None:
             api_key = server_api_key or os.environ.get("AGENTDNA_API_KEY", "")
