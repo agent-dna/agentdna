@@ -24,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 from starlette.routing import Route
 
+from agentdna.auth import httpobserver
 from agentdna.log import get_logger
 
 from .config import ProvenanceRelayConfig
@@ -153,7 +154,15 @@ def create_app(
                 ),
                 status_code=502,
             )
-
+        if pending is not None:  # a signed tools/call
+            httpobserver.record_call(
+                pending.run.context.dna,
+                pending.request_workflow.get_latest_envelope(),
+                httpobserver.SOURCE_CLIENT_OUT,
+                upstream_request.headers,
+                upstream_request.url.host,
+                upstream_response.status_code,
+            )
         if pending is None:
             return _stream_through(upstream_response)
 
