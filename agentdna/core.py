@@ -31,6 +31,7 @@ from .id import (
     get_user_card_id,
 )
 from .log import configure_logging, get_logger
+from .origination import originate
 from .provenance import Provenance
 from .types import (
     ACTOR_TYPE_AGENT,
@@ -64,6 +65,7 @@ class AgentDNA:
         metadata: dict[str, Any] | None = None,
         agent_policy_file: Path | None = None,
         skip_actor_id_registration: bool = False,
+        run_id: str = "",
         log_level: str = "INFO",
         log_format: str = "text",
         log_file_path: str = "",
@@ -102,6 +104,7 @@ class AgentDNA:
         self.type = type
         self.name = name
         self.metadata = metadata or {}
+        self.run_id = run_id
         self.__agent_policy_path = agent_policy_file
 
         # Check from local config dir, if the actor card
@@ -130,6 +133,30 @@ class AgentDNA:
                 self.__register_tool()
 
         self.logger.info("agentdna.init.success", card_id=self.card_id)
+
+    @classmethod
+    def login(
+        cls,
+        *,
+        token: str | None = None,
+        api_key: str | None = None,
+        auth_server_url: str | None = None,
+        timeout: float = 300,
+        **kwargs,
+    ) -> "AgentDNA":
+        """
+        Log in a human actor via the identity-binding-service (IBS) and return an AgentDNA instance.
+
+        Pass `token` when the person already signed in to your app: it is the
+        access token your app received for them. No browser is opened.
+        """
+        run_id, email, server_api_key = originate(
+            auth_server_url=auth_server_url, timeout=timeout, token=token
+        )
+        # precedence: explicit arg > server-returned > env fallback (headless)
+        if api_key is None:
+            api_key = server_api_key or os.environ.get("AGENTDNA_API_KEY", "")
+        return cls(name=email, type=ACTOR_TYPE_USER, api_key=api_key, run_id=run_id, **kwargs)
 
     def __validate_api_key(self) -> None:
         if self.api_key == "":
@@ -589,7 +616,7 @@ class AgentDNA:
             from_=self.get_actor_id(),
             payload=payload,
             epoch=epoch,
-            run_id="",  # TODO: Define IdP integration logic
+            run_id="",  # set below: the root's login run_id, copied by every later envelope
             status_code=verification_code,
             to=recipient_id,
         )
@@ -601,6 +628,11 @@ class AgentDNA:
             for prev_workflow in previous_workflows:
                 if prev_workflow.envelope:
                     current_envelope.add_envelope(prev_workflow.envelope)
+
+        if current_envelope.parent_envelope:
+            current_envelope.run_id = current_envelope.parent_envelope[0].run_id
+        else:
+            current_envelope.run_id = self.run_id
 
         current_envelope.hash = _hash_content(current_envelope)
 
