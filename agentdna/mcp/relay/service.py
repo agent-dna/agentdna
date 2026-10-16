@@ -84,7 +84,7 @@ class RunService:
                 )
 
         run = self.runs.create(agent, workflows)
-        logger.info("relay.run.opened", run_id=run.run_id, workflows=len(workflows))
+        logger.info("agentdna.relay.run.opened", run_id=run.run_id, workflows=len(workflows))
         return run
 
     async def frontier(self, run_id: str) -> Run:
