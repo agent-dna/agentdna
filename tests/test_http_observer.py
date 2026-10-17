@@ -720,3 +720,54 @@ def test_a_call_that_never_arrived_is_recorded_without_a_verdict(serving):
 
     written = json.loads(serving.read_text())
     assert written["auth_status"] == "unknown"
+
+
+# --- a relay recording for the agents it serves ---------------------------
+
+
+def test_each_agent_on_one_relay_gets_its_own_records(monkeypatch, tmp_path):
+    """One relay, two agents, calls in parallel. Every record carries its own
+    agent's step and is sent as that agent (its own API key)."""
+    monkeypatch.setenv(ENV_KEY, "one-shared-value")
+    monkeypatch.setenv(ENV_FILE, str(tmp_path / "evidence.jsonl"))
+
+    sent = []
+    monkeypatch.setattr(
+        sink, "send", lambda evidence, dna: sent.append((evidence.as_dict(), dna.api_key))
+    )
+
+    agents = {}
+    for name in ("a", "b"):
+        agents[name] = FakeDNA(str(tmp_path))
+        agents[name].api_key = f"key-{name}"
+
+    def relay_forward(name, i):
+        step = FakeEnvelope(run_id=f"run-{name}", signature=f"sig-{name}-{i}")
+        httpobserver.record_call(
+            agents[name],
+            step,
+            SOURCE_CLIENT_OUT,
+            {"Authorization": CREDENTIAL},
+            "mcp.example.com",
+            200,
+        )
+
+    calls = [
+        threading.Thread(target=relay_forward, args=(name, i))
+        for i in range(20)
+        for name in ("a", "b")
+    ]
+    for call in calls:
+        call.start()
+    for call in calls:
+        call.join()
+
+    assert len(sent) == 40
+    for record, api_key in sent:
+        agent = api_key.removeprefix("key-")
+        assert record["request_id"].startswith(f"sig-{agent}-")
+        assert record["run_id"] == f"run-{agent}"
+        assert record["source"] == SOURCE_CLIENT_OUT
+        assert record["destination"] == "mcp.example.com"
+        assert record["auth_status"] == "accepted"
+        assert TOKEN not in json.dumps(record)
