@@ -82,7 +82,7 @@ class RunService:
             try:
                 code = await asyncio.to_thread(agent.verify, workflow)
             except Exception as exc:
-                logger.error("relay.run.verify_error", error=str(exc))
+                logger.error("agentdna.relay.run.verify_error", error=str(exc))
                 raise VerificationUnavailable(f"unable to verify the workflow: {exc}")
             if code != RESULT_OK:
                 raise WorkflowFailedVerification(
@@ -129,7 +129,7 @@ class RunService:
 
         async with run.context.lock:
             run.context.workflows = list(workflows)
-        logger.info("relay.run.advanced", run_id=run_id, workflows=len(workflows))
+        logger.info("agentdna.relay.run.advanced", run_id=run_id, workflows=len(workflows))
         return run.context.get_workflows()
 
     async def close(self, run_id: str, force: bool = False) -> list[IntentWorkflow]:
@@ -138,7 +138,7 @@ class RunService:
         run = self._get(run_id)
         if run.ended is not None:
             self.runs.remove(run_id)
-            logger.info("relay.run.closed", run_id=run_id, forced=force, ended=True)
+            logger.info("agentdna.relay.run.closed", run_id=run_id, forced=force, ended=True)
             _refuse_if_ended(run)
         if run.calls_in_flight and not force:
             raise CallsInFlight(
@@ -147,7 +147,7 @@ class RunService:
             )
 
         self.runs.remove(run_id)
-        logger.info("relay.run.closed", run_id=run_id, forced=force)
+        logger.info("agentdna.relay.run.closed", run_id=run_id, forced=force)
         return run.context.get_workflows()
 
     def _get(self, run_id: str) -> Run:

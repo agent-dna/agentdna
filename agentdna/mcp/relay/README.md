@@ -8,10 +8,6 @@ agent ──▶ MCP client ──▶ Provenance Relay ──▶ MCP server + Age
                          verifies each answer  signs the answer
 ```
 
-## Why a relay
-
-An MCP server running `AgentDNAMCPMiddleware` refuses tool calls that don't carry a signed IntentWorkflow. Something on the agent's side has to sign each call and attach it. Doing that inside each MCP client library means patching each library's internals. The relay does it at the protocol boundary instead: the agent's MCP client talks to the relay as if it were the MCP server, and the relay talks to the real server.
-
 ## Quick start
 
 ```py
@@ -36,7 +32,7 @@ async with PROVENANCE_RELAY.session(AGENT, incoming_workflow) as session:
 reply = AGENT.build(payload=str(output), previous_workflows=session.workflows)
 ```
 
-Synchronous code uses `with` instead of `async with`. The examples in [`examples/`](../../../examples) use the relay with `langchain-mcp-adapters` (GitHub and RSS agents) and CrewAI's `MCPServerAdapter` (SQLite agent).
+Synchronous code uses `with` instead of `async with`. The examples in [`examples/`](../../../examples) use the relay with `langchain-mcp-adapters` (GitHub and RSS agents), CrewAI's `MCPServerAdapter` (SQLite agent) and Google ADK's `McpToolset` (ADK package swarm).
 
 ## What happens
 
@@ -63,15 +59,13 @@ Tool calls that overlap in time form a *batch*. Every call in a batch is signed 
 
 ## Failing closed
 
-The agent never acts on a result that is missing from the chain. When the relay can't sign a request or can't verify an answer, the agent gets a JSON-RPC error with code `-32050` instead of the result.
+When the relay can't sign a request or can't verify an answer, the agent gets a JSON-RPC error with code `-32050` instead of the result.
 
-A server passes a successor workflow down only for a success (`1000`) or a tool execution failure (`4001`). Any other failure, such as a whitelist, CoCA or CBAC check, is recorded on the provenance layer by the server, and a recorded IntentWorkflow is never passed forward: that chain has ended. The same goes for an answer the relay itself records because it fails verification. When the chain ends, so does the run:
+A server passes a successor workflow down only for a success (`1000`) or a tool execution failure (`4001`). Any other failure, such as a whitelist, CoCA or CBAC check, is recorded on the provenance layer by the server, and the run's chain ends. So does an answer the relay itself records because it fails verification. When the chain ends:
 
-- the agent sees the error as it was worded;
-- every further tool call in the run is refused by the relay, without reaching the server;
-- closing the session raises `ChainTerminated` instead of returning workflows, so there is nothing to build on or pass forward.
-
-The relay can't stop the agent's framework in the middle of the failing call, because MCP clients hand error results back to the model as data. Closing the session is where the run stops, and until then nothing more reaches the server.
+- the agent gets the error as it was worded;
+- the relay refuses every further tool call in the run, without forwarding it to the server;
+- closing the session raises `ChainTerminated` instead of returning workflows.
 
 | What happened | What the agent gets | The run |
 |---|---|---|
@@ -88,10 +82,10 @@ The relay can't stop the agent's framework in the middle of the failing call, be
 `ProvenanceRelay(servers, *, run_ttl_seconds=3600.0, upstream_timeout_seconds=300.0)`
 
 - `servers` maps a name to each MCP server's Streamable HTTP URL. Names may contain letters, digits, `-` and `_`.
-- `session(agent, workflows)` returns a `RelaySession` for `agent` on the workflow(s) it received. It opens when the `with` block is entered.
+- `session(agent, workflows)` returns a `RelaySession` for `agent` on the workflow(s) it received. It op don't need ens when the `with` block is entered.
 - `close()` stops the relay. It also runs at exit.
 
-Create one relay per process and reuse it. It holds no identity of its own: each session signs as the agent that opened it, so one relay serves every agent in the process.
+Create one relay per process and reuse it. Each session signs as the agent that opened it, so one relay serves every agent in the process.
 
 `RelaySession`
 
@@ -111,9 +105,9 @@ Errors, all `RelayError`s (with `.status` and `.body`):
 
 ## Inside the process
 
-The relay is a small Starlette application served by uvicorn on a background thread, with its own event loop, on a loopback port picked by the OS (port 0, so any number of relays can coexist and no privileged port is ever used). It starts on first use; there is nothing to install, start or configure.
+The relay is a small Starlette application served by uvicorn on a background thread, with its own event loop, on a loopback port picked by the OS (port 0). It starts on first use.
 
-Runs are opened and closed by calling the relay directly, not over HTTP. Its only HTTP surface is each run's MCP endpoint, reachable only through the run's unguessable URL. A run that sits idle for `run_ttl_seconds` is dropped, unless a call is in flight. The separate thread matters: the agent's MCP client talks to the relay over HTTP, and the agent may wait on it synchronously from inside its own event loop, which would deadlock a relay sharing that loop.
+Runs are opened and closed by calling the relay directly, not over HTTP. Its only HTTP surface is each run's MCP endpoint, reachable only through the run's unguessable URL. A run that sits idle for `run_ttl_seconds` is dropped, unless a call is in flight.
 
 ## Limits
 
