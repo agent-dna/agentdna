@@ -14,8 +14,11 @@ async def run_task(task_prompt: str, workflow: IntentWorkflow) -> dict[str, Any]
 
 
 def log_result(result: dict[str, Any], task_prompt: str) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-    logging.info(json.dumps({"event_type": "agent.execution.completed", "task": task_prompt, **result}))
+    event = {"event_type": "agent.execution.completed", "task": task_prompt, **result}
+    # The signed IntentWorkflow isn't JSON itself: identify it by intent and final envelope.
+    workflow = result["adna_workflow"]
+    event["adna_workflow"] = {"id": workflow.id, "tip": workflow.get_latest_envelope().hash}
+    print(json.dumps(event), flush=True)
 
 
 def print_human_result(result: dict[str, Any], task_prompt: str) -> None:

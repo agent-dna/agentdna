@@ -19,7 +19,7 @@ class Settings:
     openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
     openai_base_url: str | None = os.getenv("OPENAI_BASE_URL")
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     github_token: str = os.getenv("GITHUB_TOKEN", "")
     github_api_url: str = os.getenv("GITHUB_API_URL", "https://api.github.com")
     github_repository_owner: str = os.getenv("GITHUB_REPOSITORY_OWNER", "")
@@ -39,6 +39,8 @@ class Settings:
     user_name: str = os.getenv("USER_NAME", "")
     github_agent_name: str = os.getenv("GITHUB_AGENT_NAME", "")
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "https://agentdna-admin.agentdna.io")
+    # CBAC decision service. Empty: the `cbac` package's own default (production).
+    cbac_url: str = os.getenv("CBAC_URL", "")
 
     @property
     def repository(self) -> str:

@@ -37,7 +37,7 @@ logging.getLogger("google_adk.google.adk.tools.mcp_tool.mcp_session_manager").ad
 @dataclass(frozen=True)
 class Settings:
     # Gemini, through Google ADK
-    gemini_model: str = os.getenv("GEMINI_MODEL") or "gemini-2.5-flash"
+    gemini_model: str = os.getenv("GEMINI_MODEL") or "gemini-3.5-flash-lite"
 
     # The package-intelligence MCP server
     package_mcp_url: str = os.getenv("PACKAGE_MCP_URL") or "http://127.0.0.1:8680/mcp"

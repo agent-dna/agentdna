@@ -11,13 +11,11 @@ from langgraph.graph import END, START, StateGraph
 from agents.rss_security_agent import SecurityNewsAgent
 from agents.rss_technology_agent import TechnologyNewsAgent
 from config import settings
-from llm import build_llm
+from llm import build_llm, message_text
 
 from agentdna.core import AgentDNA
 from agentdna.types import IntentWorkflow
 from agentdna.error import RESULT_OK
-
-from config import settings
 
 _HERE = Path(__file__).resolve().parent
 SKILLS_FILE = _HERE / "SKILLS.md"
@@ -33,9 +31,9 @@ RSS_ORCHESTRATOR_AGENT = AgentDNA(
 class ResearchState(TypedDict):
     execution_id: str
 
-    # security_result: NotRequired[str]
-    # technology_result: NotRequired[str]
-    # final_result: NotRequired[str]
+    security_result: NotRequired[str]
+    technology_result: NotRequired[str]
+    final_result: NotRequired[str]
 
     adna_workflow: IntentWorkflow
     security_adna_workflow: NotRequired[IntentWorkflow]
@@ -60,11 +58,19 @@ class RSSOrchestratorAgent:
 
         async def security(state: ResearchState) -> dict[str, Any]:
             res = await SecurityNewsAgent().run(state["execution_id"], state["adna_workflow"])
-            return {"security_adna_workflow": res["security_adna_workflow"]}
+            security_adna_workflow = res["security_adna_workflow"]
+            return {
+                "security_adna_workflow": security_adna_workflow,
+                "security_result": security_adna_workflow.get_latest_envelope().payload,
+            }
 
         async def technology(state: ResearchState) -> dict[str, Any]:
             res = await TechnologyNewsAgent().run(state["execution_id"], state["adna_workflow"])
-            return {"technology_adna_workflow": res["technology_adna_workflow"]}
+            technology_adna_workflow = res["technology_adna_workflow"]
+            return {
+                "technology_adna_workflow": technology_adna_workflow,
+                "technology_result": technology_adna_workflow.get_latest_envelope().payload,
+            }
     
         async def aggregate(state: ResearchState) -> dict[str, Any]:
             security_adna_workflow = state["security_adna_workflow"]
@@ -106,11 +112,11 @@ class RSSOrchestratorAgent:
 
             # (AgentDNA_Integration)
             new_adna_workflow = RSS_ORCHESTRATOR_AGENT.build(
-                payload=str(response.content),
+                payload=message_text(response),
                 previous_workflows=[security_adna_workflow, technology_adna_workflow]
             )
 
-            return {"adna_workflow": new_adna_workflow}
+            return {"adna_workflow": new_adna_workflow, "final_result": message_text(response)}
 
         workflow.add_node("security", security)
         workflow.add_node("technology", technology)

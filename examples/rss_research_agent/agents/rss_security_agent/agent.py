@@ -11,7 +11,7 @@ from agentdna.core import AgentDNA
 from agentdna.mcp.relay import WorkflowRejected
 from agentdna.types import IntentWorkflow
 from config import settings
-from llm import build_llm
+from llm import build_llm, message_text
 from mcp_client import PROVENANCE_RELAY, load_tools
 
 _HERE = Path(__file__).resolve().parent
@@ -47,7 +47,7 @@ class SecurityNewsAgent:
 
         # The final IntentWorkflow(s): the incoming workflow plus every tool call.
         security_adna_workflow = RSS_SECURITY_AGENT.build(
-            payload=str(result["messages"][-1].content),
+            payload=message_text(result["messages"][-1]),
             previous_workflows=session.workflows,
         )
 

@@ -42,6 +42,7 @@ async def main() -> None:
     )
 
     result = await run_task(adna_workflow)
+    log_result(result, prompt)
 
     try:
         USER.record(result["adna_workflow"])

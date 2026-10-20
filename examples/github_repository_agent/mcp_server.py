@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from functools import partial
+
 import httpx
 from fastmcp import FastMCP
 
@@ -17,11 +19,16 @@ mcp_server_dna = AgentDNA(
     admin_server_url=settings.admin_server_url,
 )
 
+# `authorize` sends every decision to its built-in default service, and ignores
+# the CBAC_URL environment variable. Bind CBAC_URL, when it is set, so the
+# decisions go to that CBAC service instead.
+cbac_fn = partial(authorize, cbac_url=settings.cbac_url) if settings.cbac_url else authorize
+
 mcp = FastMCP("github-repository-mcp")
 mcp.add_middleware(
     AgentDNAMCPMiddleware(
         mcp_server_dna,
-        cbac_fn=authorize
+        cbac_fn=cbac_fn
     )
 )
 

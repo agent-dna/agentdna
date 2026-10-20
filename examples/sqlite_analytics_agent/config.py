@@ -35,10 +35,6 @@ class Settings:
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
     gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     database_path: Path = Path(os.getenv("SQLITE_DATABASE_PATH", "data/analytics.db"))
-    analysis_task: str = os.getenv(
-        "SQLITE_ANALYSIS_TASK",
-        "Analyse recent business activity, anomalies, strong products, and useful recommendations.",
-    )
 
     agentdna_api_key: str = os.getenv("AGENTDNA_API_KEY", "")
     provenance_layer_url: str = os.getenv("PROVENANCE_LAYER_URL", "https://chain-connector-2.rubix.net")

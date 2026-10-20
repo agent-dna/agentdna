@@ -86,7 +86,7 @@ ADK: security_agent runs; each of its tool calls is signed on top of the hand-of
 
 ## Setup
 
-1. Use Python 3.10–3.12, and create and activate a virtual environment:
+1. Use Python 3.10–3.12, and create and activate a virtual environment, from this directory:
 
 ```sh
 python3 -m venv .venv
@@ -94,10 +94,46 @@ source .venv/bin/activate
 ```
 
 2. Install the dependencies: `pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env`, then set:
-   - `GOOGLE_API_KEY`, a Gemini API key from Google AI Studio (`GEMINI_MODEL` picks the model);
-   - the AgentDNA values: `AGENTDNA_API_KEY`, `PROVENANCE_LAYER_URL`, `ADMIN_SERVER_URL` and `USER_NAME`.
-4. Whitelist `package_agent`, `security_agent` and `ecosystem_agent` on the AgentDNA admin server: the MCP server refuses tool calls from agents that aren't whitelisted. The coordinator calls no tools, so it doesn't need to be. Each agent's ID is printed when it is created (`agentdna.init.success`).
+3. Copy `.env.example` to `.env`, and set the variables below.
+4. Run the swarm once (see [Run](#run)). Each member's AgentDNA ID is printed when it starts (`agentdna.init.success`). Whitelist `package_agent`, `security_agent` and `ecosystem_agent` on the AgentDNA admin server: until then, the MCP server refuses their tool calls. The coordinator calls no tools, so it doesn't need to be whitelisted.
+
+### Environment variables
+
+**Gemini**
+
+| Variable | Description | Default |
+|---|---|---|
+| `GOOGLE_API_KEY` | Gemini API key, from Google AI Studio. Required. | |
+| `GOOGLE_GENAI_USE_VERTEXAI` | `FALSE` to use the Gemini API key rather than Vertex AI. | `FALSE` in `.env.example` |
+| `GEMINI_MODEL` | Gemini model every member uses. | `gemini-3.5-flash-lite` |
+
+**Package-intelligence MCP server**
+
+| Variable | Description | Default |
+|---|---|---|
+| `PACKAGE_MCP_URL` | The URL the members reach the MCP server at. It must match `MCP_HOST` and `MCP_PORT`. | `http://127.0.0.1:8680/mcp` |
+| `MCP_HOST` | Interface the MCP server listens on. | `127.0.0.1` |
+| `MCP_PORT` | Port the MCP server listens on. | `8680` |
+| `HTTP_TIMEOUT_SECONDS` | Timeout for the tools' requests to PyPI, OSV.dev and deps.dev, and for the members' requests to the MCP server. | `30` |
+
+**AgentDNA**
+
+| Variable | Description | Default |
+|---|---|---|
+| `AGENTDNA_API_KEY` | Your AgentDNA API key, from the [AgentDNA Dashboard](https://dashboard.agentdna.io). Required. | |
+| `PROVENANCE_LAYER_URL` | The AgentDNA Provenance Layer URL. | `https://chain-connector-2.rubix.net` |
+| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether a member is whitelisted. | `https://agentdna-admin.agentdna.io` |
+| `USER_NAME` | Name of the user identity that signs requests and records results. Required. | |
+| `COORDINATOR_AGENT_NAME` | Name of the coordinator's identity. | `package-coordinator` |
+| `PACKAGE_AGENT_NAME` | Name of `package_agent`'s identity. | `package-agent` |
+| `SECURITY_AGENT_NAME` | Name of `security_agent`'s identity. | `package-security-agent` |
+| `ECOSYSTEM_AGENT_NAME` | Name of `ecosystem_agent`'s identity. | `package-ecosystem-agent` |
+| `MCP_SERVER_NAME` | Name of the MCP server's identity. | `package-intelligence-mcp` |
+| `CBAC_URL` | The CBAC decision service the MCP server asks whether each tool call fits the user's intent. Leave empty for the default (production) service. | |
+
+**Authentication evidence (optional)**
+
+`AGENTDNA_AUTH_EVIDENCE`, `AGENTDNA_AUTH_EVIDENCE_FILE` and `AGENTDNA_FINGERPRINT_KEY` switch on AgentDNA's authentication evidence, which is off by default. See [Authentication evidence](../../README.md#authentication-evidence) in the main README.
 
 ## Run
 
@@ -114,7 +150,7 @@ python3 manual.py "We're about to pin requests 2.31.0 in production. Is that saf
 - which agent answered;
 - the report.
 
-Add `--json` to print a structured result instead. `automated.py` runs one of five built-in requests in a loop.
+Add `--json` to print a structured result instead. `automated.py` runs continuously until you stop it (Ctrl+C): each run picks one of five built-in requests at random, prints the JSON result, and records the chain.
 
 ### Example prompts
 
