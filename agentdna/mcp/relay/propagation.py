@@ -258,7 +258,9 @@ def _descends_from(successor: IntentWorkflow, request_workflow: IntentWorkflow) 
 
 def _end_run(run: Run, reason: str, status_code: int | None) -> None:
     run.end(reason, status_code)
-    logger.warning("agentdna.relay.run.ended", run_id=run.run_id, reason=reason, status_code=status_code)
+    logger.warning(
+        "agentdna.relay.run.ended", run_id=run.run_id, reason=reason, status_code=status_code
+    )
 
 
 def _result_text(result: dict[str, Any]) -> str:
