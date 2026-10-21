@@ -387,10 +387,6 @@ PROVENANCE_RELAY = ProvenanceRelay({"rss": "http://127.0.0.1:8013/mcp"})
 # 2. For each task: open a session with the IntentWorkflow the Assistant received.
 #    The session verifies that workflow before anything else happens.
 async with PROVENANCE_RELAY.session(AGENT, existing_intent_workflow) as session:
-    client = MultiServerMCPClient(
-        {"rss": {"transport": "streamable_http", "url": session.url("rss")}}
-    )
-    workflow = create_react_agent(llm, await client.get_tools())
     result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
 
 # 3. After the session: session.workflows is the chain so far, including every tool call.
@@ -410,6 +406,26 @@ Good to know:
 - In synchronous code, use `with` instead of `async with`.
 - MCP servers must be reachable over Streamable HTTP.
 
+**Agent and Tool Call in different context**
+
+The relay ties tool calls to a session by the session's URL, not by where in your code they run. Some setups split the two: in LangGraph, for example, an agent node calls the model and a separate `ToolNode` runs the tools. Every call still lands in the chain as long as:
+
+- the session stays open for the whole run, around both steps;
+- whatever runs the tools uses an MCP client built on `session.url(...)`. A call through any other client or URL reaches the MCP server unsigned, and is refused.
+
+Following is an example taken from Langgraph:
+
+```py
+graph = StateGraph(MessagesState)
+graph.add_node("agent", call_model)        # llm.bind_tools(tools)
+graph.add_node("tools", ToolNode(tools))   # runs the same tools, through the session
+
+async with PROVENANCE_RELAY.session(AGENT, existing_intent_workflow) as session:
+    result = await graph.compile().ainvoke(...)
+```
+
+If the tools run in another process on the same machine, give it the session's URL, and keep the session open until that process is done.
+
 For how the relay works, see [agentdna/mcp/relay/README.md](agentdna/mcp/relay/README.md). For complete examples, see [GitHub Repository Agent](examples/github_repository_agent) (LangGraph), [RSS Research Agent](examples/rss_research_agent) (LangGraph, two agents) and [SQLite Analytics Agent](examples/sqlite_analytics_agent) (CrewAI).
 
 **2. MCP Server Middleware**
@@ -421,6 +437,8 @@ The security checks include:
 - Agent Whitelisting
 - CoCA Verification
 - CBAC Verification
+
+These validations are present as individual functions under `agentdna/mcp/server/checks.py`. These can be independently in any form of API Gateway. For MCP Servers, `AgentDNAMCPMiddleware` servers as a convenient option.
 
 CBAC Verification is configurable. AgentDNA provides a [CBAC Service](https://github.com/agent-dna/cbac-server), but organizations can use their own Policy methodology and spin up a custom CBAC Server. The custom CBAC integration must provide a function matching the CbacFn contract:
 
