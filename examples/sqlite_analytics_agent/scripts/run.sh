@@ -1,4 +1,10 @@
 #!/usr/bin/env sh
+# Starts the SQLite MCP server, then runs the automated workload.
 set -eu
-cd "$(dirname "$0")/../.."
-exec "${PYTHON:-python3}" -m sqlite_analytics_agent.automated
+cd "$(dirname "$0")/.."
+python_bin="${PYTHON:-python3}"
+"$python_bin" mcp_server.py &
+server_pid=$!
+trap 'kill "$server_pid" 2>/dev/null || true' EXIT INT TERM
+sleep 1
+"$python_bin" automated.py

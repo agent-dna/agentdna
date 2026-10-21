@@ -1,79 +1,139 @@
 # GitHub Repository Agent
 
-An independent LangGraph ReAct workload that analyses one configured GitHub repository through a local FastMCP server. The agent has no direct GitHub API access: the MCP server owns the credential and exposes read-only capabilities only.
+A LangGraph ReAct agent that analyses one GitHub repository through a local FastMCP server. The agent has no direct GitHub API access: the MCP server holds the GitHub token and exposes read-only tools.
 
 ## Architecture
 
-`scripts/run.*` starts the FastMCP streamable-HTTP server, then starts `github-repository-agent`. The named agent discovers the server's tools using `langchain_mcp_adapters` and executes a LangGraph ReAct loop. Repository text is explicitly treated as untrusted data.
-
 ```text
-github-repository-agent -> langchain_mcp_adapters -> FastMCP -> GitHub REST API
+github-repository-agent -> langchain_mcp_adapters -> AgentDNA Provenance Relay -> FastMCP + AgentDNA middleware -> GitHub REST API
 ```
+
+- `manual.py` / `automated.py`: the user signs the request, the agent runs, and the user records the finished chain on the provenance layer.
+- `agents/github_agent/agent.py`: the agent. It opens a Provenance Relay session on the user's workflow, and points `langchain_mcp_adapters` at the session's URL, so every tool call is signed as the agent.
+- `mcp_server.py`: the GitHub MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass CoCA verification, and be allowed by CBAC.
+
+```py
+PROVENANCE_RELAY = ProvenanceRelay({"github": settings.github_mcp_url})
+
+async with PROVENANCE_RELAY.session(GITHUB_AGENT, adna_workflow) as session:   # verifies the incoming workflow
+    tools = await load_tools(session.url("github"))
+    result = await workflow.ainvoke(...)
+
+# session.workflows: the user's workflow plus every tool call
+reply_workflow = GITHUB_AGENT.build(payload=..., previous_workflows=session.workflows)
+```
+
+If the MCP server refuses a tool call (whitelist, CoCA or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agent's side.
 
 ## Prerequisites
 
-- Python 3.11 or later
-- An LLM backend: Ollama, OpenAI, or Gemini
-- A GitHub token with read access to the configured repository
+- Python 3.11 or 3.12
+- An LLM: Ollama, OpenAI (or an OpenAI-compatible service), or Gemini
+- A GitHub token with read access to the repository
+- An AgentDNA API key, from the [AgentDNA Dashboard](https://dashboard.agentdna.io)
 
 ## Setup
 
-1. Create and activate a virtual environment:
+1. Create and activate a virtual environment, from this directory:
 
-```
+```sh
 python3 -m venv .venv
-chmod +x .venv/bin/activate
 source .venv/bin/activate
 ```
 
-2. Install dependencies: `python -m pip install -r requirements.txt`.
-3. Copy `.env.example` to `.env` and set `GITHUB_TOKEN`, `GITHUB_REPOSITORY_OWNER`, and `GITHUB_REPOSITORY_NAME`.
-4. Configure `LLM_BACKEND` and the corresponding provider settings.
+2. Install the dependencies: `pip install -r requirements.txt`.
+3. Copy `.env.example` to `.env`, and set the variables below.
+4. Run the agent once (see [Run](#run)). Its AgentDNA ID is printed when it starts (`agentdna.init.success`). Whitelist that ID on the AgentDNA admin server: until then, the MCP server refuses its tool calls.
 
-For OpenAI set `LLM_BACKEND=openai`, `OPENAI_API_KEY`, and `OPENAI_MODEL`; `OPENAI_BASE_URL` is optional. For Gemini set `LLM_BACKEND=gemini`, `GOOGLE_API_KEY`, and `GEMINI_MODEL`. For Ollama set `LLM_BACKEND=ollama`, then ensure `OLLAMA_MODEL` is pulled and `OLLAMA_HOST` is reachable.
+### Environment variables
 
-## Sample Prompts
+**LLM**
 
-Set `GITHUB_ANALYSIS_TASK` to one of the following before an execution:
+| Variable | Description | Default |
+|---|---|---|
+| `LLM_BACKEND` | `ollama`, `openai` or `gemini`. | `ollama` |
+| `LLM_TEMPERATURE` | Sampling temperature. | `0` |
+| `OLLAMA_HOST` | Ollama server URL. | `http://127.0.0.1:11434` |
+| `OLLAMA_MODEL` | Ollama model; pull it first (`ollama pull <model>`). | `llama3.1` |
+| `OPENAI_API_KEY` | OpenAI API key. | |
+| `OPENAI_MODEL` | OpenAI model. | `gpt-4o-mini` |
+| `OPENAI_BASE_URL` | Base URL of an OpenAI-compatible service. Optional. | OpenAI's |
+| `GOOGLE_API_KEY` | Gemini API key, from Google AI Studio. | |
+| `GEMINI_MODEL` | Gemini model. | `gemini-3.5-flash-lite` |
 
-- `Summarise commits, open issues, and pull requests from the last 30 days. Identify delivery risks and cite the supporting repository evidence.`
-- `Review the repository's top-level documentation and recent changes. Highlight security-sensitive areas that deserve a maintainer review.`
-- `Analyse unresolved issues and open pull requests for stalled work, duplicated effort, and dependencies that could block the next release.`
+**GitHub and MCP**
 
-## Run Modes
+| Variable | Description | Default |
+|---|---|---|
+| `GITHUB_TOKEN` | GitHub token with read access to the repository. Only the MCP server uses it. Required. | |
+| `GITHUB_REPOSITORY_OWNER` | Owner of the repository to analyse. Required. | |
+| `GITHUB_REPOSITORY_NAME` | Name of the repository to analyse. Required. | |
+| `GITHUB_API_URL` | GitHub REST API URL; change it for GitHub Enterprise Server. | `https://api.github.com` |
+| `GITHUB_MCP_URL` | The URL the agent reaches the MCP server at. It must match `MCP_HOST` and `MCP_PORT`. | `http://127.0.0.1:8011/mcp` |
+| `MCP_HOST` | Interface the MCP server listens on. | `127.0.0.1` |
+| `MCP_PORT` | Port the MCP server listens on. | `8011` |
+| `MCP_TOOL_TIMEOUT_SECONDS` | Timeout for each MCP request from the agent, and for the server's GitHub API calls. | `30` |
+| `GITHUB_ANALYSIS_TASK` | The task used when the prompt given to the agent is empty. | `Analyse recent repository activity, notable issues, pull requests, changes, and risks.` |
 
-### Manual
+**AgentDNA**
 
-From the `examples` parent directory, start the MCP server and provide a task directly to the Python CLI:
+| Variable | Description | Default |
+|---|---|---|
+| `AGENTDNA_API_KEY` | Your AgentDNA API key, from the [AgentDNA Dashboard](https://dashboard.agentdna.io). Required. | |
+| `PROVENANCE_LAYER_URL` | The AgentDNA Provenance Layer URL. | `https://chain-connector-2.rubix.net` |
+| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether the agent is whitelisted. | `https://agentdna-admin.agentdna.io` |
+| `USER_NAME` | Name of the user identity that signs requests and records results. Required. | |
+| `GITHUB_AGENT_NAME` | Name of the agent's identity. Required. | |
+| `CBAC_URL` | The CBAC decision service the MCP server asks whether each tool call fits the user's intent. Leave empty for the default (production) service. | |
+
+**Authentication evidence (optional)**
+
+`AGENTDNA_AUTH_EVIDENCE`, `AGENTDNA_AUTH_EVIDENCE_FILE` and `AGENTDNA_FINGERPRINT_KEY` switch on AgentDNA's authentication evidence, which is off by default. See [Authentication evidence](../../README.md#authentication-evidence) in the main README.
+
+## Run
+
+From this directory, start the MCP server, then run the agent in a second terminal:
 
 ```sh
+# Terminal 1
 python3 mcp_server.py
 
-python3 manual.py "Your prompt"
+# Terminal 2
+python3 manual.py "Review the repository's open issues and pull requests."
 ```
 
-On Windows, replace `python3` with `python`.
+`manual.py` prints the analysis. Add `--json` after the prompt to print the structured execution event instead. On Windows, use `python` instead of `python3`.
+
+### Example prompts
+
+```sh
+python3 manual.py "Review the repository's open issues and pull requests."
+python3 manual.py "Review the repository's recent commits and summarise the changes."
+python3 manual.py "Review the repository's top-level files and documentation."
+```
+
+CBAC judges every tool call against the user's prompt, and its check is probabilistic. A prompt that asks for what the tools do (read issues, pull requests, commits, files) is less likely to have a call refused as drifting from the user's intent than one that asks for a broad judgement.
 
 ### Automated
 
-`automated.py` randomly selects one of ten built-in repository-analysis prompts for each execution. The scheduled launchers start the MCP server, run that automated entrypoint, emit JSON output, and exit:
+`automated.py` runs continuously until you stop it (Ctrl+C): each run picks one of ten built-in prompts at random, prints the JSON execution event, and records the chain.
 
-```
-# In one terminal run the MCP server
+```sh
+# Terminal 1
 python3 mcp_server.py
 
-# In another terminal
+# Terminal 2
 python3 automated.py
 ```
 
-## MCP Tools
+`scripts/run.sh` (and `scripts/run.ps1` / `scripts/run.cmd` on Windows) start the MCP server and run `automated.py`; stopping it stops the server too.
 
-`repository_metadata`, `directory_listing`, `file_contents`, `commits`, `issues`, and `pull_requests` are server-side, validated, read-only tools. The configured repository is the only resource the server permits.
+## MCP tools
 
-## Security And Observability
+`repository_metadata`, `directory_listing`, `file_contents`, `commits`, `issues` and `pull_requests`: read-only, validated tools over the configured repository only. The GitHub token stays in the MCP server process; it never reaches the LLM or a tool argument.
 
-The GitHub token remains in the MCP server process and never enters an LLM prompt or tool argument. The agent's skills and restrictions are in [agents/github_repository_agent/SKILLS.md](agents/github_repository_agent/SKILLS.md). Each run emits a JSON event with a stable agent identity and a new execution ID.
+The agent's skills and restrictions are in [agents/github_agent/SKILLS.md](agents/github_agent/SKILLS.md), which is also the policy registered with its AgentDNA identity.
 
 ## Tests
 
-Run `python -m pytest tests -q` from this project directory.
+From this directory: `python -m pytest tests -q`.

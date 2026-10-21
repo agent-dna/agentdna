@@ -229,19 +229,27 @@ class IntentWorkflow:
         Flattens the provenance graph into a unique list of envelopes.
         Returns them in reverse chronological order (newest to oldest)
         using Breadth-First Search (BFS).
+
+        Envelopes are identified by hash *and* signature. The hash covers
+        only an envelope's own content, so two distinct envelopes can share
+        it - e.g. a server's identical "success" answers to two concurrent
+        calls within the same second. The signature also covers the parents,
+        so it tells them apart while still merging an ancestor that is
+        reachable along several branches.
         """
         if not self.envelope:
             return []
 
         unwrapped: list[Envelope] = []
-        visited_hashes = set()
+        visited: set[tuple[str, str]] = set()
         queue = [self.envelope]
 
         while queue:
             current = queue.pop(0)
 
-            if current.hash not in visited_hashes:
-                visited_hashes.add(current.hash)
+            key = (current.hash, current.signature)
+            if key not in visited:
+                visited.add(key)
                 unwrapped.append(current)
 
                 if current.parent_envelope:

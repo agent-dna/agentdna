@@ -1,8 +1,19 @@
+"""The RSS MCP server on the MCP Python SDK v2 (`mcp.server.MCPServer`).
+
+An alternative to mcp_server.py, showing AgentDNA's middleware on the plain MCP
+SDK instead of FastMCP. It needs `mcp>=2`, which this example's requirements
+don't install (they pin `mcp` 1.x for FastMCP 3), so run it in an environment
+of its own - see "MCP v2 SDK server" in the README.
+
+    python mcp_server_mcp2.py
+"""
+
 from __future__ import annotations
 
 import hashlib
 import sqlite3
 from datetime import datetime, timezone
+from functools import partial
 
 from mcp.server import MCPServer
 
@@ -23,12 +34,17 @@ mcp_server_dna = AgentDNA(
 )
 
 
+# `authorize` sends every decision to its built-in default service, and ignores
+# the CBAC_URL environment variable. Bind CBAC_URL, when it is set, so the
+# decisions go to that CBAC service instead.
+cbac_fn = partial(authorize, cbac_url=settings.cbac_url) if settings.cbac_url else authorize
+
 mcp = MCPServer(
     "rss-research-mcp",
     middleware=[
         AgentDNAMCPMiddleware(
             mcp_server_dna,
-            cbac_fn=authorize,
+            cbac_fn=cbac_fn,
         )
     ],
 )

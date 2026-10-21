@@ -246,22 +246,41 @@ def _record(dna, source, headers, host, body=None, status=None) -> None:
                 return  # not serving a request, so nothing to attach this to
             request_id, run_id = envelope.signature, envelope.run_id
 
-        facts = observe(dict(headers), load_key(dna.config_dir, dna.logger))
-
-        sink.send(
-            AuthEvidence.from_facts(
-                facts,
-                run_id=run_id,
-                request_id=request_id,
-                source=source,
-                destination=str(host),
-                auth_status=_auth_status(status),
-                observed_at=time.time(),
-            ),
-            dna,
-        )
+        _send(dna, source, headers, host, status, request_id, run_id)
     except Exception as exc:
         dna.logger.warning("agentdna.authevidence.outbound_failed", error=str(exc))
+
+
+def record_call(dna, step, source, headers, host, status=None) -> None:
+    """Record one call whose agent and signed step the caller already knows.
+
+    For the relay: it signs the step, forwards it and gets the answer, so it
+    hands everything over instead of the hook guessing. Never raises.
+    """
+    if not sink.enabled():
+        return
+    try:
+        _send(dna, source, headers, host, status, step.signature, step.run_id or "")
+    except Exception as exc:
+        dna.logger.warning("agentdna.authevidence.outbound_failed", error=str(exc))
+
+
+def _send(dna, source, headers, host, status, request_id, run_id) -> None:
+    """Observe the headers and write the record. Raises; callers catch."""
+    facts = observe(dict(headers), load_key(dna.config_dir, dna.logger))
+
+    sink.send(
+        AuthEvidence.from_facts(
+            facts,
+            run_id=run_id,
+            request_id=request_id,
+            source=source,
+            destination=str(host),
+            auth_status=_auth_status(status),
+            observed_at=time.time(),
+        ),
+        dna,
+    )
 
 
 def _auth_status(status_code) -> str:

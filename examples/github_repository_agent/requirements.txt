@@ -1,7 +1,7 @@
-fastmcp>=3.4.0
+fastmcp==3.4.7
 httpx>=0.28.0
 langchain-core>=0.3.0
-langchain-mcp-adapters>=0.1.0
+langchain-mcp-adapters==0.3.2
 langgraph>=0.2.50
 langchain-ollama>=0.2.0
 langchain-openai>=0.2.0
