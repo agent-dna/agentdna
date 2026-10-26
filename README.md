@@ -240,6 +240,87 @@ Supported Actor types are:
 * `agent`
 * `tool`
 
+### Log in a user with `agentdna.login()`
+
+Instead of creating the user with a name you choose, you can have the person sign in with their company account (Microsoft, Google, Okta, …). You get back a normal `AgentDNA` user, tied to that login.
+
+```python
+import agentdna
+
+user = agentdna.login(api_key="<Optional, only required for Beta (Explained later)>")
+
+print(user.name)    # alice@corp.com
+print(user.run_id)  # the ID of this login, e.g. "Xk3f9..."
+```
+
+From here, use `user` exactly like the `user` created above: `build()`, `handle()` and `record()` all work the same.
+
+**What happens when you call it**
+
+1. A browser tab opens at your company's sign-in page.
+2. The person signs in.
+3. The tab shows "Sign-in complete", and `login()` returns.
+
+**What you get back**
+
+An `AgentDNA` with:
+
+| Field | Value |
+|---|---|
+| `name` | The person's email |
+| `type` | `"user"` |
+| `run_id` | The ID of this login. Every envelope in the workflow carries it (see below). |
+
+**Options**
+
+| Argument | Default | When to set it |
+|---|---|---|
+| `api_key` | `""` | Your AgentDNA API key (only required for Beta). `login()` gives it to the user it creates. |
+| `auth_server_url` | `https://user-auth.agentdna.io` | Only if your company runs its own AgentDNA auth server |
+| `timeout` | `300` | Seconds to wait for the person to sign in |
+
+Any other `AgentDNA` argument, such as `provenance_layer_url`, can be passed too. `agentdna.login(...)` and `AgentDNA.login(...)` are the same call.
+
+**Before you start**
+
+- The person must already be a user in your AgentDNA organisation. If not, login fails with `no DID linked to this human`.
+- Run it on a machine where the person can open a browser, such as a laptop, desktop app or notebook. After sign-in, the browser returns to a small local page on that same machine (for example `http://localhost:8400/callback`). If no browser opens, the link is printed, and it must be opened on that same machine.
+- That local port must be free.
+
+**If something goes wrong**
+
+`login()` raises an error rather than returning a half-logged-in user:
+
+| You see | What it means |
+|---|---|
+| `Login timed out after 300 seconds` | Nobody finished signing in. Call `login()` again, or raise `timeout`. |
+| `Login failed: ...` | The sign-in page reported an error, for example the person cancelled. |
+| `no DID linked to this human` | The person isn't a user in your AgentDNA organisation yet. |
+| `The redirect URL must look like http://localhost:<port>/...` | The auth server is set up with the wrong redirect address. Ask your AgentDNA admin. |
+| `Address already in use` | Something else is using the local port. Close it and try again. |
+| A connection error | The auth server can't be reached. Check `auth_server_url` and your network. |
+
+**How `run_id` follows the workflow**
+
+The first envelope the user builds carries the login's `run_id`. Every envelope built after it, by agents and tools, copies the same `run_id` from the one before:
+
+```text
+Alice ── login() ──► run_id = R
+  │
+  │ build()                               run_id = R
+  ▼
+Assistant
+  │ build(previous_workflows=...)         run_id = R  (copied)
+  ▼
+Tool                                      run_id = R  (copied)
+```
+
+The `run_id` is set before the envelope is signed, so it can't be changed later without breaking the signature. This lets anyone tracing the workflow, such as a gateway or an auditor, see which login every step belongs to.
+
+**Not using login?**
+
+Nothing changes. A user created with `AgentDNA(name=..., type="user")` has an empty `run_id`, and every envelope carries an empty `run_id`, exactly as before. The only exception is a gateway set up to require a login: it will reject requests that have no `run_id`.
+
 ### Securing Agent-User Interaction
 
 **Step 1. Build the initial workflow**

@@ -1,6 +1,5 @@
 """Start a human login and create an AgentDNA run."""
 
-import os
 import time
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -8,12 +7,15 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 import requests
 
-LOGIN_PATH = "/agent-admin/v1/run/auth/login"
-COMPLETE_PATH = "/agent-admin/v1/run/auth/complete"
-EXCHANGE_PATH = "/agent-admin/v1/run/auth/exchange"
+# The AgentDNA auth server, used unless the app passes its own.
+DEFAULT_AUTH_SERVER_URL = "https://user-auth.agentdna.io"
 
-HTTP_TIMEOUT = 30
+LOGIN_PATH = "/user-auth/v1/login"
+COMPLETE_PATH = "/user-auth/v1/complete"
 
+HTTP_TIMEOUT = 30  # seconds, for each call to the auth server
+
+# Shown in the browser once sign-in is done.
 DONE_PAGE = b"""
 <html>
     <body>
@@ -26,30 +28,18 @@ DONE_PAGE = b"""
 
 def originate(
     *,
-    auth_server_url: str | None = None,
+    auth_server_url: str = DEFAULT_AUTH_SERVER_URL,
     timeout: float = 300,
-    token: str | None = None,
-) -> tuple[str, str, str]:
+) -> tuple[str, str]:
     """
     Log in a human and start a run.
 
     Returns:
-        (run_id, email, api_key)
+        (run_id, email)
     """
 
-    server_url = auth_server_url or os.getenv("AGENTDNA_AUTH_SERVER_URL")
-
-    if not server_url:
-        raise RuntimeError("AGENTDNA_AUTH_SERVER_URL is not set")
-
-    # If the app already has a user's access token,
-    # we don't need to open a browser.
-    if token:
-        result = post(server_url, EXCHANGE_PATH, {"token": token})
-        return get_login_result(result)
-
-    # 1. Ask IBS to start the login.
-    login = post(server_url, LOGIN_PATH, {})
+    # 1. Ask the auth server to start the login.
+    login = post(auth_server_url, LOGIN_PATH, {})
     login_url = login["authorize_url"]
 
     # 2. Open the human's browser (or show the link if we can't).
@@ -60,9 +50,9 @@ def originate(
     redirect_url = get_redirect_url(login_url)
     state, code = wait_for_login(redirect_url, timeout)
 
-    # 4. Give the code back to IBS to finish the login.
+    # 4. Give the code back to the auth server to finish the login.
     result = post(
-        server_url,
+        auth_server_url,
         COMPLETE_PATH,
         {
             "state": state,
@@ -73,17 +63,13 @@ def originate(
     return get_login_result(result)
 
 
-def get_login_result(result: dict) -> tuple[str, str, str]:
-    """Extract the values returned after login."""
-    return (
-        result.get("run_id", ""),
-        result["email"],
-        result.get("api_key", ""),
-    )
+def get_login_result(result: dict) -> tuple[str, str]:
+    """Extract the run_id and email returned after login. Both are required."""
+    return result["run_id"], result["email"]
 
 
 def post(server_url: str, path: str, data: dict) -> dict:
-    """Send a request to IBS and return its data."""
+    """Send a request to the auth server and return its data."""
     response = requests.post(
         urljoin(server_url, path),
         json=data,
@@ -94,6 +80,7 @@ def post(server_url: str, path: str, data: dict) -> dict:
 
     body = response.json()
 
+    # The server answers {"status": true/false, "data": ..., "message": ...}.
     if not body.get("status"):
         raise RuntimeError(body.get("message", "Request failed"))
 
@@ -115,6 +102,7 @@ def wait_for_login(
     target = urlparse(redirect_url)
     result = {}
 
+    # Handles the browser's visit to the redirect URL.
     class CallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             request = urlparse(self.path)
@@ -125,6 +113,7 @@ def wait_for_login(
                 self.end_headers()
                 return
 
+            # Keep what the browser brought back: state and code, or error.
             result.update({key: value[0] for key, value in parse_qs(request.query).items()})
 
             self.send_response(200)
@@ -135,14 +124,19 @@ def wait_for_login(
             self.wfile.write(DONE_PAGE)
 
         def log_message(self, *_):
-            pass
+            pass  # keep the terminal quiet
 
-    server = HTTPServer(
-        (target.hostname or "127.0.0.1", target.port or 80),
-        CallbackHandler,
-    )
+    # The browser must come back to this computer, on a set port.
+    if target.hostname not in ("localhost", "127.0.0.1") or not target.port:
+        raise RuntimeError(
+            f"The redirect URL must look like http://localhost:<port>/..., got {redirect_url}"
+        )
+
+    # A small local web server at the redirect URL's host and port.
+    server = HTTPServer((target.hostname, target.port), CallbackHandler)
     server.timeout = 1  # wake up every second to check the deadline
 
+    # Handle visits until the callback arrives or time runs out.
     deadline = time.time() + timeout
     try:
         while not result and time.time() < deadline:
@@ -150,6 +144,7 @@ def wait_for_login(
     finally:
         server.server_close()
 
+    # Check what came back.
     if not result:
         raise RuntimeError(f"Login timed out after {timeout:.0f} seconds")
 

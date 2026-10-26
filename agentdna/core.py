@@ -31,7 +31,7 @@ from .id import (
     get_user_card_id,
 )
 from .log import configure_logging, get_logger
-from .origination import originate
+from .origination import DEFAULT_AUTH_SERVER_URL, originate
 from .provenance import Provenance
 from .types import (
     ACTOR_TYPE_AGENT,
@@ -138,24 +138,16 @@ class AgentDNA:
     def login(
         cls,
         *,
-        token: str | None = None,
-        api_key: str | None = None,
-        auth_server_url: str | None = None,
+        auth_server_url: str = DEFAULT_AUTH_SERVER_URL,
+        api_key: str = "",
         timeout: float = 300,
         **kwargs,
     ) -> "AgentDNA":
         """
-        Log in a human actor via the identity-binding-service (IBS) and return an AgentDNA instance.
-
-        Pass `token` when the person already signed in to your app: it is the
-        access token your app received for them. No browser is opened.
+        Log in a human through the AgentDNA auth server and return an AgentDNA
+        user for them. It carries the run_id of this login.
         """
-        run_id, email, server_api_key = originate(
-            auth_server_url=auth_server_url, timeout=timeout, token=token
-        )
-        # precedence: explicit arg > server-returned > env fallback (headless)
-        if api_key is None:
-            api_key = server_api_key or os.environ.get("AGENTDNA_API_KEY", "")
+        run_id, email = originate(auth_server_url=auth_server_url, timeout=timeout)
         return cls(name=email, type=ACTOR_TYPE_USER, api_key=api_key, run_id=run_id, **kwargs)
 
     def __validate_api_key(self) -> None:
