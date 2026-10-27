@@ -162,13 +162,19 @@ def test_a_person_is_named_whatever_the_provider_calls_the_claims():
     """Different providers, and different token versions of one provider,
     put the login in different claims."""
     for login_claim in ("preferred_username", "email", "upn", "unique_name"):
-        assert name_of({"iss": "https://idp", "sub": "1", login_claim: "shreya@x.com"}) == "shreya@x.com"
+        assert (
+            name_of({"iss": "https://idp", "sub": "1", login_claim: "shreya@x.com"})
+            == "shreya@x.com"
+        )
     assert name_of({"iss": "https://idp", "sub": "1", "name": "Shreya"}) == "Shreya"
 
 
 def test_an_app_token_is_named_by_its_client_id():
     """A token issued to an app has no person in it."""
-    assert name_of({"iss": "https://idp", "sub": "1", "azp": "update-planner"}) == "app: update-planner"
+    assert (
+        name_of({"iss": "https://idp", "sub": "1", "azp": "update-planner"})
+        == "app: update-planner"
+    )
 
 
 def test_a_person_wins_over_the_app_that_got_their_token():
