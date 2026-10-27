@@ -15,6 +15,7 @@ For each request, it answers four questions:
 auth_method    How was the request authenticated?
 credential_id Which credential was presented?
 identity_id   Which identity did that credential represent?
+identity_name A readable name for that identity.
 auth_status   Did the destination accept it? This is supplied by the caller,
               because only the caller sees the destination's response.
 ```
@@ -33,7 +34,8 @@ The module has three important rules:
    destination's decision, not ours.
 
 2. Never return, log, or store credential values.
-   Only keyed hashes (fingerprints) are recorded.
+   Only keyed hashes (fingerprints) are recorded, plus `identity_name`,
+   which is built only from the claims in `NAME_CLAIMS` and `APP_CLAIMS`.
 
 3. Read only the headers listed in `AUTH_HEADERS`.
    No other request data is inspected.
@@ -80,6 +82,13 @@ AUTH_HEADERS = ("authorization", "x-api-key", "api-key")
 # that would never match across a run. `oid` is stable across the tenant.
 SUBJECT_CLAIMS = ("oid", "sub")
 
+# Claims that make up `identity_name`. Nothing else from a token is kept.
+#
+# A person: their display name, plus their login so two people called "Shreya"
+# can be told apart. An app (a token with no person in it): its client id.
+NAME_CLAIMS = ("preferred_username", "email", "upn", "unique_name")
+APP_CLAIMS = ("azp", "appid", "client_id")
+
 
 @dataclass(frozen=True)
 class AuthFacts:
@@ -90,12 +99,16 @@ class AuthFacts:
     `identity_id` is None whenever the credential carries no readable identity.
     None means "cannot tell" - an opaque token may well be the same person - and
     must never be read as "changed".
+
+    `identity_name` is who the token *says* it is - never verified. It is set
+    only when `identity_id` is.
     """
 
     auth_method: str
     credential_id: str
     identity_id: str | None
     key_version: str
+    identity_name: str | None = None
 
 
 def fingerprint(key: bytes, value: str) -> str:
@@ -171,6 +184,24 @@ def identity_fingerprint(claims: dict | None, key: bytes) -> str | None:
     return fingerprint(key, f"{issuer}|{subject}")
 
 
+def identity_name(claims: dict | None) -> str | None:
+    """A readable name for the identity, or None when the token has none.
+
+    Read from the same token as `identity_id`, so the two always belong
+    together - whatever the provider or token format.
+    """
+    if not claims:
+        return None
+    name = claims.get("name")
+    login = next((claims[c] for c in NAME_CLAIMS if claims.get(c)), None)
+    if name and login:
+        return f"{name} ({login})"
+    if name or login:
+        return str(name or login)
+    app = next((claims[c] for c in APP_CLAIMS if claims.get(c)), None)
+    return f"app: {app}" if app else None
+
+
 def find_auth_header(headers: dict | None) -> tuple[str, str]:
     """The first auth header present, as (name, value), or ("", "").
 
@@ -199,12 +230,14 @@ def observe(headers: dict | None, key: bytes) -> AuthFacts:
         return AuthFacts(METHOD_NONE, "", None, version)
 
     method, claims = classify(name, value)
+    identity = identity_fingerprint(claims, key)
 
     return AuthFacts(
         auth_method=method,
         credential_id=fingerprint(key, value.strip()),
-        identity_id=identity_fingerprint(claims, key),
+        identity_id=identity,
         key_version=version,
+        identity_name=identity_name(claims) if identity else None,
     )
 
 
@@ -222,6 +255,7 @@ class AuthEvidence:
     auth_method: str
     credential_id: str
     identity_id: str | None
+    identity_name: str | None
     auth_status: str
     source: str
     key_version: str
@@ -247,6 +281,7 @@ class AuthEvidence:
             auth_method=facts.auth_method,
             credential_id=facts.credential_id,
             identity_id=facts.identity_id,
+            identity_name=facts.identity_name,
             auth_status=auth_status,
             source=source,
             key_version=facts.key_version,

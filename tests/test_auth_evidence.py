@@ -22,6 +22,7 @@ from agentdna.auth.evidence import (
     find_auth_header,
     fingerprint,
     identity_fingerprint,
+    identity_name,
     key_version,
     observe,
     read_jwt_claims,
@@ -142,6 +143,65 @@ def test_a_signature_is_never_verified():
     forged = f"Bearer {jwt({'iss': 'https://idp', 'oid': 'priya'})}"
     assert method("authorization", forged) == METHOD_BEARER_JWT
     assert identity_id(forged, KEY) is not None
+
+
+# --- what is the identity called -----------------------------------------
+
+
+def name_of(claims):
+    return observe({"Authorization": f"Bearer {jwt(claims)}"}, KEY).identity_name
+
+
+def test_a_person_is_named_with_their_login():
+    """The login is there so two people with the same name can be told apart."""
+    claims = {"iss": "https://idp", "oid": "1", "name": "Shreya", "email": "shreya@x.com"}
+    assert name_of(claims) == "Shreya (shreya@x.com)"
+
+
+def test_a_person_is_named_whatever_the_provider_calls_the_claims():
+    """Different providers, and different token versions of one provider,
+    put the login in different claims."""
+    for login_claim in ("preferred_username", "email", "upn", "unique_name"):
+        assert name_of({"iss": "https://idp", "sub": "1", login_claim: "shreya@x.com"}) == "shreya@x.com"
+    assert name_of({"iss": "https://idp", "sub": "1", "name": "Shreya"}) == "Shreya"
+
+
+def test_an_app_token_is_named_by_its_client_id():
+    """A token issued to an app has no person in it."""
+    assert name_of({"iss": "https://idp", "sub": "1", "azp": "update-planner"}) == "app: update-planner"
+
+
+def test_a_person_wins_over_the_app_that_got_their_token():
+    """A person's token names the app it was issued to as well. The person is
+    who it acts as."""
+    claims = {"iss": "https://idp", "sub": "1", "email": "shreya@x.com", "azp": "update-planner"}
+    assert name_of(claims) == "shreya@x.com"
+
+
+def test_a_token_with_nothing_readable_has_no_name():
+    assert name_of({"iss": "https://idp", "sub": "1"}) is None
+    assert identity_name(None) is None
+
+
+def test_no_name_without_an_identity():
+    """A name with no identity_id has nothing to be the name of."""
+    assert name_of({"email": "shreya@x.com"}) is None
+    assert observe({"Authorization": "Bearer gho_anopaquestring"}, KEY).identity_name is None
+
+
+def test_only_the_name_claims_are_kept():
+    claims = {
+        "iss": "https://idp",
+        "oid": "1",
+        "name": "Shreya",
+        "scp": "Files.ReadWrite",
+        "roles": ["admin"],
+        "ipaddr": "10.0.0.1",
+    }
+    written = json.dumps(asdict(observe({"Authorization": f"Bearer {jwt(claims)}"}, KEY)))
+    assert "Shreya" in written
+    for claim in ("Files.ReadWrite", "admin", "10.0.0.1"):
+        assert claim not in written
 
 
 # --- which headers get read ----------------------------------------------
