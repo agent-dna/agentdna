@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import sqlite3
+from functools import partial
 from pathlib import Path
 
+from cbac import authorize
 from fastmcp import FastMCP
 
 from config import settings
 
 from agentdna.core import AgentDNA
 from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware
-from cbac import authorize
+
 
 dna = AgentDNA(
     name=settings.mcp_server_name,
@@ -22,8 +24,13 @@ dna = AgentDNA(
 
 mcp = FastMCP("sqlite-analytics-mcp")
 
+# `authorize` sends every decision to its built-in default service, and ignores
+# the CBAC_URL environment variable. Bind CBAC_URL, when it is set, so the
+# decisions go to that CBAC service instead.
+cbac_fn = partial(authorize, cbac_url=settings.cbac_url) if settings.cbac_url else authorize
+
 mcp.add_middleware(
-    AgentDNAMCPMiddleware(dna, authorize),
+    AgentDNAMCPMiddleware(dna, cbac_fn=cbac_fn),
 )
 
 

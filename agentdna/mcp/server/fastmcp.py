@@ -14,6 +14,7 @@ except ImportError:
     from fastmcp.tools.base import ToolResult
 
 from agentdna import AgentDNA
+from agentdna.auth import httpobserver
 from agentdna.error import (
     RESULT_OK,
     TOOL_EXECUTION_FAILED,
@@ -30,6 +31,7 @@ from .checks import (
     cbac_verification,
     coca_verification,
 )
+from .observer import record_request
 from .types import CbacFn
 from .utils import get_tool_name
 
@@ -58,6 +60,9 @@ class AgentDNAMCPMiddleware(Middleware):
     ) -> None:
         self.dna = dna
         self.cbac_fn = cbac_fn
+        # Also record the calls this server makes to its own backend.
+        # No-op unless evidence collection is switched on.
+        httpobserver.install(dna)
 
     async def on_call_tool(
         self,
@@ -70,7 +75,11 @@ class AgentDNAMCPMiddleware(Middleware):
         if incoming_workflow is None:
             raise ValueError("Missing AgentDNA workflow in MCP request metadata")
 
-        with agentdna_context(self.dna, incoming_workflow):
+        record_request(self.dna, incoming_workflow, context)
+
+        # Everything in here is AgentDNA's own work - checks, CBAC, signing -
+        # except the tool itself, so only the tool's outbound calls are hops.
+        with agentdna_context(self.dna, incoming_workflow), httpobserver.not_observed():
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
             # CoCA verification
@@ -100,7 +109,8 @@ class AgentDNAMCPMiddleware(Middleware):
 
             # Execute tool
             try:
-                result = await call_next(context)
+                with httpobserver.observed():
+                    result = await call_next(context)
                 if not isinstance(result, ToolResult):
                     raise TypeError(
                         f"FastMCP on_call_tool middleware expected ToolResult, got {type(result)!r}"

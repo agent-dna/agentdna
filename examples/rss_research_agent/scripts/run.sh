@@ -1,6 +1,6 @@
 #!/usr/bin/env sh
 set -eu
-cd "$(dirname "$0")/../.."
+cd "$(dirname "$0")/.."
 python_bin="${PYTHON:-python3}"
 "$python_bin" -m mcp_server &
 server_pid=$!

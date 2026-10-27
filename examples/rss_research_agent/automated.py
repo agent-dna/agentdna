@@ -4,7 +4,6 @@ import asyncio
 import random
 import sys
 from pathlib import Path
-from unittest import result
 import time
 
 from agentdna.core import AgentDNA
@@ -47,6 +46,7 @@ async def main() -> None:
     )
 
     result = await run_task(prompt, adna_workflow)
+    log_result(result, prompt)
 
     result_workflow: IntentWorkflow = result["adna_workflow"]
     if not result_workflow:

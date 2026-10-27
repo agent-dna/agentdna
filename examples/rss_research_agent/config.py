@@ -24,14 +24,13 @@ class Settings:
     ollama_host: str = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
     ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.1")
     google_api_key: str = os.getenv("GOOGLE_API_KEY", "")
-    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
+    gemini_model: str = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
     rss_mcp_url: str = os.getenv("RSS_MCP_URL", "http://127.0.0.1:8013/mcp")
     mcp_host: str = os.getenv("MCP_HOST", "127.0.0.1")
     mcp_port: int = int(os.getenv("MCP_PORT", "8013"))
     mcp_timeout_seconds: float = float(os.getenv("MCP_TOOL_TIMEOUT_SECONDS", "30"))
     cache_database: Path = Path(os.getenv("RSS_CACHE_DATABASE", "data/rss_cache.db"))
     feeds_json: str = os.getenv("RSS_FEEDS_JSON", json.dumps(DEFAULT_FEEDS))
-    research_task: str = os.getenv("RSS_RESEARCH_TASK", "Research material developments relevant to security and technology teams.")
 
     agentdna_api_key: str = os.getenv("AGENTDNA_API_KEY", "")
     provenance_layer_url: str = os.getenv("PROVENANCE_LAYER_URL", "https://chain-connector-2.rubix.net")
@@ -41,6 +40,8 @@ class Settings:
     technology_agent_name: str = os.getenv("RSS_TECHNOLOGY_AGENT_NAME", "RSS Technology Agent")
     security_agent_name: str = os.getenv("RSS_SECURITY_AGENT_NAME", "RSS Security Agent")
     admin_server_url: str = os.getenv("ADMIN_SERVER_URL", "")
+    # CBAC decision service. Empty: the `cbac` package's own default (production).
+    cbac_url: str = os.getenv("CBAC_URL", "")
 
     openai_base_url: str = os.getenv("OPENAI_BASE_URL", "")
     openai_name: str = os.getenv("OPENAI_MODEL_NAME", "")

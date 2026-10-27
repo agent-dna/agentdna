@@ -240,6 +240,87 @@ Supported Actor types are:
 * `agent`
 * `tool`
 
+### Log in a user with `agentdna.login()`
+
+Instead of creating the user with a name you choose, you can have the person sign in with their company account (Microsoft, Google, Okta, …). You get back a normal `AgentDNA` user, tied to that login.
+
+```python
+import agentdna
+
+user = agentdna.login(api_key="<Optional, only required for Beta (Explained later)>")
+
+print(user.name)    # alice@corp.com
+print(user.run_id)  # the ID of this login, e.g. "Xk3f9..."
+```
+
+From here, use `user` exactly like the `user` created above: `build()`, `handle()` and `record()` all work the same.
+
+**What happens when you call it**
+
+1. A browser tab opens at your company's sign-in page.
+2. The person signs in.
+3. The tab shows "Sign-in complete", and `login()` returns.
+
+**What you get back**
+
+An `AgentDNA` with:
+
+| Field | Value |
+|---|---|
+| `name` | The person's email |
+| `type` | `"user"` |
+| `run_id` | The ID of this login. Every envelope in the workflow carries it (see below). |
+
+**Options**
+
+| Argument | Default | When to set it |
+|---|---|---|
+| `api_key` | `""` | Your AgentDNA API key (only required for Beta). `login()` gives it to the user it creates. |
+| `auth_server_url` | `https://user-auth.agentdna.io` | Only if your company runs its own AgentDNA auth server |
+| `timeout` | `300` | Seconds to wait for the person to sign in |
+
+Any other `AgentDNA` argument, such as `provenance_layer_url`, can be passed too. `agentdna.login(...)` and `AgentDNA.login(...)` are the same call.
+
+**Before you start**
+
+- The person must already be a user in your AgentDNA organisation. If not, login fails with `no DID linked to this human`.
+- Run it on a machine where the person can open a browser, such as a laptop, desktop app or notebook. After sign-in, the browser returns to a small local page on that same machine (for example `http://localhost:8400/callback`). If no browser opens, the link is printed, and it must be opened on that same machine.
+- That local port must be free.
+
+**If something goes wrong**
+
+`login()` raises an error rather than returning a half-logged-in user:
+
+| You see | What it means |
+|---|---|
+| `Login timed out after 300 seconds` | Nobody finished signing in. Call `login()` again, or raise `timeout`. |
+| `Login failed: ...` | The sign-in page reported an error, for example the person cancelled. |
+| `no DID linked to this human` | The person isn't a user in your AgentDNA organisation yet. |
+| `The redirect URL must look like http://localhost:<port>/...` | The auth server is set up with the wrong redirect address. Ask your AgentDNA admin. |
+| `Address already in use` | Something else is using the local port. Close it and try again. |
+| A connection error | The auth server can't be reached. Check `auth_server_url` and your network. |
+
+**How `run_id` follows the workflow**
+
+The first envelope the user builds carries the login's `run_id`. Every envelope built after it, by agents and tools, copies the same `run_id` from the one before:
+
+```text
+Alice ── login() ──► run_id = R
+  │
+  │ build()                               run_id = R
+  ▼
+Assistant
+  │ build(previous_workflows=...)         run_id = R  (copied)
+  ▼
+Tool                                      run_id = R  (copied)
+```
+
+The `run_id` is set before the envelope is signed, so it can't be changed later without breaking the signature. This lets anyone tracing the workflow, such as a gateway or an auditor, see which login every step belongs to.
+
+**Not using login?**
+
+Nothing changes. A user created with `AgentDNA(name=..., type="user")` has an empty `run_id`, and every envelope carries an empty `run_id`, exactly as before. The only exception is a gateway set up to require a login: it will reject requests that have no `run_id`.
+
 ### Securing Agent-User Interaction
 
 **Step 1. Build the initial workflow**
@@ -350,94 +431,85 @@ Consider the previous example with an MCP server added as the resource provider:
 Alice ─────────▶ Assistant ─────────▶ MCP Server
 ```
 
-To secure this interaction, AgentDNA must be integrated at the LLM execution layer, the MCP client layer, and the MCP server layer.
+To secure this interaction, AgentDNA is added on both sides of the MCP connection:
 
-**1. LLM invocation**
+- on the agent's side, the **Provenance Relay** signs every MCP tool call the agent makes (it handles only agent-to-MCP-server traffic, not communication between agents);
+- on the MCP server's side, the **MCP Server Middleware** verifies each call before the tool runs, and signs its answer.
 
-Assume the AI Assistant uses LangGraph to invoke the LLM:
-
-```py
-result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
-final_message = result["messages"][-1]
+```text
+Alice ──▶ Assistant ──▶ MCP client ──▶ Provenance Relay ──▶ MCP Server + AgentDNA Middleware
+                        (unchanged)    signs each call       verifies the call, runs the tool,
+                                       checks each answer    signs the answer
 ```
 
-AgentDNA provides `agentdna_context`() for maintaining the current workflow state during agent execution. MCP client integrations use this context to retrieve the current workflow and propagate it to MCP requests.
+**1. Agent side: Provenance Relay**
 
-AgentDNA context takes two params:
+Your agent keeps using the MCP client it already uses: `langchain-mcp-adapters`, CrewAI's `MCPServerAdapter`, `fastmcp.Client`, or any other. The only change is the URL you give that client: instead of the MCP server's URL, you give it a URL from a relay session. The relay runs inside your process, so there's no extra service to start. For every tool call, it:
 
-- AgentDNA instance representing the current actor
-- Current `IntentWorkflow`
+1. signs the request as your agent and attaches the current `IntentWorkflow` to it;
+2. forwards the request to the real MCP server;
+3. checks the server's signed answer before your agent sees the result.
+
+The relay is only for an agent's calls to MCP servers. Communication between agents, such as one agent handing a task or its result to another, doesn't go through it: secure it with `build()` and `verify()`, as shown in [Securing Agent-User Interaction](#securing-agent-user-interaction).
+
+Using it takes three steps. Assume the AI Assistant uses LangGraph with `langchain-mcp-adapters`:
 
 ```py
+from langchain_mcp_adapters.client import MultiServerMCPClient
+
 from agentdna.core import AgentDNA
-from agentdna.mcp.context import agentdna_context
+from agentdna.mcp.relay import ProvenanceRelay
 
 AGENT = AgentDNA(...)
 
-with agentdna_context(AGENT, existing_intent_workflow) as ctx:
+# 1. Once per process: give each MCP server a name, and its URL.
+PROVENANCE_RELAY = ProvenanceRelay({"rss": "http://127.0.0.1:8013/mcp"})
+
+# 2. For each task: open a session with the IntentWorkflow the Assistant received.
+#    The session verifies that workflow before anything else happens.
+async with PROVENANCE_RELAY.session(AGENT, existing_intent_workflow) as session:
     result = await workflow.ainvoke({"messages": [HumanMessage(content=task)]})
-    final_message = result["messages"][-1]
 
-    # ctx.workflows consists of the update Intent Workflow(s) propagated
-    # from the MCP server
-    if len(ctx.workflows) == 0:
-        raise RuntimeError("No workflows were created during agent execution")
-
-    # Use ctx.workflows to build the IntentWorkflow and pass to the next actor
-    adna_workflow_from_agent = SQLITE_AGENT.build(
-        payload=str(output),
-        previous_workflows=ctx.workflows,
-    )
+# 3. After the session: session.workflows is the chain so far, including every tool call.
+#    Build the Assistant's answer on it, and pass that to the next actor.
+adna_workflow_from_agent = AGENT.build(
+    payload=str(result["messages"][-1].content),
+    previous_workflows=session.workflows,
+)
 ```
 
-**2. MCP Client Adapter**
+Good to know:
 
-AgentDNA provides framework-specific MCP client adapters that intercept MCP tool calls and propagate the current `IntentWorkflow` through MCP request metadata.
+- `session.url("rss")` uses the name from step 1. One relay can front several MCP servers: call `session.url(name)` for each.
+- The agent doesn't have to call a tool. If it calls none, `session.workflows` is simply the workflow it received.
+- If the incoming workflow fails verification, opening the session raises `WorkflowRejected`. If an MCP server's answer can't be verified, the agent gets an error instead of the result, so it never acts on output that's missing from the chain.
+- If an MCP server refuses a tool call (its whitelist, CoCA or CBAC check fails), it records the refusal, and that chain has ended. The relay then refuses the session's further tool calls, and closing the session raises `ChainTerminated`: stop the run there, and don't build on or pass on its workflow.
+- In synchronous code, use `with` instead of `async with`.
+- MCP servers must be reachable over Streamable HTTP.
 
-The adapter should be installed in the application before the MCP client is used.
+**Agent and Tool Call in different context**
 
-For instance, when use `langchain-mcp-adapters` for building the MCP Client:
+The relay ties tool calls to a session by the session's URL, not by where in your code they run. Some setups split the two: in LangGraph, for example, an agent node calls the model and a separate `ToolNode` runs the tools. Every call still lands in the chain as long as:
+
+- the session stays open for the whole run, around both steps;
+- whatever runs the tools uses an MCP client built on `session.url(...)`. A call through any other client or URL reaches the MCP server unsigned, and is refused.
+
+Following is an example taken from Langgraph:
 
 ```py
-from __future__ import annotations
+graph = StateGraph(MessagesState)
+graph.add_node("agent", call_model)        # llm.bind_tools(tools)
+graph.add_node("tools", ToolNode(tools))   # runs the same tools, through the session
 
-from langchain_core.tools import BaseTool
-from langchain_mcp_adapters.client import MultiServerMCPClient
-from langchain_mcp_adapters.sessions import StreamableHttpConnection
-
-from config import settings
-
-# Import and use the AgentDNA MCP Client Adapter
-from agentdna.mcp.client.langchain import install_mcp_client
-install_mcp_client()
-
-def build_client() -> MultiServerMCPClient:
-    return MultiServerMCPClient(
-        {
-            "rss": StreamableHttpConnection(
-                transport="streamable_http",
-                url=settings.rss_mcp_url,
-                timeout=settings.mcp_timeout_seconds,
-                sse_read_timeout=settings.mcp_timeout_seconds,
-            )
-        },
-    )
-
-
-async def load_tools() -> list[BaseTool]:
-    """Discover the configured RSS server's tools; direct network access is prohibited for agents."""
-    return await build_client().get_tools()
+async with PROVENANCE_RELAY.session(AGENT, existing_intent_workflow) as session:
+    result = await graph.compile().ainvoke(...)
 ```
 
-The AgentDNA client adapter adds the workflow to the MCP request `_meta` field. The MCP server can then extract and verify the workflow before executing the requested tool.
+If the tools run in another process on the same machine, give it the session's URL, and keep the session open until that process is done.
 
-Currently supported MCP client integrations are:
+For how the relay works, see [agentdna/mcp/relay/README.md](agentdna/mcp/relay/README.md). For complete examples, see [GitHub Repository Agent](examples/github_repository_agent) (LangGraph), [RSS Research Agent](examples/rss_research_agent) (LangGraph, two agents) and [SQLite Analytics Agent](examples/sqlite_analytics_agent) (CrewAI).
 
-- [Langchain MCP Adaptors](https://github.com/langchain-ai/langchain-mcp-adapters) - `from agentdna.mcp.client.langchain import install_mcp_client`
-- [CrewAI Tools](https://github.com/crewAIInc/crewAI/tree/main/lib/crewai-tools) - `from agentdna.mcp.client.crewai import install_mcp_client`
-
-
-**3. MCP Server Middleware**
+**2. MCP Server Middleware**
 
 `AgentDNAMCPMiddleware` intercepts protected MCP requests on the server side and performs security checks before allowing the underlying MCP handler to execute.
 
@@ -446,6 +518,8 @@ The security checks include:
 - Agent Whitelisting
 - CoCA Verification
 - CBAC Verification
+
+These validations are present as individual functions under `agentdna/mcp/server/checks.py`. These can be independently in any form of API Gateway. For MCP Servers, `AgentDNAMCPMiddleware` servers as a convenient option.
 
 CBAC Verification is configurable. AgentDNA provides a [CBAC Service](https://github.com/agent-dna/cbac-server), but organizations can use their own Policy methodology and spin up a custom CBAC Server. The custom CBAC integration must provide a function matching the CbacFn contract:
 
@@ -539,6 +613,46 @@ Currently supported MCP server integrations:
 
 - [FastMCP](https://github.com/PrefectHQ/fastmcp) - `from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware`
 - [MCP v2 Python SDK](https://github.com/modelcontextprotocol/python-sdks) - Refer [here](./examples/rss_research_agent/mcp_server_mcp2.py) for a complete usage example
+
+## Authentication evidence 
+
+AgentDNA can record how each request authenticated, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.
+
+Authentication evidence is disabled by default. When it is off, AgentDNA does not read or record authentication headers.
+
+### Enable authentication evidence
+
+Set this before starting the application:
+
+```env
+AGENTDNA_AUTH_EVIDENCE=true
+```
+
+### Credential handling
+
+AgentDNA never stores raw credentials. When authentication evidence is enabled, detected credentials are converted into fingerprints.
+
+### What is covered
+
+AgentDNA currently observes:
+
+- HTTP calls made with `httpx` or `requests`
+- The following authentication headers:
+  - `Authorization`
+  - `X-API-Key`
+  - `Api-Key`
+- Authentication used by MCP servers when making HTTP calls to their own backends
+
+AgentDNA's own outbound calls are not recorded.
+
+### What is not covered
+
+Authentication evidence does not currently cover:
+
+- `aiohttp`
+- Database connections
+- Non-HTTP protocols
+- Other HTTP clients not listed above
 
 ## Open Beta
 

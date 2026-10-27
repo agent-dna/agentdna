@@ -9,6 +9,7 @@ from mcp.server.context import CallNext, HandlerResult
 from mcp.types import CallToolResult, TextContent
 
 from agentdna import AgentDNA
+from agentdna.auth import httpobserver
 from agentdna.error import MIDDLEWARE_EXECUTION_FAILED, RESULT_OK, TOOL_EXECUTION_FAILED
 from agentdna.mcp.context import agentdna_context
 from agentdna.mcp.metadata import (
@@ -18,6 +19,7 @@ from agentdna.mcp.metadata import (
 from agentdna.types import IntentWorkflow
 
 from .checks import agent_whitelist_check, coca_verification
+from .observer import record_request
 from .types import CbacFn, CBACVerificationError
 from .utils import build_and_record_failed_workflow
 
@@ -54,6 +56,9 @@ class AgentDNAMCPMiddleware:
     ) -> None:
         self.dna = dna
         self.cbac_fn = cbac_fn
+        # Also record the calls this server makes to its own backend.
+        # No-op unless evidence collection is switched on.
+        httpobserver.install(dna)
         self.supported_methods = (
             supported_methods if supported_methods is not None else {"tools/call"}
         )
@@ -73,9 +78,16 @@ class AgentDNAMCPMiddleware:
         if incoming_workflow is None:
             raise ValueError("No incoming workflow found in MCP request metadata")
 
-        with agentdna_context(
-            self.dna,
-            incoming_workflow,
+        record_request(self.dna, incoming_workflow, ctx)
+
+        # Everything in here is AgentDNA's own work - checks, CBAC, signing -
+        # except the tool itself, so only the tool's outbound calls are hops.
+        with (
+            agentdna_context(
+                self.dna,
+                incoming_workflow,
+            ),
+            httpobserver.not_observed(),
         ):
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
@@ -102,7 +114,8 @@ class AgentDNAMCPMiddleware:
                 )
 
             try:
-                result = await call_next(ctx)
+                with httpobserver.observed():
+                    result = await call_next(ctx)
 
                 successor = self._build_successor(
                     ctx=ctx,

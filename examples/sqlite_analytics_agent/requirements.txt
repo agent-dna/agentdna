@@ -1,7 +1,8 @@
-crewai>=1.0.0
-fastmcp>=3.4.0
+crewai[google-genai]>=1.0.0
+fastmcp==3.4.7
 pydantic>=2.0.0
 python-dotenv>=1.0.0
+cbac>=0.1.0
 crewai-tools[mcp]
 
 -e ../../../agentdna
