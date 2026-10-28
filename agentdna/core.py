@@ -2,6 +2,8 @@ import base64
 import json
 import os
 import re
+import secrets
+import string
 import time
 from dataclasses import asdict
 from datetime import datetime, timezone
@@ -11,7 +13,11 @@ from urllib.parse import urljoin
 
 import requests
 
-from .card import build_actor_card_payload, build_user_card_payload
+from .card import (
+    build_actor_card_payload,
+    build_swarm_delegate_payload,
+    build_user_card_payload,
+)
 from .config import (
     ActorRegistryEntry,
     get_actor_registry_entry,
@@ -508,6 +514,84 @@ class AgentDNA:
             raise ValueError("provided AgentDNA instance is not of type agent")
 
         self.update_agent_policy_by_id(agent.get_actor_id(), policy_file=policy_file)
+
+    def create_sub_agent(self, name: str = "") -> str:
+        """
+        Creates a sub-agent of this agent, such as one of a variable number
+        of swarm agents spawned mid-workflow, and returns its actor ID.
+
+        The sub-agent gets its own keys and actor ID, under the name
+        "<this agent's name>-<name>", or "<this agent's name>-<7 random
+        alphanumeric characters>" when no name is given. It isn't registered
+        for whitelisting: it inherits this agent's policy and whitelisting.
+
+        This agent records the delegation as a child provenance card of its
+        own agent card, with a "swarm_delegate" payload naming both agents.
+
+        To sign as the sub-agent, create
+        `AgentDNA(name=<its name>, type="agent", skip_actor_id_registration=True)`
+        with the same config_dir: it loads the same keys. Sub-agents can
+        create sub-agents of their own.
+        """
+
+        if self.type != ACTOR_TYPE_AGENT:
+            raise ValueError("only actors of type 'agent' can create sub-agents")
+
+        suffix = name or "".join(
+            secrets.choice(string.ascii_letters + string.digits) for _ in range(7)
+        )
+        sub_agent_name = f"{self.name}-{suffix}"
+
+        # The sub-agent's keys and actor ID, created the way this agent's were.
+        sub_agent_id = Provenance(
+            name=sub_agent_name,
+            provenance_url=self.provenance.provenance_url,
+            api_key=self.api_key,
+            config_path=self.config_dir,
+            logger=self.logger.bind(sub_agent_name=sub_agent_name),
+            actor_type=ACTOR_TYPE_AGENT,
+        ).provenance_id
+
+        parent_card_id = get_agent_card_id(self.get_actor_id())
+        sub_agent_card_id = get_agent_card_id(sub_agent_id)
+        payload = build_swarm_delegate_payload(
+            parent_agent_id=self.get_actor_id(),
+            sub_agent_id=sub_agent_id,
+            sub_agent_name=sub_agent_name,
+        )
+
+        try:
+            _, tx_id = self.provenance.create_new_child_provenance_card(
+                parent_card_id=parent_card_id,
+                card_info=json.dumps(payload),
+                child_nft_id=sub_agent_card_id,
+            )
+        except Exception as exc:
+            self.logger.error(
+                "agentdna.create_sub_agent.failed",
+                sub_agent_id=sub_agent_id,
+                parent_card_id=parent_card_id,
+                error=str(exc),
+            )
+            raise RuntimeError(f"failed to create sub-agent card, err: {exc}") from exc
+
+        upsert_actor_registry_entry(
+            self.config_dir,
+            ActorRegistryEntry(
+                actor_id=sub_agent_id,
+                actor_name=sub_agent_name,
+                actor_card_id=sub_agent_card_id,
+            ),
+        )
+
+        self.logger.info(
+            "agentdna.create_sub_agent.success",
+            sub_agent_id=sub_agent_id,
+            sub_agent_name=sub_agent_name,
+            card_id=sub_agent_card_id,
+            tx_id=tx_id,
+        )
+        return sub_agent_id
 
     def record(
         self,
