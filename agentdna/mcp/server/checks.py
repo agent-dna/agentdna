@@ -34,7 +34,7 @@ def agent_whitelist_check(
 ):
     """
     Performs a whitelist check, by querying the Admin server, on every actor
-    who signed an envelope in the incoming workflow(s).
+    who signed an envelope in the incoming workflow.
 
     Args:
         dna (AgentDNA): The AgentDNA instance.

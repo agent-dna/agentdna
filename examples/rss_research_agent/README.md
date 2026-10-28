@@ -90,7 +90,7 @@ To add a feed, find its URL on the publisher's site (usually behind an RSS icon 
 |---|---|---|
 | `AGENTDNA_API_KEY` | Your AgentDNA API key, from the [AgentDNA Dashboard](https://dashboard.agentdna.io). Required. | |
 | `PROVENANCE_LAYER_URL` | The AgentDNA Provenance Layer URL. | `https://chain-connector-2.rubix.net` |
-| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether a worker is whitelisted. Required. | |
+| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether every actor in the incoming workflow is whitelisted. Required. | |
 | `USER_NAME` | Name of the user identity that signs requests and records results. | `user_123` |
 | `RSS_ORCHESTRATOR_AGENT_NAME` | Name of the orchestrator's identity. | `RSS Orchestrator Agent` |
 | `RSS_SECURITY_AGENT_NAME` | Name of the security worker's identity. | `RSS Security Agent` |
