@@ -81,7 +81,7 @@ source .venv/bin/activate
 |---|---|---|
 | `AGENTDNA_API_KEY` | Your AgentDNA API key, from the [AgentDNA Dashboard](https://dashboard.agentdna.io). Required. | |
 | `PROVENANCE_LAYER_URL` | The AgentDNA Provenance Layer URL. | `https://chain-connector-2.rubix.net` |
-| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether the agent is whitelisted. | `https://agentdna-admin.agentdna.io` |
+| `ADMIN_SERVER_URL` | The AgentDNA admin server, which the MCP server asks whether every actor in the incoming workflow is whitelisted. | `https://agentdna-admin.agentdna.io` |
 | `USER_NAME` | Name of the user identity that signs requests and records results. Required. | |
 | `GITHUB_AGENT_NAME` | Name of the agent's identity. Required. | |
 | `CBAC_URL` | The CBAC decision service the MCP server asks whether each tool call fits the user's intent. Leave empty for the default (production) service. | |

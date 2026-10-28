@@ -1,6 +1,8 @@
+from urllib.parse import urljoin
+
+import requests
 from fastmcp.server.middleware import MiddlewareContext
 
-from agentdna.admin import request_agent_whitelist_check
 from agentdna.core import AgentDNA
 from agentdna.error import (
     ADMIN_WHITELIST_CHECK_FAILED,
@@ -28,45 +30,55 @@ from .utils import (
 def agent_whitelist_check(
     dna: AgentDNA,
     admin_server_url: str,
-    agent_id: str,
-    incoming_workflow: IntentWorkflow | list[IntentWorkflow],
+    incoming_workflow: IntentWorkflow,
 ):
     """
-    Performs an agent whitelist check by querying the Admin server.
+    Performs a whitelist check, by querying the Admin server, on every actor
+    who signed an envelope in the incoming workflow.
 
     Args:
         dna (AgentDNA): The AgentDNA instance.
         admin_server_url (str): The URL of the Admin server.
-        agent_id (str): The ID of the agent to check.
-        incoming_workflow (IntentWorkflow | list[IntentWorkflow]): The workflow(s) to check.
+        incoming_workflow (IntentWorkflow): IntentWorkflow to fetch actors from.
 
     Raises:
-        RuntimeError: If the agent is not whitelisted or if the check fails.
+        RuntimeError: If any actor is not whitelisted or if the check fails.
     """
-    try:
-        is_whitelisted = request_agent_whitelist_check(admin_server_url, agent_id)
+    actor_ids = incoming_workflow.list_actors()
 
-        if not is_whitelisted:
-            raise AgentNotWhitelistedError(f"Agent {agent_id} not whitelisted")
+    try:
+        response = requests.post(
+            urljoin(admin_server_url, "/agent-admin/v1/whitelist/check"),
+            json={"dids": actor_ids},
+            timeout=300,
+        )
+        response.raise_for_status()
+
+        if not response.json()["status"]:
+            raise Exception("failed to check whitelist from admin server")
+
+        blacklist = response.json()["data"]["blacklist"]
+        if len(blacklist) != 0:
+            raise AgentNotWhitelistedError(f"Actors not whitelisted: {', '.join(blacklist)}")
 
     except AgentNotWhitelistedError as exc:
         build_and_record_failed_workflow(
             dna,
-            payload=f"Agent {agent_id} is not whitelisted",
+            payload=str(exc),
             incoming_workflows=incoming_workflow,
             verification_code=ADMIN_WHITELIST_CHECK_FAILED,
         )
 
         raise RuntimeError(str(exc))
-    except Exception:
+    except Exception as exc:
         build_and_record_failed_workflow(
             dna,
-            payload=f"Failed to check whitelist for agent {agent_id} in Admin server",
+            payload=f"Failed to check whitelist for actors in Admin server, error: {exc}",
             incoming_workflows=incoming_workflow,
             verification_code=ADMIN_WHITELIST_CHECK_SERVER_ERROR,
         )
 
-        raise RuntimeError(f"Failed to check whitelist for agent {agent_id} in Admin server")
+        raise RuntimeError(f"Failed to check whitelist for actors in Admin server: {exc}") from exc
 
 
 def coca_verification(
