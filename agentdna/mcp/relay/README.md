@@ -82,7 +82,7 @@ A server passes a successor workflow down only for a success (`1000`) or a tool 
 `ProvenanceRelay(servers, *, run_ttl_seconds=3600.0, upstream_timeout_seconds=300.0)`
 
 - `servers` maps a name to each MCP server's Streamable HTTP URL. Names may contain letters, digits, `-` and `_`.
-- `session(agent, workflows)` returns a `RelaySession` for `agent` on the workflow(s) it received. It op don't need ens when the `with` block is entered.
+- `session(agent, workflows)` returns a `RelaySession` for `agent` on the workflow(s) it received. It opens when the `with` block is entered.
 - `close()` stops the relay. It also runs at exit.
 
 Create one relay per process and reuse it. Each session signs as the agent that opened it, so one relay serves every agent in the process.

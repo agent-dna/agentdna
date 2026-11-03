@@ -100,7 +100,6 @@ class AgentDNAMCPMiddleware:
             agent_whitelist_check(
                 self.dna,
                 self.dna.agentdna_admin_url,
-                latest_envelope_actor,
                 incoming_workflow,
             )
 
