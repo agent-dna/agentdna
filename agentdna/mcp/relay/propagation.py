@@ -94,7 +94,7 @@ async def begin_tool_call(run: Run, message: dict[str, Any]) -> PendingCall:
     """
     if run.ended is not None:
         raise ToolCallRejected(
-            f"this run's chain has ended ({run.ended.reason}); no further tool calls are made"
+            f"{run.ended.reason}"
         )
 
     params = message.get("params")
