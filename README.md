@@ -614,6 +614,54 @@ Currently supported MCP server integrations:
 - [FastMCP](https://github.com/PrefectHQ/fastmcp) - `from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware`
 - [MCP v2 Python SDK](https://github.com/modelcontextprotocol/python-sdks) - Refer [here](./examples/rss_research_agent/mcp_server_mcp2.py) for a complete usage example
 
+### Sub-agents: agents spawned at runtime
+
+Some workflows create agents while they run, such as a swarm, or an orchestrator that spawns a variable number of workers. Each of these agents needs an identity of its own, but it can't be registered and whitelisted in advance. `create_sub_agent()` covers this case: an existing agent creates a sub-agent that inherits its policy and whitelisting.
+
+```py
+ORCHESTRATOR = AgentDNA(name="research-orchestrator", type="agent", agent_policy_file=..., ...)
+
+worker_id = ORCHESTRATOR.create_sub_agent()               # research-orchestrator-<7 random characters>
+named_id = ORCHESTRATOR.create_sub_agent(name="worker")   # research-orchestrator-worker
+```
+
+Each call:
+
+1. creates the sub-agent's keys and actor ID, under the name `<agent's name>-<name>`, or `<agent's name>-<7 random letters and digits>` when no name is given;
+2. records the delegation as a child provenance card of the agent's own card, with this payload:
+
+```json
+{
+  "type": "swarm_delegate",
+  "parentAgentId": "<parent's actor ID>",
+  "subAgentId": "<sub-agent's actor ID>",
+  "subAgentName": "<sub-agent's name>"
+}
+```
+
+3. returns the sub-agent's actor ID.
+
+The sub-agent isn't registered for whitelisting: it inherits its parent's policy, and it is whitelisted when its parent is. The parent's agent card must already exist. Only actors of type `agent` can create sub-agents, and sub-agents can create sub-agents of their own.
+
+To sign as the sub-agent, create an `AgentDNA` with its name and the parent's `config_dir`. Its keys are loaded, not created again. Its name is in the actor registry, under its actor ID:
+
+```py
+from agentdna.config import get_actor_registry_entry
+
+worker_name = get_actor_registry_entry(ORCHESTRATOR.config_dir, worker_id).actor_name
+
+WORKER = AgentDNA(
+    name=worker_name,
+    type="agent",
+    skip_actor_id_registration=True,
+    config_dir=ORCHESTRATOR.config_dir,
+    api_key="<AgentDNA API Key>",
+    provenance_layer_url="<Provenance Layer URL>",
+)
+```
+
+The sub-agent's envelopes and tool calls carry its own actor ID, so the chain records which spawned agent did what.
+
 ## Authentication evidence 
 
 AgentDNA can record how each request authenticated, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.

@@ -16,3 +16,14 @@ def build_user_card_payload(
         "type": "user_card",
         "id": user_id,
     }
+
+
+def build_swarm_delegate_payload(
+    parent_agent_id: str, sub_agent_id: str, sub_agent_name: str
+) -> dict:
+    return {
+        "type": "swarm_delegate",
+        "parentAgentId": parent_agent_id,
+        "subAgentId": sub_agent_id,
+        "subAgentName": sub_agent_name,
+    }
