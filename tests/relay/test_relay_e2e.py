@@ -268,7 +268,7 @@ def test_in_process_relay_ends_the_run_when_the_server_refuses_a_call(monkeypatc
                 refusal = await client.call_tool("secret", raise_on_error=False)
                 assert refusal.is_error
                 # The relay refuses anything more in this run.
-                with pytest.raises(Exception, match="chain has ended"):
+                with pytest.raises(Exception, match="did not pass CBAC verification"):
                     await client.call_tool("secret")
 
     try:
