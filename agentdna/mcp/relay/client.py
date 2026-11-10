@@ -14,7 +14,7 @@ and builds on it. Once the session is closed, `session.workflows` is the final
 IntentWorkflow(s): the incoming workflow plus every tool call made through it.
 `with` works the same way in synchronous code.
 
-If an MCP server refuses a call - a whitelist, CoCA or CBAC check fails - it
+If an MCP server refuses a call - a whitelist, GRADE or CBAC check fails - it
 records the refusal and that chain ends. The relay then refuses every further
 tool call in the session, and closing it raises `ChainTerminated`: there are
 no workflows to build on or pass forward.

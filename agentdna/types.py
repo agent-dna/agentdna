@@ -295,7 +295,7 @@ class AgentNotWhitelistedError(Exception):
     pass
 
 
-class CoCAVerificationError(Exception):
-    """Raised when a CoCA verification fails."""
+class GradeVerificationError(Exception):
+    """Raised when a GRADE verification fails."""
 
     pass

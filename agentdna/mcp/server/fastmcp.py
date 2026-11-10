@@ -29,7 +29,7 @@ from agentdna.types import IntentWorkflow
 from .checks import (
     agent_whitelist_check,
     cbac_verification,
-    coca_verification,
+    grade_verification,
 )
 from .observer import record_request
 from .types import CbacFn
@@ -82,8 +82,8 @@ class AgentDNAMCPMiddleware(Middleware):
         with agentdna_context(self.dna, incoming_workflow), httpobserver.not_observed():
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
-            # CoCA verification
-            coca_verification(
+            # GRADE verification
+            grade_verification(
                 self.dna,
                 latest_envelope_actor,
                 incoming_workflow,

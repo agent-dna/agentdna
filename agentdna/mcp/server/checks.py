@@ -7,14 +7,14 @@ from agentdna.core import AgentDNA
 from agentdna.error import (
     ADMIN_WHITELIST_CHECK_FAILED,
     ADMIN_WHITELIST_CHECK_SERVER_ERROR,
-    COCA_VERIFICATION_FAILED_UNKNOWN,
+    GRADE_VERIFICATION_FAILED_UNKNOWN,
     MIDDLEWARE_EXECUTION_FAILED,
     RESULT_OK,
 )
 from agentdna.types import (
     VERIFY_HEAVY,
     AgentNotWhitelistedError,
-    CoCAVerificationError,
+    GradeVerificationError,
     IntentWorkflow,
 )
 
@@ -81,13 +81,13 @@ def agent_whitelist_check(
         raise RuntimeError(f"Failed to check whitelist for actors in Admin server: {exc}") from exc
 
 
-def coca_verification(
+def grade_verification(
     dna: AgentDNA,
     agent_id: str,
     incoming_workflow: IntentWorkflow,
 ):
     """
-    Performs CoCA verification for the incoming workflow from the requesting agent.
+    Performs GRADE verification for the incoming workflow from the requesting agent.
 
     Args:
         dna (AgentDNA): The AgentDNA instance.
@@ -95,17 +95,17 @@ def coca_verification(
         incoming_workflow (IntentWorkflow): The workflow to verify.
 
     Raises:
-        RuntimeError: If CoCA verification fails.
+        RuntimeError: If GRADE verification fails.
     """
     try:
         verification_code = dna.verify(incoming_workflow, mode=VERIFY_HEAVY)
 
         if verification_code != RESULT_OK:
-            raise CoCAVerificationError(f"CoCA verification failed for agent {agent_id}")
-    except CoCAVerificationError as exc:
+            raise GradeVerificationError(f"GRADE verification failed for agent {agent_id}")
+    except GradeVerificationError as exc:
         build_and_record_failed_workflow(
             dna,
-            payload=f"CoCA verification failed for agent {agent_id}",
+            payload=f"GRADE verification failed for agent {agent_id}",
             incoming_workflows=incoming_workflow,
             verification_code=verification_code,
         )
@@ -114,13 +114,13 @@ def coca_verification(
     except Exception as exc:
         build_and_record_failed_workflow(
             dna,
-            payload=f"unable to perform CoCA verification for agent {agent_id}, error: {str(exc)}",
+            payload=f"unable to perform GRADE verification for agent {agent_id}, error: {str(exc)}",
             incoming_workflows=incoming_workflow,
-            verification_code=COCA_VERIFICATION_FAILED_UNKNOWN,
+            verification_code=GRADE_VERIFICATION_FAILED_UNKNOWN,
         )
 
         raise RuntimeError(
-            f"Failed to perform CoCA verification for agent {agent_id}: {exc}"
+            f"Failed to perform GRADE verification for agent {agent_id}: {exc}"
         ) from exc
 
 
