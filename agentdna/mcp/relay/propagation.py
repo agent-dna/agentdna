@@ -93,9 +93,7 @@ async def begin_tool_call(run: Run, message: dict[str, Any]) -> PendingCall:
     `_meta.agentdna` and overwrites whatever a client put there.
     """
     if run.ended is not None:
-        raise ToolCallRejected(
-            f"this run's chain has ended ({run.ended.reason}); no further tool calls are made"
-        )
+        raise ToolCallRejected(f"{run.ended.reason}")
 
     params = message.get("params")
     if not isinstance(params, dict):

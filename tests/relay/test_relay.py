@@ -622,7 +622,7 @@ def test_a_refused_call_ends_the_run(sse, tool, reason, status_code):
         calls_seen = len(h.upstream.seen)
         refused = await h.call(run_id, "echo")
         assert refused["error"]["code"] == RELAY_ERROR
-        assert "chain has ended" in refused["error"]["message"]
+        assert refused["error"]["message"] == f"AgentDNA relay: {reason}"
         assert len(h.upstream.seen) == calls_seen
 
         # Closing returns no frontier to build on, and forgets the run.
@@ -645,11 +645,11 @@ def test_a_successor_failing_verification_ends_the_run():
 
         await h.call(run_id, "forged")
         refused = await h.call(run_id, "echo")
-        assert "chain has ended" in refused["error"]["message"]
 
         with pytest.raises(RunEnded) as ended:
             await h.service.close(run_id)
         assert ended.value.details["status_code"] == VERIFICATION_FAILED
+        assert refused["error"]["message"] == f"AgentDNA relay: {ended.value.details['reason']}"
 
     run(scenario())
 
@@ -1168,7 +1168,7 @@ def test_a_session_whose_chain_ended_raises_on_close(relay):
                 refusal = await _tool_call(session.url(), "refused")
                 assert refusal["result"]["isError"] is True
                 refused = await _tool_call(session.url(), "echo")
-                assert "chain has ended" in refused["error"]["message"]
+                assert refused["error"]["message"] == "AgentDNA relay: not whitelisted"
 
         assert ended.value.reason == "not whitelisted"
         assert ended.value.status == 410

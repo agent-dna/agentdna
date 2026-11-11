@@ -258,6 +258,14 @@ class IntentWorkflow:
         unwrapped.sort(key=lambda env: (env.epoch, env.hash), reverse=True)
         return unwrapped
 
+    def list_actors(self) -> list[str]:
+        """
+        Returns the IDs of the actors who signed an envelope in
+        the IntentWorkflow.
+        """
+        envelopes = self.unwrap()
+        return list({envelope.from_ for envelope in envelopes})
+
 
 @dataclass
 class AgentCard:
