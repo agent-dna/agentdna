@@ -10,7 +10,7 @@ github-repository-agent -> langchain_mcp_adapters -> AgentDNA Provenance Relay -
 
 - `manual.py` / `automated.py`: the user signs the request, the agent runs, and the user records the finished chain on the provenance layer.
 - `agents/github_agent/agent.py`: the agent. It opens a Provenance Relay session on the user's workflow, and points `langchain_mcp_adapters` at the session's URL, so every tool call is signed as the agent.
-- `mcp_server.py`: the GitHub MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass CoCA verification, and be allowed by CBAC.
+- `mcp_server.py`: the GitHub MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass GRADE verification, and be allowed by CBAC.
 
 ```py
 PROVENANCE_RELAY = ProvenanceRelay({"github": settings.github_mcp_url})
@@ -23,7 +23,7 @@ async with PROVENANCE_RELAY.session(GITHUB_AGENT, adna_workflow) as session:   #
 reply_workflow = GITHUB_AGENT.build(payload=..., previous_workflows=session.workflows)
 ```
 
-If the MCP server refuses a tool call (whitelist, CoCA or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agent's side.
+If the MCP server refuses a tool call (whitelist, GRADE or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agent's side.
 
 ## Prerequisites
 

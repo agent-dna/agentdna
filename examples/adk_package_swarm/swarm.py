@@ -207,7 +207,7 @@ def mcp_tools() -> dict[str, list[Any]]:
 
 
 class Custody:
-    """AgentDNA's chain of custody across the swarm's turns and hand-offs.
+    """AgentDNA's graph of delegation across the swarm's turns and hand-offs.
 
     Why it exists: ADK, not our code, moves control between members, so there
     is no call of ours where a member could be handed the workflow it should

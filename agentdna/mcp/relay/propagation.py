@@ -10,7 +10,7 @@ JSON-RPC error, so the agent never acts on output that is missing from the
 provenance chain.
 
 A server passes a successor down only for a success (1000) or a tool
-execution failure (4001). Any other failure - a whitelist, CoCA or CBAC check,
+execution failure (4001). Any other failure - a whitelist, GRADE or CBAC check,
 say - is recorded on the provenance layer by the server, and a recorded
 IntentWorkflow is never passed forward: that chain has ended. The server
 reports it as an error result without a 4001 successor (FastMCP 3) or as a
@@ -288,7 +288,7 @@ async def _record_verification_failure(
         failed = await asyncio.to_thread(
             dna.build,
             payload=(
-                "CoCA: failed to verify signature for workflow received from the "
+                "GRADE: failed to verify signature for workflow received from the "
                 f"{successor.get_latest_envelope_actor()}"
             ),
             previous_workflows=successor,

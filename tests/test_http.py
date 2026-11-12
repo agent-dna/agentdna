@@ -13,7 +13,7 @@ from agentdna.auth.sink import ENV_FILE
 from agentdna.error import (
     ANSWER_REFUSED,
     CALL_MISMATCH,
-    COCA_VERIFICATION_FAILED_BOUNDARY,
+    GRADE_VERIFICATION_FAILED_BOUNDARY,
     TOOL_EXECUTION_FAILED,
 )
 from agentdna.http import (
@@ -256,7 +256,7 @@ def test_refuses_a_changed_workflow_without_recording(user, agent, agent_records
     with pytest.raises(RequestRefused) as refused:
         SignedRequest(agent, body, "/task")
 
-    assert refused.value.code == COCA_VERIFICATION_FAILED_BOUNDARY
+    assert refused.value.code == GRADE_VERIFICATION_FAILED_BOUNDARY
     assert (
         agent_records == []
     )  # anyone can send a forged workflow: it must not make us write records

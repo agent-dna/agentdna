@@ -10,7 +10,7 @@ sqlite-analytics-agent -> MCPServerAdapter -> AgentDNA Provenance Relay -> FastM
 
 - `manual.py` / `automated.py`: the user signs the request, the agent runs, and the user records the finished chain on the provenance layer.
 - `agents/sqlite_agent/agent.py`: the agent. It opens a Provenance Relay session on the user's workflow, and points CrewAI's MCP client (`MCPServerAdapter`, in `mcp_client.py`) at the session's URL, so every tool call is signed as the agent.
-- `mcp_server.py`: the SQLite MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass CoCA verification, and be allowed by CBAC.
+- `mcp_server.py`: the SQLite MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass GRADE verification, and be allowed by CBAC.
 
 ```py
 PROVENANCE_RELAY = ProvenanceRelay({"sqlite": settings.sqlite_mcp_url})
@@ -23,7 +23,7 @@ with PROVENANCE_RELAY.session(SQLITE_AGENT, adna_workflow) as session:   # verif
 reply_workflow = SQLITE_AGENT.build(payload=str(output), previous_workflows=session.workflows)
 ```
 
-If the MCP server refuses a tool call (whitelist, CoCA or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agent's side.
+If the MCP server refuses a tool call (whitelist, GRADE or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agent's side.
 
 ## Prerequisites
 

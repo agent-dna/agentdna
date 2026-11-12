@@ -61,7 +61,7 @@ Tool calls that overlap in time form a *batch*. Every call in a batch is signed 
 
 When the relay can't sign a request or can't verify an answer, the agent gets a JSON-RPC error with code `-32050` instead of the result.
 
-A server passes a successor workflow down only for a success (`1000`) or a tool execution failure (`4001`). Any other failure, such as a whitelist, CoCA or CBAC check, is recorded on the provenance layer by the server, and the run's chain ends. So does an answer the relay itself records because it fails verification. When the chain ends:
+A server passes a successor workflow down only for a success (`1000`) or a tool execution failure (`4001`). Any other failure, such as a whitelist, GRADE or CBAC check, is recorded on the provenance layer by the server, and the run's chain ends. So does an answer the relay itself records because it fails verification. When the chain ends:
 
 - the agent gets the error as it was worded;
 - the relay refuses every further tool call in the run, without forwarding it to the server;

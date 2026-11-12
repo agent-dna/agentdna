@@ -44,7 +44,7 @@ async def main() -> None:
         print(f"Answered by: {run.answered_by}\n")
         print(run.result.strip(), flush=True)
 
-    # Commit the whole run's chain of custody to the Provenance Layer.
+    # Commit the whole run's graph of delegation to the Provenance Layer.
     try:
         USER.record(run.adna_workflow)
     except Exception as e:
