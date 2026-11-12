@@ -1,0 +1,35 @@
+_format_version: "3.0"
+
+# Stripe and Jira, behind Kong.
+#   /stripe/v1/refunds        -> https://api.stripe.com/v1/refunds
+#   /jira/rest/api/2/issue    -> https://<your site>.atlassian.net/rest/api/2/issue
+services:
+  - name: stripe
+    url: https://api.stripe.com
+    routes:
+      - name: stripe
+        paths: ["/stripe"]
+        strip_path: true
+    plugins:
+      # Stripe's key, from STRIPE_AUTH in .env, only on calls the gate allowed
+      - name: env-key
+        config:
+          key: "{vault://env/stripe-auth}"
+
+  - name: jira
+    url: https://your-site.atlassian.net   # set your Jira site here
+    routes:
+      - name: jira
+        paths: ["/jira"]
+        strip_path: true
+    plugins:
+      # Jira's key, from JIRA_AUTH in .env, only on calls the gate allowed
+      - name: env-key
+        config:
+          key: "{vault://env/jira-auth}"
+
+# The AgentDNA checks, on every route, so no route can skip them
+plugins:
+  - name: agentdna-gate
+    config:
+      gate_url: http://host.docker.internal:8810
