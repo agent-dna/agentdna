@@ -675,19 +675,7 @@ async def open_issue(request: Request):
 
 *The ADNA gateway*
 
-Gateways like Kong, Azure APIM, Apigee or AWS API Gateway can't run AgentDNA themselves, so they call the ADNA gate service around every call that carries a workflow. It runs next to the gateway, reachable only by it:
-
-```py
-from agentdna.http.gate import create_app
-
-# gateway: the gateway's own AgentDNA identity. cbac_fn: the same CbacFn as the MCP middleware
-app = create_app(gateway, cbac_fn)   # run with any ASGI server, e.g. uvicorn
-```
-
-1. **Before forwarding:** `POST /check {"path", "body", "headers"}`. The gate service runs the whitelist (everyone who signed the workflow), GRADE and CBAC checks. On a yes, it returns the plain call to forward (`method`, `path`, `content_type`, `body`) and the person's `run_id`, so the gateway can fetch their key for the app. On a no, it returns the status and reason, and the refusal is recorded.
-2. **After the app answers:** `POST /answered {"workflow", "status", "content_type", "body"}`. The gate service signs the app's answer, or records the error. The gateway sends back what it returns.
-
-Calls without a workflow aren't AgentDNA's: the gateway handles them as it would without AgentDNA. If the gate service can't be reached, calls with a workflow are refused. [examples/support_refund_agent](examples/support_refund_agent) does all of this with Kong: a support agent refunding a payment in Stripe and logging a ticket in Jira.
+Gateways like Kong, Azure APIM, Apigee or AWS API Gateway can't run AgentDNA themselves. They call the ADNA gate service around every call that carries a workflow: it runs the whitelist, GRADE and CBAC checks before the call reaches the app, and signs the app's answer. The gate service, with a full Kong example, is in [adna-validation-service](https://github.com/agent-dna/adna-validation-service).
 
 *On the wire*
 

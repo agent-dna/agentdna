@@ -4,13 +4,16 @@ Signed HTTP calls. The main README shows how to use them; wire.py has the wire f
     wire.py      what travels on the wire
     client.py    sending:   SignedClient, AsyncSignedClient
     request.py   receiving: SignedRequest, RequestRefused
-    gate.py      the gate service, for gateways (import it directly; it needs starlette)
+
+The gate service, for gateways, is in its own repo: adna-validation-service.
 """
 
-from agentdna.http.client import AnswerRefused, AsyncSignedClient, SignedClient
+from agentdna.http.client import AnswerRefused, AsyncSignedClient, SignedClient, record_failure
 from agentdna.http.request import RequestRefused, SignedRequest
 from agentdna.http.wire import (
     answer_from_body,
+    body_from_text,
+    body_to_text,
     build_http_answer_payload,
     build_http_call_payload,
     workflow_from_body,
@@ -24,8 +27,11 @@ __all__ = [
     "SignedClient",
     "SignedRequest",
     "answer_from_body",
+    "body_from_text",
+    "body_to_text",
     "build_http_answer_payload",
     "build_http_call_payload",
+    "record_failure",
     "workflow_from_body",
     "workflow_to_body",
 ]
