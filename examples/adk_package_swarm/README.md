@@ -1,6 +1,6 @@
 # ADK Package Swarm
 
-A swarm of four Google ADK agents does due diligence on Python packages: should we adopt this package, is this pinned version safe, what should we upgrade to? Gemini is the LLM, and the agents' tools come from a FastMCP server that uses public data needing no API keys. Every member has its own AgentDNA identity, every MCP tool call is signed as the member that made it, and every hand-off is a signed hop: the run ends as one verifiable chain of custody.
+A swarm of four Google ADK agents does due diligence on Python packages: should we adopt this package, is this pinned version safe, what should we upgrade to? Gemini is the LLM, and the agents' tools come from a FastMCP server that uses public data needing no API keys. Every member has its own AgentDNA identity, every MCP tool call is signed as the member that made it, and every hand-off is a signed hop: the run ends as one verifiable graph of delegation.
 
 ## Architecture
 
@@ -79,7 +79,7 @@ ADK: security_agent runs; each of its tool calls is signed on top of the hand-of
 |---|---|
 | `package_tools.py` | The tools, as plain async functions; no MCP or ADK code |
 | `mcp_server.py` | Serves the tools over MCP (Streamable HTTP), behind AgentDNA's middleware and CBAC |
-| `swarm.py` | The agents, their instructions and tools, their AgentDNA identities and chain of custody, and `run_swarm()` |
+| `swarm.py` | The agents, their instructions and tools, their AgentDNA identities and graph of delegation, and `run_swarm()` |
 | `policies/` | Each member's AgentDNA policy, registered with its identity |
 | `manual.py` | Runs one request from the command line |
 | `automated.py` | Runs built-in requests in a loop |
@@ -177,4 +177,4 @@ A run makes a dozen or so Gemini calls. The agents retry Gemini's transient 429 
 `python -m pytest tests -q` needs no network and no keys. It checks:
 - the tools' input validation, and how they parse each API's responses;
 - the swarm's wiring: every member can reach every other, and a request driven by a scripted model flows through ADK's real runner, transfers and tool calls, from the coordinator through each specialist and back;
-- the chain of custody of that run, with stand-in identities and relay: each turn is a session on the workflow that member received, every hand-off is signed by the sender and addressed to the receiver, and the chain records exactly the flow that happened.
+- the graph of delegation of that run, with stand-in identities and relay: each turn is a session on the workflow that member received, every hand-off is signed by the sender and addressed to the receiver, and the chain records exactly the flow that happened.

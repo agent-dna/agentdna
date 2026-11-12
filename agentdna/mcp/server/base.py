@@ -18,7 +18,7 @@ from agentdna.mcp.metadata import (
 )
 from agentdna.types import IntentWorkflow
 
-from .checks import agent_whitelist_check, coca_verification
+from .checks import agent_whitelist_check, grade_verification
 from .observer import record_request
 from .types import CbacFn, CBACVerificationError
 from .utils import build_and_record_failed_workflow
@@ -34,7 +34,7 @@ class AgentDNAMCPMiddleware:
 
         1. Extract the incoming AgentDNA workflow from MCP request `_meta`.
         2. Verify the workflow cryptographically.
-        3. Run CoCA, whitelist, and optional CBAC checks.
+        3. Run Grade, whitelist, and optional CBAC checks.
         4. Execute the MCP request.
         5. Build a successor workflow for successful requests.
         6. Attach the successor to the MCP response metadata.
@@ -91,7 +91,7 @@ class AgentDNAMCPMiddleware:
         ):
             latest_envelope_actor = incoming_workflow.get_latest_envelope_actor()
 
-            coca_verification(
+            grade_verification(
                 self.dna,
                 latest_envelope_actor,
                 incoming_workflow,

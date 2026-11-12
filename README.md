@@ -20,13 +20,13 @@ AgentDNA was built to ensure that every autonomous decision can be identified, v
 
 AgentDNA is built on the following pillars:
 
-### 1. Chain of Custody Authentication (CoCA)
+### 1. Graph of Delegation (GRADE)
 
-Chain of Custody Authentication (CoCA) captures every interaction between participants as a cryptographically signed Envelope.
+Graph of Delegation (GRADE) captures every interaction between participants as a cryptographically signed Envelope.
 
 Rather than treating a workflow as a collection of independent events, every new Envelope wraps the previous one, forming a nested chain that preserves the complete journey of an intent.
 
-Every participant signs only the action they performed, creating a verifiable chain of custody from the original requester to the final outcome.
+Every participant signs only the action they performed, creating a verifiable graph of delegation from the original requester to the final outcome.
 
 ### 2. Context Based Access Control (CBAC)
 
@@ -76,7 +76,7 @@ Following status codes are set:
 | 2001       | Envelope verification failed under `light` mode         |
 | 2002       | Envelope verification failed under `heavy` mode         |
 | 2003       | Envelope verification failed under `boundary` mode      |
-| 2999       | CoCA verification failure for unknown reason            |
+| 2999       | GRADE verification failure for unknown reason            |
 | 4001       | MCP Tool Execution error. A special case where the workflow isn't interrupted |
 | 4002       | Generic Middleware Execution error                      |
 ---
@@ -85,7 +85,7 @@ Following status codes are set:
 
 An `IntentWorkflow` represents the complete lifecycle of an intent.
 
-Rather than storing a sequence of events, AgentDNA stores the latest `Envelope`. Every Envelope recursively references its parent, allowing the entire chain of custody to be reconstructed from a single object.
+Rather than storing a sequence of events, AgentDNA stores the latest `Envelope`. Every Envelope recursively references its parent, allowing the entire graph of delegation to be reconstructed from a single object.
 
 IntentWorkflow is a DTO (Data Transfer Object) that is passed between Actors of the Agentic Workflow.
 
@@ -173,7 +173,7 @@ A Workflow Provenance Card represents a completed `IntentWorkflow`.
 
 Unlike User and Agent Cards, which represent identities, a Workflow Provenance Card captures a complete execution of an intent.
 
-It stores the final `IntentWorkflow`, including the nested Envelope chain and all associated signatures. Since each Envelope references its parent, the stored workflow preserves the complete chain of custody from the initiating Human through every participating Agent and application to the final response.
+It stores the final `IntentWorkflow`, including the nested Envelope chain and all associated signatures. Since each Envelope references its parent, the stored workflow preserves the complete graph of delegation from the initiating Human through every participating Agent and application to the final response.
 
 This immutable record allows the entire workflow to be independently verified and audited at any point in the future.
 
@@ -360,7 +360,7 @@ if verification_code != RESULT_OK:
     raise RuntimeError("Invalid AgentDNA workflow")
 ```
 
-This verifies the chain of custody and evaluates whether the request should be accepted according to the Assistant's policy.
+This verifies the graph of delegation and evaluates whether the request should be accepted according to the Assistant's policy.
 
 Only after successful verification should the Assistant perform its work. When verification fails, the failure should be recorded before the request is rejected.
 
@@ -381,7 +381,7 @@ The final workflow has the following structure:
 Alice ─────────▶ Assistant ─────────▶ Alice
 ```
 
-Notice that the original request is preserved. The Assistant simply appends a new signed Envelope, extending the chain of custody.
+Notice that the original request is preserved. The Assistant simply appends a new signed Envelope, extending the graph of delegation.
 
 **Step 4. Store the completed workflow**
 
@@ -421,9 +421,9 @@ The same mechanism used to secure human-agent communication can also be applied 
 
 Agentic applications frequently allow an agent to access external resources on behalf of a user. This introduces additional security risks: an agent may be manipulated by an untrusted actor or induced to access resources beyond the authority granted by the user.
 
-This is where CoCA and CBAC become relevant.
+This is where GRADE and CBAC become relevant.
 
-We have already seen CoCA in action. CBAC provides an authorization decision for resource access based on the request context and configured authorization policies.
+We have already seen GRADE in action. CBAC provides an authorization decision for resource access based on the request context and configured authorization policies.
 
 Consider the previous example with an MCP server added as the resource provider:
 
@@ -483,7 +483,7 @@ Good to know:
 - `session.url("rss")` uses the name from step 1. One relay can front several MCP servers: call `session.url(name)` for each.
 - The agent doesn't have to call a tool. If it calls none, `session.workflows` is simply the workflow it received.
 - If the incoming workflow fails verification, opening the session raises `WorkflowRejected`. If an MCP server's answer can't be verified, the agent gets an error instead of the result, so it never acts on output that's missing from the chain.
-- If an MCP server refuses a tool call (its whitelist, CoCA or CBAC check fails), it records the refusal, and that chain has ended. The relay then refuses the session's further tool calls, and closing the session raises `ChainTerminated`: stop the run there, and don't build on or pass on its workflow.
+- If an MCP server refuses a tool call (its whitelist, GRADE or CBAC check fails), it records the refusal, and that chain has ended. The relay then refuses the session's further tool calls, and closing the session raises `ChainTerminated`: stop the run there, and don't build on or pass on its workflow.
 - In synchronous code, use `with` instead of `async with`.
 - MCP servers must be reachable over Streamable HTTP.
 
@@ -516,7 +516,7 @@ For how the relay works, see [agentdna/mcp/relay/README.md](agentdna/mcp/relay/R
 The security checks include:
 
 - Agent Whitelisting
-- CoCA Verification
+- GRADE Verification
 - CBAC Verification
 
 These validations are present as individual functions under `agentdna/mcp/server/checks.py`. These can be independently in any form of API Gateway. For MCP Servers, `AgentDNAMCPMiddleware` servers as a convenient option.

@@ -19,9 +19,9 @@ from .config import (
     upsert_actor_registry_entry,
 )
 from .error import (
-    COCA_VERIFICATION_FAILED_BOUNDARY,
-    COCA_VERIFICATION_FAILED_HEAVY,
-    COCA_VERIFICATION_FAILED_LIGHT,
+    GRADE_VERIFICATION_FAILED_BOUNDARY,
+    GRADE_VERIFICATION_FAILED_HEAVY,
+    GRADE_VERIFICATION_FAILED_LIGHT,
     RESULT_OK,
 )
 from .helpers import _hash_content
@@ -664,9 +664,9 @@ class AgentDNA:
                 self.logger.warning(
                     "agentdna.verify.failed",
                     verification_mode=mode,
-                    code=COCA_VERIFICATION_FAILED_LIGHT,
+                    code=GRADE_VERIFICATION_FAILED_LIGHT,
                 )
-                return COCA_VERIFICATION_FAILED_LIGHT
+                return GRADE_VERIFICATION_FAILED_LIGHT
 
         elif mode == VERIFY_HEAVY:
             verification = verify_heavy(
@@ -677,9 +677,9 @@ class AgentDNA:
                 self.logger.warning(
                     "agentdna.verify.failed",
                     verification_mode=mode,
-                    code=COCA_VERIFICATION_FAILED_HEAVY,
+                    code=GRADE_VERIFICATION_FAILED_HEAVY,
                 )
-                return COCA_VERIFICATION_FAILED_HEAVY
+                return GRADE_VERIFICATION_FAILED_HEAVY
 
         elif mode == VERIFY_BOUNDARY:
             verification = verify_boundary(
@@ -690,9 +690,9 @@ class AgentDNA:
                 self.logger.warning(
                     "agentdna.verify.failed",
                     verification_mode=mode,
-                    code=COCA_VERIFICATION_FAILED_BOUNDARY,
+                    code=GRADE_VERIFICATION_FAILED_BOUNDARY,
                 )
-                return COCA_VERIFICATION_FAILED_BOUNDARY
+                return GRADE_VERIFICATION_FAILED_BOUNDARY
         else:
             raise ValueError(f"unsupported verification mode {mode}")
 

@@ -13,7 +13,7 @@ orchestrator -> technology worker ---/
 - `manual.py` / `automated.py`: the user signs the request, the orchestrator runs, and the user records the finished chain on the provenance layer.
 - `agents/rss_orchestrator_agent/agent.py`: the orchestrator. It verifies the user's workflow, delegates the task to both workers at once, verifies their signed reports, and signs a synthesis built on them.
 - `agents/rss_security_agent/agent.py`, `agents/rss_technology_agent/agent.py`: the workers. Each opens its own Provenance Relay session on the orchestrator's delegation and points `langchain_mcp_adapters` at the session's URL (`mcp_client.py`), so each worker's tool calls are signed as that worker.
-- `mcp_server.py`: the RSS MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass CoCA verification, and be allowed by CBAC. It keeps a local SQLite cache of articles.
+- `mcp_server.py`: the RSS MCP server, behind `AgentDNAMCPMiddleware`. Every tool call must come from a whitelisted agent, pass GRADE verification, and be allowed by CBAC. It keeps a local SQLite cache of articles.
 
 ```py
 async with PROVENANCE_RELAY.session(RSS_SECURITY_AGENT, adna_workflow) as session:   # verifies the incoming workflow
@@ -24,7 +24,7 @@ async with PROVENANCE_RELAY.session(RSS_SECURITY_AGENT, adna_workflow) as sessio
 security_adna_workflow = RSS_SECURITY_AGENT.build(payload=..., previous_workflows=session.workflows)
 ```
 
-If the MCP server refuses a worker's tool call (whitelist, CoCA or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agents' side.
+If the MCP server refuses a worker's tool call (whitelist, GRADE or CBAC), it records the refusal and the run stops with an error saying the run's chain has ended, along with the reason. Nothing is recorded on the agents' side.
 
 ## Prerequisites
 

@@ -1,4 +1,4 @@
-"""The swarm's wiring and its chain of custody, driven by a scripted model: no network, no keys.
+"""The swarm's wiring and its graph of delegation, driven by a scripted model: no network, no keys.
 
 The scripted model plays every member. Each specialist calls its tool once and
 then hands off to the next; the coordinator routes the work and writes the
@@ -248,7 +248,7 @@ def test_a_run_without_an_answer_is_an_error_and_closes_its_session(relay):
     assert all(session.closed for session in relay.sessions)
 
 
-# -- the chain of custody --------------------------------------------------------------
+# -- the graph of delegation --------------------------------------------------------------
 
 
 def test_each_turn_is_a_session_on_the_workflow_that_member_received(relay):
