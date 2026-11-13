@@ -36,7 +36,7 @@ class SignedRequest:
     body is text, or bytes if the caller sent a binary body.
 
     url is this request's URL, or its path with the query string. mode is how
-    the workflow is verified (the gate service uses VERIFY_HEAVY). Raises
+    the workflow is verified (the validation service uses VERIFY_HEAVY). Raises
     RequestRefused if there is no signed call, the workflow does not check out,
     or it was signed for another path. A refusal is signed and recorded, but
     only on a workflow that checks out: anyone can send a forged one.

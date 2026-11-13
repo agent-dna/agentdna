@@ -45,7 +45,7 @@ def build_http_call_payload(
 
 
 def build_http_answer_payload(body: str, content_type: str, status: int, encoding: str = "") -> str:
-    """The answer an agent or gate signs: one fixed form, like a call. The status is signed too."""
+    """The answer an agent or validation service signs: one fixed form, like a call. The status is signed too."""
     answer = {"body": body, "content_type": content_type, "status": status}
     if encoding:
         answer["encoding"] = encoding

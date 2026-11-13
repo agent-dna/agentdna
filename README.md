@@ -619,7 +619,7 @@ Currently supported MCP server integrations:
 Most resources are plain REST APIs (GitHub, Jira, internal services) that can't run AgentDNA themselves. For these, the agent signs the exact HTTP call it makes, and an ADNA gateway in front of the app checks it before the app is reached:
 
 ```text
-Alice ──▶ Assistant ──signed HTTP call──▶ Gateway + ADNA gate service ──plain call──▶ App
+Alice ──▶ Assistant ──signed HTTP call──▶ Gateway + ADNA validation service ──plain call──▶ App
                                           checks the call, signs the app's answer
 ```
 
@@ -675,7 +675,7 @@ async def open_issue(request: Request):
 
 *The ADNA gateway*
 
-Gateways like Kong, Azure APIM, Apigee or AWS API Gateway can't run AgentDNA themselves. They call the ADNA gate service around every call that carries a workflow: it runs the whitelist, GRADE and CBAC checks before the call reaches the app, and signs the app's answer. The gate service, with a full Kong example, is in [adna-validation-service](https://github.com/agent-dna/adna-validation-service).
+Gateways like Kong, Azure APIM, Apigee or AWS API Gateway can't run AgentDNA themselves. They call the ADNA validation service around every call that carries a workflow: it runs the whitelist, GRADE and CBAC checks before the call reaches the app, and signs the app's answer. The validation service, with a full Kong example, is in [adna-validation-service](https://github.com/agent-dna/adna-validation-service).
 
 *On the wire*
 
