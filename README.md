@@ -614,6 +614,78 @@ Currently supported MCP server integrations:
 - [FastMCP](https://github.com/PrefectHQ/fastmcp) - `from agentdna.mcp.server.fastmcp import AgentDNAMCPMiddleware`
 - [MCP v2 Python SDK](https://github.com/modelcontextprotocol/python-sdks) - Refer [here](./examples/rss_research_agent/mcp_server_mcp2.py) for a complete usage example
 
+**3. REST calls: signed HTTP and the ADNA gateway**
+
+Most resources are plain REST APIs (GitHub, Jira, internal services) that can't run AgentDNA themselves. For these, the agent signs the exact HTTP call it makes, and an ADNA gateway in front of the app checks it before the app is reached:
+
+```text
+Alice ──▶ Assistant ──signed HTTP call──▶ Gateway + ADNA validation service ──plain call──▶ App
+                                          checks the call, signs the app's answer
+```
+
+Agents that run AgentDNA call each other directly, with the same signed calls: the receiving agent does the checks itself.
+
+*Sending a call*
+
+`SignedClient` is an ordinary `httpx.Client` that signs every call onto the workflow, and checks every answer:
+
+```py
+from agentdna.http import SignedClient
+
+# None: Alice starts the task, there is no workflow yet
+client = SignedClient(user, None, ASSISTANT_URL)
+response = client.post("/issues", json={"title": "Login bug"})
+response.json()                  # the plain answer, with its signed status
+
+# When the task is done, record the whole workflow once
+user.record(client.workflow)
+```
+
+- A successful answer must come back signed, built on this call, with real signatures. Otherwise the call raises `AnswerRefused`, and the refusal is recorded.
+- It signs only for the URL given, so the workflow never goes to another server. Keep `follow_redirects` off (the httpx default).
+- `client.workflow` has the workflow after the call. For async code, use `AsyncSignedClient`.
+- Binary bodies (a PDF, an image) work as well.
+
+*Receiving a call*
+
+`SignedRequest` opens the workflow, verifies it, and checks it was signed for this path. Any framework works:
+
+```py
+from agentdna.http import RequestRefused, SignedRequest
+
+@app.post("/issues")
+async def open_issue(request: Request):
+    try:
+        signed_request = SignedRequest(assistant, await request.body(), str(request.url))
+    except RequestRefused as error:
+        return JSONResponse({"error": error.reason}, status_code=403)
+
+    data = signed_request.json()     # the body the caller signed
+
+    # Calls made from here are signed onto the same workflow
+    client = signed_request.client(GATEWAY_URL)
+    response = client.post("/github/repos/o/r/issues", json={"title": data["title"]})
+
+    return JSONResponse(signed_request.respond({"result": f"Opened issue #{response.json()['number']}"}))
+```
+
+- `.method`, `.path` and `.body` are the signed call. Calls always arrive as POST, so `.method` is the real method.
+- `respond(data)` signs the answer and returns the body to send back. For an error, pass its status: `respond({"error": "..."}, status=500)`. The error is recorded.
+- Refusals and errors are recorded where they happen, with no code. A successful task is recorded once, by whoever started it.
+
+*The ADNA gateway*
+
+Gateways like Kong, Azure APIM, Apigee or AWS API Gateway can't run AgentDNA themselves. They call the ADNA validation service around every call that carries a workflow: it runs the whitelist, GRADE and CBAC checks before the call reaches the app, and signs the app's answer. The validation service, with a full Kong example, is in [adna-validation-service](https://github.com/agent-dna/adna-validation-service).
+
+*On the wire*
+
+For receivers that don't use Python: the body of a call and of an answer is only the signed workflow, `{"agentdna": {"intent_workflow": "<serialized workflow>"}}`. In a call, the newest step signs `{"method", "path", "content_type", "body"}`, and the call itself is always sent as POST. In an answer, it signs `{"body", "content_type", "status"}`. A binary body adds `"encoding": "base64"`. See `agentdna/http/wire.py`.
+
+| Code | Name | When |
+|---|---|---|
+| 2004 | `CALL_MISMATCH` | The call was signed for another path |
+| 2005 | `ANSWER_REFUSED` | An answer isn't signed, or isn't for this call |
+
 ## Authentication evidence 
 
 AgentDNA can record how each request authenticated, including the credential type used on each hop and the authentication an MCP server uses when it calls its own backends.
@@ -642,6 +714,7 @@ AgentDNA currently observes:
   - `X-API-Key`
   - `Api-Key`
 - Authentication used by MCP servers when making HTTP calls to their own backends
+- Signed HTTP calls: the key a caller sends, the key that reaches the ADNA gateway, and the key the gateway sends to the app, with the app's answer. Every hop must use the same `AGENTDNA_FINGERPRINT_KEY`, or one key looks like several
 
 AgentDNA's own outbound calls are not recorded.
 

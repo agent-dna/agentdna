@@ -13,10 +13,12 @@ holds up the call being observed.
 
 from __future__ import annotations
 
+import atexit
 import json
 import os
 import queue
 import threading
+import time
 
 import requests
 
@@ -81,12 +83,25 @@ def _start_sender() -> None:
         if _sender is None:
             _sender = threading.Thread(target=_post_forever, name="agentdna-evidence", daemon=True)
             _sender.start()
+            atexit.register(_drain)
+
+
+def _drain(timeout: float = 5.0) -> None:
+    """At exit, give the records still waiting a moment to be posted.
+
+    A short script (a person starting a task, say) can end right after its
+    last call, before the sender has posted that call's record.
+    """
+    deadline = time.monotonic() + timeout
+    while _waiting.unfinished_tasks and time.monotonic() < deadline:
+        time.sleep(0.05)
 
 
 def _post_forever() -> None:
     """Post records one at a time, for the life of the process.
 
-    A daemon thread, so records still waiting when the process exits are lost.
+    A daemon thread. At exit, _drain waits a few seconds for what is still
+    waiting; anything left after that is lost.
     """
     while True:
         url, record, api_key = _waiting.get()
